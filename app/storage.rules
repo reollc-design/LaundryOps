@@ -1,0 +1,91 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberPath(orgId) {
+      return /databases/(default)/documents/organizations/$(orgId)/memberships/$(request.auth.uid);
+    }
+
+    function isMember(orgId) {
+      return signedIn()
+        && firestore.exists(memberPath(orgId))
+        && firestore.get(memberPath(orgId)).data.status == 'active';
+    }
+
+    function hasRole(orgId, roles) {
+      return isMember(orgId) && firestore.get(memberPath(orgId)).data.role in roles;
+    }
+
+    function hasAssignedLocation(orgId, locationId) {
+      return isMember(orgId)
+        && firestore.get(memberPath(orgId)).data.allowedLocationIds is list
+        && (
+          locationId in firestore.get(memberPath(orgId)).data.allowedLocationIds
+          || 'all' in firestore.get(memberPath(orgId)).data.allowedLocationIds
+        );
+    }
+
+    function hasLocationAccess(orgId, locationId) {
+      return hasRole(orgId, ['owner', 'admin']) || hasAssignedLocation(orgId, locationId);
+    }
+
+    function machineLocation(orgId, machineId) {
+      return firestore.get(/databases/(default)/documents/organizations/$(orgId)/machines/$(machineId)).data.locationId;
+    }
+
+    function workOrderLocation(orgId, workOrderId) {
+      return firestore.get(/databases/(default)/documents/organizations/$(orgId)/workOrders/$(workOrderId)).data.locationId;
+    }
+
+    function isPdf() {
+      return request.resource.contentType == 'application/pdf';
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isReasonableUpload() {
+      return request.resource.size < 25 * 1024 * 1024;
+    }
+
+    match /orgs/{orgId}/manuals/{manualId}/{fileName=**} {
+      allow read: if isMember(orgId);
+      allow write: if hasRole(orgId, ['owner', 'admin', 'manager'])
+        && isReasonableUpload()
+        && isPdf();
+    }
+
+    match /orgs/{orgId}/machines/{machineId}/photos/{fileName=**} {
+      allow read: if hasLocationAccess(orgId, machineLocation(orgId, machineId));
+      allow write: if hasLocationAccess(orgId, machineLocation(orgId, machineId))
+        && isReasonableUpload()
+        && isImage();
+    }
+
+    match /orgs/{orgId}/workOrders/{workOrderId}/attachments/{fileName=**} {
+      allow read: if hasLocationAccess(orgId, workOrderLocation(orgId, workOrderId));
+      allow write: if hasLocationAccess(orgId, workOrderLocation(orgId, workOrderId))
+        && isReasonableUpload()
+        && (isImage() || isPdf());
+    }
+
+    match /orgs/{orgId}/exports/{exportId}/{fileName=**} {
+      allow read: if hasRole(orgId, ['owner', 'admin']);
+      allow write: if false;
+    }
+
+    match /orgs/{orgId}/backups/{backupId}/{fileName=**} {
+      allow read: if hasRole(orgId, ['owner']);
+      allow write: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

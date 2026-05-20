@@ -1,0 +1,205 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberPath(orgId) {
+      return /databases/$(database)/documents/organizations/$(orgId)/memberships/$(request.auth.uid);
+    }
+
+    function isMember(orgId) {
+      return signedIn()
+        && exists(memberPath(orgId))
+        && get(memberPath(orgId)).data.status == 'active';
+    }
+
+    function hasRole(orgId, roles) {
+      return isMember(orgId) && get(memberPath(orgId)).data.role in roles;
+    }
+
+    function hasAssignedLocation(orgId, locationId) {
+      return isMember(orgId)
+        && get(memberPath(orgId)).data.allowedLocationIds is list
+        && (
+          locationId in get(memberPath(orgId)).data.allowedLocationIds
+          || 'all' in get(memberPath(orgId)).data.allowedLocationIds
+        );
+    }
+
+    function hasLocationAccess(orgId, locationId) {
+      return hasRole(orgId, ['owner', 'admin']) || hasAssignedLocation(orgId, locationId);
+    }
+
+    function isOwnerOrAdmin(orgId) {
+      return hasRole(orgId, ['owner', 'admin']);
+    }
+
+    function isOperationsLead(orgId, locationId) {
+      return isOwnerOrAdmin(orgId)
+        || (hasRole(orgId, ['manager']) && hasLocationAccess(orgId, locationId));
+    }
+
+    function unchanged(keys) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys);
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && !request.resource.data.keys().hasAny([
+          'role',
+          'organizationRole',
+          'billingStatus',
+          'subscriptionStatus',
+          'supportAccess'
+        ]);
+      allow delete: if false;
+    }
+
+    match /organizations/{orgId} {
+      allow read: if isMember(orgId);
+      allow create: if signedIn()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.subscriptionStatus == 'trialing'
+        && request.resource.data.keys().hasOnly([
+          'name',
+          'ownerUserId',
+          'createdBy',
+          'createdAt',
+          'subscriptionStatus',
+          'trialStartedAt',
+          'onboardingStatus'
+        ]);
+      allow delete: if false;
+      allow update: if isOwnerOrAdmin(orgId)
+        && unchanged([
+          'billingStatus',
+          'subscriptionStatus',
+          'providerCustomerId',
+          'providerSubscriptionId',
+          'trialStartedAt',
+          'trialEndsAt',
+          'createdAt',
+          'createdBy'
+        ]);
+
+      match /memberships/{userId} {
+        allow read: if isOwnerOrAdmin(orgId) || (signedIn() && request.auth.uid == userId);
+        allow create: if signedIn()
+          && userId == request.auth.uid
+          && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUserId == request.auth.uid
+          && request.resource.data.role == 'owner'
+          && request.resource.data.status == 'active'
+          && request.resource.data.allowedLocationIds is list
+          && 'all' in request.resource.data.allowedLocationIds
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      match /invitations/{inviteId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /locations/{locationId} {
+        allow read: if hasLocationAccess(orgId, locationId);
+        allow create, update, delete: if isOwnerOrAdmin(orgId);
+      }
+
+      match /machines/{machineId} {
+        allow read: if hasLocationAccess(orgId, resource.data.locationId);
+        allow create: if isOperationsLead(orgId, request.resource.data.locationId);
+        allow update: if (
+          isOperationsLead(orgId, resource.data.locationId)
+          && request.resource.data.locationId == resource.data.locationId
+        ) || (
+          hasRole(orgId, ['technician'])
+          && hasLocationAccess(orgId, resource.data.locationId)
+          && request.resource.data.locationId == resource.data.locationId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'lastServicedAt',
+            'updatedAt'
+          ])
+        );
+        allow delete: if isOwnerOrAdmin(orgId);
+      }
+
+      match /workOrders/{workOrderId} {
+        allow read: if hasLocationAccess(orgId, resource.data.locationId);
+        allow create: if isOperationsLead(orgId, request.resource.data.locationId);
+        allow update: if (
+          isOperationsLead(orgId, resource.data.locationId)
+          && request.resource.data.locationId == resource.data.locationId
+        ) || (
+          hasRole(orgId, ['technician'])
+          && hasLocationAccess(orgId, resource.data.locationId)
+          && resource.data.assignedUserId == request.auth.uid
+          && request.resource.data.locationId == resource.data.locationId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'notes',
+            'partsUsed',
+            'completedAt',
+            'updatedAt'
+          ])
+        );
+        allow delete: if isOwnerOrAdmin(orgId);
+      }
+
+      match /maintenanceEvents/{eventId} {
+        allow read: if hasLocationAccess(orgId, resource.data.locationId);
+        allow create: if isOperationsLead(orgId, request.resource.data.locationId)
+          || (
+            hasRole(orgId, ['technician'])
+            && hasLocationAccess(orgId, request.resource.data.locationId)
+          );
+        allow update, delete: if isOwnerOrAdmin(orgId);
+      }
+
+      match /manuals/{manualId} {
+        allow read: if isMember(orgId);
+        allow create, update, delete: if hasRole(orgId, ['owner', 'admin', 'manager']);
+
+        match /chunks/{chunkId} {
+          allow read: if isMember(orgId);
+          allow create, update, delete: if false;
+        }
+      }
+
+      match /files/{fileId} {
+        allow read: if isMember(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /aiDiagnoses/{diagnosisId} {
+        allow read: if hasLocationAccess(orgId, resource.data.locationId);
+        allow create, update, delete: if false;
+      }
+
+      match /subscriptions/{subscriptionId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /auditLogs/{auditLogId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /backups/{backupId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

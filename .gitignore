@@ -1,0 +1,23 @@
+# Node / build
+node_modules/
+dist/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Firebase local runtime/cache
+app/.firebase-local-config/
+app/.firebase-local-emulators/
+
+# Local bundled tools
+app/.tools/
+
+# Logs
+*.log
+app/firestore-debug.log
+
+# OS/editor
+.DS_Store
+Thumbs.db

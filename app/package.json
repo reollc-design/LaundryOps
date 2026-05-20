@@ -1,0 +1,29 @@
+{
+  "name": "laundryops-mobile-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --configLoader runner",
+    "build": "vite build --configLoader runner",
+    "lint": "tsc --noEmit",
+    "firebase:emulators": "firebase\\run-emulators.cmd",
+    "test:rules": "firebase\\run-rules-tests.cmd"
+  },
+  "dependencies": {
+    "firebase": "^12.13.0",
+    "lucide-react": "^0.468.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "firebase-tools": "^13.35.1",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.6"
+  }
+}
