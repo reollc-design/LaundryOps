@@ -26,6 +26,7 @@ server-*.err.txt
 # Local browser preview profiles/screenshots
 chrome-preview-profile*/
 main-screen-current.png
+*-render-check.png
 
 # OS/editor
 .DS_Store
