@@ -14,8 +14,10 @@ const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
 const DEFAULT_TRIAL_DAYS = 14;
-const DEFAULT_STRIPE_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
+const DEFAULT_MONTHLY_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
+const DEFAULT_ANNUAL_PRICE_ID = 'price_1TaMprJkHhybNz7FHvsmgQdh';
 const DEFAULT_APP_URL = 'https://laundryops-maintenance-app.web.app';
+type BillingPlanKey = 'monthly' | 'annual';
 
 function ensureFirebaseAdmin(): void {
   if (getApps().length === 0) {
@@ -59,6 +61,18 @@ function trialDaysFromEnv(): number {
     return DEFAULT_TRIAL_DAYS;
   }
   return parsed;
+}
+
+function billingPlanFromRequest(value: unknown): BillingPlanKey {
+  return value === 'monthly' ? 'monthly' : 'annual';
+}
+
+function priceIdForBillingPlan(plan: BillingPlanKey): string {
+  if (plan === 'monthly') {
+    return getEnv('STRIPE_MONTHLY_PRICE_ID', getEnv('STRIPE_PRICE_ID', DEFAULT_MONTHLY_PRICE_ID));
+  }
+
+  return getEnv('STRIPE_ANNUAL_PRICE_ID', DEFAULT_ANNUAL_PRICE_ID);
 }
 
 function toDateOrNull(epochSeconds: number | null | undefined): Date | null {
@@ -185,6 +199,7 @@ export const createStripeCheckoutSession = onRequest(
     try {
       const caller = await requireVerifiedCaller(request);
       const organizationId = requireString(request.body?.organizationId, 'organizationId');
+      const billingPlan = billingPlanFromRequest(request.body?.billingPlan);
       await assertOwnerOrAdmin(organizationId, caller.uid);
 
       const stripe = getStripeClient();
@@ -194,7 +209,7 @@ export const createStripeCheckoutSession = onRequest(
         email: caller.email,
       });
 
-      const priceId = getEnv('STRIPE_PRICE_ID', DEFAULT_STRIPE_PRICE_ID);
+      const priceId = priceIdForBillingPlan(billingPlan);
       const successUrl = getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account?billing=success`);
       const cancelUrl = getEnv('STRIPE_CANCEL_URL', successUrl);
       const trialDays = trialDaysFromEnv();
@@ -210,11 +225,13 @@ export const createStripeCheckoutSession = onRequest(
         metadata: {
           organizationId,
           ownerUserId: caller.uid,
+          billingPlan,
         },
         subscription_data: {
           trial_period_days: trialDays,
           metadata: {
             organizationId,
+            billingPlan,
           },
         },
       });
@@ -224,6 +241,7 @@ export const createStripeCheckoutSession = onRequest(
         checkoutUrl: session.url,
         sessionId: session.id,
         trialDays,
+        billingPlan,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not start subscription checkout.';

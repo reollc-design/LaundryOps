@@ -3,11 +3,14 @@ import { getFirebaseClient } from './client';
 
 export interface BillingCheckoutInput {
   organizationId: string;
+  billingPlan: BillingPlanKey;
 }
 
 export interface BillingPortalInput {
   organizationId: string;
 }
+
+export type BillingPlanKey = 'monthly' | 'annual';
 
 interface BillingEndpointResponse {
   ok?: boolean;
@@ -67,7 +70,10 @@ export async function startStripeCheckout(input: BillingCheckoutInput): Promise<
     throw new Error('Missing organization ID.');
   }
 
-  const data = await callBillingEndpoint('createStripeCheckoutSession', { organizationId });
+  const data = await callBillingEndpoint('createStripeCheckoutSession', {
+    organizationId,
+    billingPlan: input.billingPlan,
+  });
   if (!data.checkoutUrl) {
     throw new Error('Checkout URL was not returned.');
   }

@@ -58,7 +58,7 @@ import type { AccountStat, LocationSummary, MachineStatus, ManualStatus, Onboard
 import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
 import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
-import { openStripeBillingPortal, startStripeCheckout } from './firebase/billing';
+import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { createWorkOrderFromDraft, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
@@ -70,6 +70,31 @@ type MachineFilter = 'all' | MachineStatus;
 type WorkOrderStatusFilter = 'all' | Exclude<WorkOrderStatus, 'in-progress'>;
 type WorkOrderPriorityFilter = 'all' | WorkOrderPriority;
 type BillingAction = 'checkout' | 'portal';
+
+const billingPlans: {
+  key: BillingPlanKey;
+  name: string;
+  price: string;
+  cadence: string;
+  detail: string;
+  recommended?: boolean;
+}[] = [
+  {
+    key: 'annual',
+    name: 'Annual',
+    price: '$149.99',
+    cadence: '/ year',
+    detail: 'Best value - save $29.89 per year',
+    recommended: true,
+  },
+  {
+    key: 'monthly',
+    name: 'Monthly',
+    price: '$14.99',
+    cadence: '/ month',
+    detail: 'Billed monthly after trial',
+  },
+];
 
 const navItems: { key: TabKey; label: string; icon: typeof Home }[] = [
   { key: 'home', label: 'Home', icon: Home },
@@ -352,7 +377,7 @@ export function App() {
       return getAuthErrorMessage(error);
     }
   };
-  const handleStartSubscription = async (): Promise<void> => {
+  const handleStartSubscription = async (billingPlan: BillingPlanKey): Promise<void> => {
     setBillingError(null);
 
     if (!defaultOrganizationId) {
@@ -364,6 +389,7 @@ export function App() {
     try {
       const checkoutUrl = await startStripeCheckout({
         organizationId: defaultOrganizationId,
+        billingPlan,
       });
       window.location.assign(checkoutUrl);
     } catch (error) {
@@ -1742,9 +1768,12 @@ function AccountScreen({
   onSignOut: () => Promise<void>;
   billingBusyAction: BillingAction | null;
   billingError: string | null;
-  onStartSubscription: () => Promise<void>;
+  onStartSubscription: (billingPlan: BillingPlanKey) => Promise<void>;
   onManageBilling: () => Promise<void>;
 }) {
+  const [selectedBillingPlan, setSelectedBillingPlan] = useState<BillingPlanKey>('annual');
+  const selectedPlan = billingPlans.find((plan) => plan.key === selectedBillingPlan) ?? billingPlans[0];
+
   return (
     <div className="screen-stack">
       <section className="account-hero">
@@ -1834,8 +1863,8 @@ function AccountScreen({
 
       <section className="content-section subscription-card">
         <div className="section-heading">
-          <h2>Subscription Model</h2>
-          <span>Recommended</span>
+          <h2>Choose your plan after your 14-day free trial</h2>
+          <span>Annual recommended</span>
         </div>
         <div className="subscription-line">
           <CreditCard size={18} />
@@ -1844,19 +1873,37 @@ function AccountScreen({
             <span>Base plan includes one location. Additional locations are paid add-ons under the same login.</span>
           </div>
         </div>
-        <div className="subscription-rule">
-          <span>Why this wins</span>
-          <strong>Owners get one account, one bill, and one dashboard across all stores.</strong>
+        <div className="billing-plan-grid" role="radiogroup" aria-label="Subscription plan">
+          {billingPlans.map((plan) => (
+            <button
+              key={plan.key}
+              className={`billing-plan-option ${selectedBillingPlan === plan.key ? 'is-selected' : ''}`}
+              type="button"
+              role="radio"
+              aria-checked={selectedBillingPlan === plan.key}
+              onClick={() => setSelectedBillingPlan(plan.key)}
+            >
+              <span className="billing-plan-header">
+                <strong>{plan.name}</strong>
+                {plan.recommended && <small>Best value</small>}
+              </span>
+              <span className="billing-plan-price">
+                <b>{plan.price}</b>
+                <em>{plan.cadence}</em>
+              </span>
+              <span className="billing-plan-detail">{plan.detail}</span>
+            </button>
+          ))}
         </div>
         <div className="subscription-actions">
           <button
             className="primary-action"
             type="button"
             disabled={!orgConnected || billingBusyAction !== null}
-            onClick={() => void onStartSubscription()}
+            onClick={() => void onStartSubscription(selectedBillingPlan)}
           >
             <CreditCard size={18} />
-            {billingBusyAction === 'checkout' ? 'Starting...' : 'Start Subscription'}
+            {billingBusyAction === 'checkout' ? 'Starting...' : `Start ${selectedPlan.name} Plan`}
           </button>
           <button
             className="secondary-action"

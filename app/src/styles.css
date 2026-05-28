@@ -2632,6 +2632,14 @@ button:focus-visible {
   padding: 14px;
 }
 
+.subscription-card .section-heading {
+  align-items: flex-start;
+}
+
+.subscription-card .section-heading h2 {
+  max-width: 230px;
+}
+
 .subscription-line {
   display: grid;
   grid-template-columns: 28px 1fr;
@@ -2663,6 +2671,76 @@ button:focus-visible {
 
 .subscription-rule strong {
   margin-top: 4px;
+}
+
+.billing-plan-grid {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.billing-plan-option {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  text-align: left;
+}
+
+.billing-plan-option.is-selected {
+  border-color: var(--primary);
+  background: #f6f9ff;
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.billing-plan-header,
+.billing-plan-price {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.billing-plan-header strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 950;
+}
+
+.billing-plan-header small {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #e8f1ff;
+  color: var(--primary);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.billing-plan-price b {
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 950;
+}
+
+.billing-plan-price em {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.billing-plan-detail {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  font-weight: 700;
 }
 
 .subscription-actions {
