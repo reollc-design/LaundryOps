@@ -13,10 +13,14 @@ The app now has local Firebase scaffold files at the app root:
 - `firebase/rules.test.ts` - automated emulator tests for the highest-risk security cases.
 - `src/firebase/client.ts` - Firebase app/auth/firestore/storage client bootstrap with optional emulator routing.
 - `src/firebase/auth.ts` - shared auth actions for sign-in, owner account creation, and sign-out.
+- `src/firebase/manuals.ts` - manual upload + index + Repair Assist function callers.
 - `src/hooks/useAuthSession.ts` - auth session subscription hook for UI state.
+- `src/hooks/useOrganizationManuals.ts` - live manual collection subscription hook.
 - `.env.example` - required Vite environment keys for Firebase web client setup.
 - `functions/src/index.ts` - Stripe billing endpoints (Checkout + Billing Portal) and webhook scaffold.
 - `firebase/stripe-setup.md` - Stripe dashboard + key + webhook setup guide.
+- `firebase/manual-ai-setup.md` - setup guide for manual indexing and OpenAI-backed Repair Assist.
+- `firebase/beta-test-checklist.md` - launch-critical beta test checklist.
 - `.tools/jdk11/` - local bundled JDK used only for Firebase emulator commands in this workspace.
 - `.firebase-local-emulators/` - local cache path for downloaded emulator binaries inside the workspace.
 
@@ -31,8 +35,6 @@ Current live pieces:
 - Hosting target: `laundryops`.
 - Deployed Functions: `createStripeCheckoutSession`, `createStripeBillingPortalSession`, and `stripeWebhook`.
 - Functions runtime: Node.js 22.
-
-The frontend still needs real `VITE_FIREBASE_*` values before hosted auth and Firestore data calls are fully live.
 
 The rules run against local emulators using the bundled workspace JDK. The Vitest rules suite passes 11/11, though the Firebase CLI wrapper can still return a local shutdown/update-check error after the tests complete.
 
@@ -57,10 +59,9 @@ The Firebase web config is allowed in the app later, but server secrets belong i
 
 ## Next Build Step
 
-Add the real Firebase web app config values to the frontend environment, then verify:
+Deploy and verify the manual + AI functions:
 
-1. Create account.
-2. Complete company/location/machine setup.
-3. See live Firestore data in the app.
-4. Start Stripe Checkout.
-5. Confirm the Stripe webhook updates the organization subscription fields.
+1. `indexOrganizationManual`
+2. `generateRepairAssist`
+3. Set `OPENAI_API_KEY` in Firebase secrets.
+4. Run the checklist in `firebase/beta-test-checklist.md`.

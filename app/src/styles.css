@@ -2379,6 +2379,13 @@ button:focus-visible {
   font-weight: 700;
 }
 
+.upload-form input[type="file"] {
+  min-height: 42px;
+  padding: 7px 8px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
 .upload-status-line {
   display: flex;
   align-items: center;
@@ -3017,6 +3024,26 @@ button:focus-visible {
   background: #fff;
 }
 
+.toggle-off {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: #c6cedf;
+}
+
+.toggle-off::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+}
+
 .ai-result-card {
   padding: 12px;
   border-color: #d8d2ff;
@@ -3067,6 +3094,42 @@ button:focus-visible {
 .result-section ol {
   margin: 0;
   padding-left: 17px;
+}
+
+.assist-answer-copy p {
+  margin: 0 0 7px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.assist-answer-copy p:last-child {
+  margin-bottom: 0;
+}
+
+.assist-citation-list {
+  margin: 0;
+  padding-left: 17px;
+}
+
+.assist-citation-list li {
+  margin-bottom: 6px;
+}
+
+.assist-citation-list strong {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.assist-citation-list span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 700;
 }
 
 .confidence-card {

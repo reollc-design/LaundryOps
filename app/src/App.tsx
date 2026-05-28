@@ -59,10 +59,12 @@ import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
 import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
+import { generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
 import { createWorkOrderFromDraft, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationLocations } from './hooks/useOrganizationLocations';
+import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
@@ -257,6 +259,7 @@ export function App() {
   const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
   const orgLocations = useOrganizationLocations(authSession.user, defaultOrganizationId);
+  const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
   const machineCatalogData = orgConnected ? orgMachines.machines : machineCatalog;
   const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
@@ -591,7 +594,16 @@ export function App() {
                 {activeScreen === 'machine-detail' && (
                   <MachineDetailScreen setActiveScreen={setActiveScreen} onCreateWorkOrder={() => openCreateWorkOrder('machine-detail')} />
                 )}
-                {activeScreen === 'manuals' && <ManualLibraryScreen setActiveScreen={setActiveScreen} />}
+                {activeScreen === 'manuals' && (
+                  <ManualLibraryScreen
+                    setActiveScreen={setActiveScreen}
+                    orgConnected={orgConnected}
+                    organizationId={defaultOrganizationId}
+                    orgManualsLoading={orgManuals.loading}
+                    orgManualsError={orgManuals.error}
+                    orgManualsData={orgManuals.manuals}
+                  />
+                )}
                 {activeScreen === 'account' && (
                   <AccountScreen
                     authSession={authSession}
@@ -638,7 +650,13 @@ export function App() {
                     onUpdateStatus={handleUpdateSelectedWorkOrderStatus}
                   />
                 )}
-                {activeScreen === 'ai-assist' && <RepairAssistScreen onCreateWorkOrder={() => openCreateWorkOrder('ai-assist')} />}
+                {activeScreen === 'ai-assist' && (
+                  <RepairAssistScreen
+                    onCreateWorkOrder={() => openCreateWorkOrder('ai-assist')}
+                    orgConnected={orgConnected}
+                    organizationId={defaultOrganizationId}
+                  />
+                )}
                 {activeScreen === 'reports' && <ReportsScreen />}
               </div>
               <BottomNav activeScreen={activeScreen} setActiveScreen={setActiveScreen} />
@@ -1630,18 +1648,79 @@ function MachineDetailScreen({
   );
 }
 
-function ManualLibraryScreen({ setActiveScreen }: { setActiveScreen: (screen: ScreenKey) => void }) {
+function ManualLibraryScreen({
+  setActiveScreen,
+  orgConnected,
+  organizationId,
+  orgManualsLoading,
+  orgManualsError,
+  orgManualsData,
+}: {
+  setActiveScreen: (screen: ScreenKey) => void;
+  orgConnected: boolean;
+  organizationId: string | null;
+  orgManualsLoading: boolean;
+  orgManualsError: string | null;
+  orgManualsData: ManualLibraryRow[];
+}) {
   const [showUpload, setShowUpload] = useState(false);
-  const [queuedManual, setQueuedManual] = useState(false);
-  const indexedCount = manualRows.filter((manual) => manual.status === 'indexed').length + (queuedManual ? 1 : 0);
-  const missingCount = manualRows.filter((manual) => manual.status === 'missing').length - (queuedManual ? 1 : 0);
+  const [machineModel, setMachineModel] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
+  const [filePickerKey, setFilePickerKey] = useState(0);
+
+  const fallbackManualRows: ManualLibraryRow[] = manualRows.map((manual) => ({
+    ...manual,
+    indexError: null,
+  }));
+  const manualData = orgConnected ? orgManualsData : fallbackManualRows;
+  const indexedCount = manualData.filter((manual) => manual.status === 'indexed').length;
+  const missingCount = manualData.filter((manual) => manual.status === 'missing').length;
+
+  const handleUpload = async (): Promise<void> => {
+    setUploadError(null);
+    setUploadSuccess(null);
+
+    if (!orgConnected || !organizationId) {
+      setUploadError('Complete onboarding first to connect manual uploads to your organization account.');
+      return;
+    }
+    if (!machineModel.trim()) {
+      setUploadError('Enter the machine model first.');
+      return;
+    }
+    if (!selectedFile) {
+      setUploadError('Choose a PDF file before processing.');
+      return;
+    }
+
+    setUploadBusy(true);
+    try {
+      await uploadManualAndIndex({
+        organizationId,
+        machineModel: machineModel.trim(),
+        file: selectedFile,
+        linkedMachineCount: 0,
+      });
+      setUploadSuccess(`Manual uploaded and indexed for ${machineModel.trim()}.`);
+      setMachineModel('');
+      setSelectedFile(null);
+      setFilePickerKey((value) => value + 1);
+    } catch (error) {
+      setUploadError(getErrorMessage(error, 'Could not upload and index manual. Try again.'));
+    } finally {
+      setUploadBusy(false);
+    }
+  };
 
   return (
     <div className="screen-stack">
       <section className="manual-summary">
         <div>
           <span>Manual Coverage</span>
-          <strong>{indexedCount}/3</strong>
+          <strong>{indexedCount}</strong>
           <small>machine models grounded</small>
         </div>
         <div>
@@ -1663,40 +1742,72 @@ function ManualLibraryScreen({ setActiveScreen }: { setActiveScreen: (screen: Sc
           <div className="upload-form">
             <label>
               <span>Machine Model</span>
-              <input value="Combo 100 Series" readOnly />
+              <input
+                value={machineModel}
+                placeholder="Ex: Speed Queen SC40"
+                onChange={(event) => setMachineModel(event.target.value)}
+                disabled={uploadBusy}
+              />
             </label>
             <label>
-              <span>Manual File</span>
-              <input value="combo-100-service-manual.pdf" readOnly />
+              <span>Manual PDF</span>
+              <input
+                key={filePickerKey}
+                type="file"
+                accept="application/pdf,.pdf"
+                onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                disabled={uploadBusy}
+              />
             </label>
-            <div className="upload-status-line">
-              <Check size={15} />
-              <span>PDF ready to index and link to 10 machines.</span>
-            </div>
+            {selectedFile && (
+              <div className="upload-status-line">
+                <Check size={15} />
+                <span>{selectedFile.name} ready to upload and index.</span>
+              </div>
+            )}
           </div>
         )}
         <button
-          className={queuedManual ? 'secondary-action full-width-action' : 'primary-action'}
+          className={uploadBusy ? 'secondary-action full-width-action' : 'primary-action'}
           type="button"
           onClick={() => {
-            if (showUpload) {
-              setQueuedManual(true);
+            if (!showUpload) {
+              setShowUpload(true);
+              return;
             }
-            setShowUpload(true);
+            void handleUpload();
           }}
+          disabled={uploadBusy}
         >
-          {queuedManual ? 'Manual Queued for Indexing' : showUpload ? 'Process Manual' : 'Upload Manual'}
+          {uploadBusy ? 'Processing Manual...' : showUpload ? 'Process Manual' : 'Upload Manual'}
         </button>
+        {!orgConnected && (
+          <p className="search-hint">Complete onboarding first to connect manual uploads to your organization account.</p>
+        )}
+        {uploadError && (
+          <div className="auth-message">
+            <strong>Manual upload failed</strong>
+            <span>{uploadError}</span>
+          </div>
+        )}
+        {uploadSuccess && (
+          <div className="profile-status-line">
+            <Check size={16} />
+            <span>{uploadSuccess}</span>
+          </div>
+        )}
       </section>
 
       <section className="content-section">
         <div className="section-heading">
           <h2>Linked Manuals</h2>
-          <span>{manualRows.length} models</span>
+          <span>{manualData.length} models</span>
         </div>
+        {orgConnected && orgManualsLoading && <p className="search-hint">Refreshing manuals from your company data...</p>}
+        {orgConnected && orgManualsError && <p className="empty-state">Could not load live manuals: {orgManualsError}</p>}
         <div className="manual-list">
-          {manualRows.map((manual) => (
-            <ManualRow key={manual.id} manual={manual} queuedManual={queuedManual && manual.id === 'manual-combo'} />
+          {manualData.map((manual) => (
+            <ManualRow key={manual.id} manual={manual} />
           ))}
         </div>
       </section>
@@ -1716,8 +1827,8 @@ function ManualLibraryScreen({ setActiveScreen }: { setActiveScreen: (screen: Sc
   );
 }
 
-function ManualRow({ manual, queuedManual }: { manual: (typeof manualRows)[number]; queuedManual: boolean }) {
-  const status: ManualStatus = queuedManual ? 'processing' : manual.status;
+function ManualRow({ manual }: { manual: ManualLibraryRow }) {
+  const status: ManualStatus = manual.status;
   const statusLabel: Record<ManualStatus, string> = {
     indexed: 'Indexed',
     processing: 'Processing',
@@ -1730,13 +1841,13 @@ function ManualRow({ manual, queuedManual }: { manual: (typeof manualRows)[numbe
       </div>
       <div className="manual-row-main">
         <strong>{manual.model}</strong>
-        <span>{queuedManual ? 'combo-100-service-manual.pdf' : manual.title}</span>
-        <small>{queuedManual ? 'Indexing manual and linking machines' : manual.source}</small>
+        <span>{manual.title}</span>
+        <small>{manual.source}</small>
       </div>
       <div className="manual-row-meta">
         <StatusBadge status={status === 'indexed' ? 'running' : status === 'processing' ? 'waiting' : 'down'}>{statusLabel[status]}</StatusBadge>
-        <span>{queuedManual ? '10 machines linked' : manual.coverage}</span>
-        <small>{queuedManual ? 'Processing now' : manual.pages}</small>
+        <span>{manual.coverage}</span>
+        <small>{manual.pages}</small>
       </div>
     </div>
   );
@@ -2469,7 +2580,61 @@ function WorkOrderDetailScreen({
   );
 }
 
-function RepairAssistScreen({ onCreateWorkOrder }: { onCreateWorkOrder: () => void }) {
+function RepairAssistScreen({
+  onCreateWorkOrder,
+  orgConnected,
+  organizationId,
+}: {
+  onCreateWorkOrder: () => void;
+  orgConnected: boolean;
+  organizationId: string | null;
+}) {
+  const [machineModel, setMachineModel] = useState('Speed Queen SC40');
+  const [symptoms, setSymptoms] = useState('Water remains after final spin');
+  const [errorCode, setErrorCode] = useState('E04');
+  const [manualGroundingEnabled, setManualGroundingEnabled] = useState(true);
+  const [assistBusy, setAssistBusy] = useState(false);
+  const [assistError, setAssistError] = useState<string | null>(null);
+  const [assistAnswer, setAssistAnswer] = useState<string | null>(null);
+  const [assistManualTitle, setAssistManualTitle] = useState<string | null>(null);
+  const [assistGrounded, setAssistGrounded] = useState(false);
+  const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
+
+  const runRepairAssist = async (): Promise<void> => {
+    setAssistError(null);
+
+    if (!manualGroundingEnabled) {
+      setAssistAnswer('Manual grounding is turned off. Enable it to get manual-backed repair guidance.');
+      setAssistGrounded(false);
+      setAssistManualTitle(null);
+      setAssistCitations([]);
+      return;
+    }
+
+    if (!orgConnected || !organizationId) {
+      setAssistError('Complete onboarding first so Repair Assist can use your organization manuals.');
+      return;
+    }
+
+    setAssistBusy(true);
+    try {
+      const result = await generateManualRepairAssist({
+        organizationId,
+        machineModel,
+        symptoms,
+        errorCode,
+      });
+      setAssistAnswer(result.answer);
+      setAssistGrounded(result.grounded);
+      setAssistManualTitle(result.manual?.title ?? null);
+      setAssistCitations(result.citations);
+    } catch (error) {
+      setAssistError(getErrorMessage(error, 'Could not generate manual-grounded guidance.'));
+    } finally {
+      setAssistBusy(false);
+    }
+  };
+
   return (
     <div className="screen-stack">
       <section className="assist-machine-card">
@@ -2484,12 +2649,16 @@ function RepairAssistScreen({ onCreateWorkOrder }: { onCreateWorkOrder: () => vo
 
       <section className="assist-form">
         <label>
+          <span>Machine model</span>
+          <input value={machineModel} onChange={(event) => setMachineModel(event.target.value)} />
+        </label>
+        <label>
           <span>Symptoms</span>
-          <input value="Water remains after final spin" readOnly />
+          <input value={symptoms} onChange={(event) => setSymptoms(event.target.value)} />
         </label>
         <label>
           <span>Error Code</span>
-          <input value="E04" readOnly />
+          <input value={errorCode} onChange={(event) => setErrorCode(event.target.value)} />
         </label>
         <div className="assist-photos">
           <PhotoTile variant="pump" large />
@@ -2498,34 +2667,73 @@ function RepairAssistScreen({ onCreateWorkOrder }: { onCreateWorkOrder: () => vo
         <div className="manual-toggle">
           <div>
             <strong>Use linked manual</strong>
-            <span>Speed Queen SC40 Service Manual found</span>
+            <span>{assistManualTitle ? `${assistManualTitle} found` : 'Manual source will appear after generation'}</span>
           </div>
-          <button className="toggle-on" type="button" role="switch" aria-checked="true" aria-label="Manual grounding on" />
+          <button
+            className={manualGroundingEnabled ? 'toggle-on' : 'toggle-off'}
+            type="button"
+            role="switch"
+            aria-checked={manualGroundingEnabled}
+            aria-label="Manual grounding on"
+            onClick={() => setManualGroundingEnabled((value) => !value)}
+          />
         </div>
+        <button className="secondary-action full-width-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
+          {assistBusy ? 'Generating...' : 'Generate Manual Answer'}
+        </button>
+        {!orgConnected && <p className="search-hint">Complete onboarding first to run live Repair Assist.</p>}
+        {assistError && (
+          <div className="auth-message">
+            <strong>Repair Assist failed</strong>
+            <span>{assistError}</span>
+          </div>
+        )}
       </section>
 
       <section className="ai-result-card">
         <div className="manual-source-banner">
           <BookOpen size={16} />
-          <span>Manual-grounded answer / p. 42 Drain Pump Test</span>
+          <span>
+            {assistManualTitle
+              ? `Manual-grounded answer / ${assistManualTitle}`
+              : 'Run Generate Manual Answer to pull guidance from indexed manuals'}
+          </span>
         </div>
         <div className="result-grid">
           <div className="result-main">
-            <ResultSection title="Likely cause">Drain pump is not clearing water.</ResultSection>
-            <ResultSection title="Inspect first">Check drain pump for blockage or impeller damage.</ResultSection>
-            <ResultSection title="Next steps">
-              <ol>
-                <li>Remove lower front panel.</li>
-                <li>Inspect drain pump and filter.</li>
-                <li>Clear debris and test pump.</li>
-              </ol>
-            </ResultSection>
-            <ResultSection title="Parts to check">Drain pump assembly, hose clamp.</ResultSection>
-            <ResultSection title="Safety note">Unplug machine before working on drain system.</ResultSection>
+            {assistAnswer ? (
+              <>
+                <ResultSection title="Repair guidance">
+                  <div className="assist-answer-copy">
+                    {assistAnswer.split('\n').map((line, index) => (
+                      <p key={`${line}-${index}`}>{line}</p>
+                    ))}
+                  </div>
+                </ResultSection>
+                {assistCitations.length > 0 && (
+                  <ResultSection title="Manual citations">
+                    <ul className="assist-citation-list">
+                      {assistCitations.map((citation) => (
+                        <li key={citation.chunkId}>
+                          <strong>{citation.chunkId}</strong>
+                          <span>{citation.preview}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </ResultSection>
+                )}
+              </>
+            ) : (
+              <>
+                <ResultSection title="Likely cause">Run the live assistant to generate manual-grounded diagnosis.</ResultSection>
+                <ResultSection title="Inspect first">Upload manuals and keep machine model names consistent for best grounding.</ResultSection>
+                <ResultSection title="Next steps">Use Generate Manual Answer, then save the result into a work order.</ResultSection>
+              </>
+            )}
           </div>
           <aside className="confidence-card">
             <span>Confidence</span>
-            <strong>Medium</strong>
+            <strong>{assistGrounded ? 'High' : 'Medium'}</strong>
             <div className="confidence-bars">
               <i />
               <i />
@@ -2534,14 +2742,16 @@ function RepairAssistScreen({ onCreateWorkOrder }: { onCreateWorkOrder: () => vo
               <i />
             </div>
             <span>Source</span>
-            <b>Speed Queen SC40 Service Manual</b>
-            <small>p. 42 / Drain Pump Test</small>
+            <b>{assistManualTitle ?? 'Manual not selected yet'}</b>
+            <small>{assistGrounded ? 'OpenAI + manual chunks' : 'Manual fallback mode'}</small>
           </aside>
         </div>
       </section>
 
       <div className="assist-actions">
-        <button className="secondary-action" type="button">Add to Existing</button>
+        <button className="secondary-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
+          Refresh Guidance
+        </button>
         <button className="ai-action" type="button" onClick={onCreateWorkOrder}>Save as Work Order</button>
       </div>
     </div>
