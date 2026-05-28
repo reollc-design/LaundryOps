@@ -7,6 +7,7 @@ export interface UserProfileData {
   displayName: string | null;
   email: string | null;
   createdFrom: string | null;
+  defaultOrganizationId: string | null;
 }
 
 export interface UserProfileState {
@@ -60,6 +61,7 @@ export function useUserProfile(user: User | null): UserProfileState {
                 displayName: typeof data?.displayName === 'string' ? data.displayName : null,
                 email: typeof data?.email === 'string' ? data.email : user.email ?? null,
                 createdFrom: typeof data?.createdFrom === 'string' ? data.createdFrom : null,
+                defaultOrganizationId: typeof data?.defaultOrganizationId === 'string' ? data.defaultOrganizationId : null,
               }
             : null,
           error: null,
@@ -79,4 +81,3 @@ export function useUserProfile(user: User | null): UserProfileState {
 
   return state;
 }
-

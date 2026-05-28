@@ -1,0 +1,194 @@
+import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
+import type { User } from 'firebase/auth';
+import { useEffect, useMemo, useState } from 'react';
+import type { MachineStatus, UrgentMachine } from '../data';
+import { getFirebaseClient } from '../firebase/client';
+
+interface OrganizationMachinesState {
+  loading: boolean;
+  machines: UrgentMachine[];
+  error: string | null;
+}
+
+function asString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeMachineStatus(rawStatus: string | null): MachineStatus {
+  if (!rawStatus) {
+    return 'running';
+  }
+
+  const normalized = rawStatus.trim().toLowerCase();
+  if (normalized === 'running' || normalized === 'needs-repair' || normalized === 'down' || normalized === 'waiting') {
+    return normalized;
+  }
+  if (normalized === 'healthy' || normalized === 'online' || normalized === 'up') {
+    return 'running';
+  }
+  if (normalized.includes('repair')) {
+    return 'needs-repair';
+  }
+  if (normalized.includes('wait') || normalized.includes('part')) {
+    return 'waiting';
+  }
+  if (normalized.includes('down') || normalized.includes('offline') || normalized.includes('error')) {
+    return 'down';
+  }
+  return 'running';
+}
+
+function labelForStatus(status: MachineStatus, preferredLabel: string | null): string {
+  if (preferredLabel) {
+    return preferredLabel;
+  }
+
+  if (status === 'down') {
+    return 'Down';
+  }
+  if (status === 'needs-repair') {
+    return 'Needs Repair';
+  }
+  if (status === 'waiting') {
+    return 'Waiting on Parts';
+  }
+  return 'Running';
+}
+
+function sinceForStatus(status: MachineStatus): string {
+  if (status === 'running') {
+    return 'No open issues';
+  }
+  if (status === 'waiting') {
+    return 'Waiting on parts';
+  }
+  if (status === 'needs-repair') {
+    return 'Needs service';
+  }
+  return 'Needs immediate service';
+}
+
+function requireDb(): Firestore | null {
+  const client = getFirebaseClient();
+  return client.db ?? null;
+}
+
+export function useOrganizationMachines(user: User | null, organizationId: string | null): OrganizationMachinesState {
+  const db = useMemo(() => requireDb(), []);
+  const [state, setState] = useState<OrganizationMachinesState>({
+    loading: false,
+    machines: [],
+    error: null,
+  });
+
+  useEffect(() => {
+    if (!user || !organizationId) {
+      setState({
+        loading: false,
+        machines: [],
+        error: null,
+      });
+      return undefined;
+    }
+
+    if (!db) {
+      setState({
+        loading: false,
+        machines: [],
+        error: 'Firestore client is not configured.',
+      });
+      return undefined;
+    }
+
+    setState((previous) => ({
+      ...previous,
+      loading: true,
+      error: null,
+    }));
+
+    let locationNames: Record<string, string> = {};
+    let machineDocs: Array<{ id: string; data: Record<string, unknown> }> = [];
+
+    const publishState = () => {
+      const machines = machineDocs.map(({ id, data }) => {
+        const status = normalizeMachineStatus(asString(data.status));
+        const locationId = asString(data.locationId);
+        const machineNumber = asString(data.machineNumber) ?? asString(data.label) ?? id.toUpperCase();
+        const type = asString(data.type) ?? asString(data.category) ?? 'Machine';
+        const model = asString(data.model);
+        const locationName = locationId ? locationNames[locationId] : null;
+        const row = locationName ?? model ?? 'Location not set';
+
+        return {
+          id,
+          machineNumber,
+          type,
+          row,
+          status,
+          statusLabel: labelForStatus(status, asString(data.statusLabel)),
+          since: sinceForStatus(status),
+        } satisfies UrgentMachine;
+      });
+
+      machines.sort((a, b) => a.machineNumber.localeCompare(b.machineNumber, undefined, { numeric: true, sensitivity: 'base' }));
+
+      setState({
+        loading: false,
+        machines,
+        error: null,
+      });
+    };
+
+    const locationsRef = collection(db, `organizations/${organizationId}/locations`);
+    const machinesRef = collection(db, `organizations/${organizationId}/machines`);
+
+    const unsubscribeLocations = onSnapshot(
+      locationsRef,
+      (snapshot) => {
+        locationNames = snapshot.docs.reduce<Record<string, string>>((accumulator, docSnapshot) => {
+          const name = asString(docSnapshot.data().name) ?? docSnapshot.id;
+          accumulator[docSnapshot.id] = name;
+          return accumulator;
+        }, {});
+        publishState();
+      },
+      (error) => {
+        setState({
+          loading: false,
+          machines: [],
+          error: error.message,
+        });
+      },
+    );
+
+    const unsubscribeMachines = onSnapshot(
+      machinesRef,
+      (snapshot) => {
+        machineDocs = snapshot.docs.map((docSnapshot) => ({
+          id: docSnapshot.id,
+          data: docSnapshot.data() as Record<string, unknown>,
+        }));
+        publishState();
+      },
+      (error) => {
+        setState({
+          loading: false,
+          machines: [],
+          error: error.message,
+        });
+      },
+    );
+
+    return () => {
+      unsubscribeLocations();
+      unsubscribeMachines();
+    };
+  }, [db, organizationId, user]);
+
+  return state;
+}

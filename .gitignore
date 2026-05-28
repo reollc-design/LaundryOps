@@ -1,6 +1,8 @@
 # Node / build
 node_modules/
 dist/
+app/.npm-cache/
+app/functions/lib/
 
 # Env / secrets
 .env
@@ -8,6 +10,7 @@ dist/
 !.env.example
 
 # Firebase local runtime/cache
+app/.firebase/
 app/.firebase-local-config/
 app/.firebase-local-emulators/
 
@@ -17,6 +20,12 @@ app/.tools/
 # Logs
 *.log
 app/firestore-debug.log
+server-*.out.txt
+server-*.err.txt
+
+# Local browser preview profiles/screenshots
+chrome-preview-profile*/
+main-screen-current.png
 
 # OS/editor
 .DS_Store

@@ -101,11 +101,6 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
-      match /invitations/{inviteId} {
-        allow read: if isOwnerOrAdmin(orgId);
-        allow create, update, delete: if false;
-      }
-
       match /locations/{locationId} {
         allow read: if hasLocationAccess(orgId, locationId);
         allow create, update, delete: if isOwnerOrAdmin(orgId);

@@ -55,14 +55,21 @@ import {
   workOrderQueue,
 } from './data';
 import type { AccountStat, LocationSummary, MachineStatus, ManualStatus, OnboardingStep, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
+import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
 import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
+import { openStripeBillingPortal, startStripeCheckout } from './firebase/billing';
+import { createWorkOrderFromDraft, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
+import { useOrganizationMachines } from './hooks/useOrganizationMachines';
+import { useOrganizationLocations } from './hooks/useOrganizationLocations';
+import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineStatus;
 type WorkOrderStatusFilter = 'all' | Exclude<WorkOrderStatus, 'in-progress'>;
 type WorkOrderPriorityFilter = 'all' | WorkOrderPriority;
+type BillingAction = 'checkout' | 'portal';
 
 const navItems: { key: TabKey; label: string; icon: typeof Home }[] = [
   { key: 'home', label: 'Home', icon: Home },
@@ -76,7 +83,6 @@ const screenTitles: Record<ScreenKey, string> = {
   welcome: 'LaundryOps',
   'sign-in': 'Sign In',
   'create-account': 'Create Account',
-  'technician-invite': 'Technician Invite',
   'owner-onboarding': 'Start Trial',
   home: 'LaundryOps',
   machines: 'Machines',
@@ -113,6 +119,12 @@ const workOrderPriorityFilters: { key: WorkOrderPriorityFilter; label: string }[
 ];
 
 const reportPeriods = ['This Week', 'This Month', '90 Days'];
+
+function getInitialScreen(): ScreenKey {
+  const requestedScreen = new URLSearchParams(window.location.search).get('screen');
+  return requestedScreen && requestedScreen in screenTitles ? (requestedScreen as ScreenKey) : 'welcome';
+}
+
 const protectedScreens: ScreenKey[] = [
   'home',
   'machines',
@@ -159,6 +171,17 @@ function getAuthErrorMessage(error: unknown): string {
   return maybeError.message ?? 'Authentication failed. Try again.';
 }
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === 'object' && error !== null) {
+    const maybeError = error as { message?: string };
+    if (typeof maybeError.message === 'string' && maybeError.message.trim()) {
+      return maybeError.message;
+    }
+  }
+
+  return fallback;
+}
+
 function findMachines(query: string, machines: UrgentMachine[]) {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) {
@@ -184,11 +207,16 @@ function findMachines(query: string, machines: UrgentMachine[]) {
 }
 
 export function App() {
-  const [activeScreen, setActiveScreen] = useState<ScreenKey>('welcome');
+  const [activeScreen, setActiveScreen] = useState<ScreenKey>(() => getInitialScreen());
   const [workOrderReturnScreen, setWorkOrderReturnScreen] = useState<ScreenKey>('machine-detail');
+  const [selectedWorkOrderId, setSelectedWorkOrderId] = useState<string | null>(null);
   const [createdFromDraft, setCreatedFromDraft] = useState(false);
+  const [workOrderBusy, setWorkOrderBusy] = useState(false);
+  const [workOrderError, setWorkOrderError] = useState<string | null>(null);
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [billingBusyAction, setBillingBusyAction] = useState<BillingAction | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
   const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>({
     businessName: 'Sun State Laundry',
     locationName: 'Main Street',
@@ -196,16 +224,71 @@ export function App() {
     machineNumber: 'W12',
     machineType: 'Washer',
     machineModel: 'Speed Queen SC40',
-    technicianName: 'Mike R.',
     manualName: 'SC40 Service Manual',
   });
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
+  const defaultOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
+  const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
+  const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
+  const orgLocations = useOrganizationLocations(authSession.user, defaultOrganizationId);
+  const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
+  const machineCatalogData = orgConnected ? orgMachines.machines : machineCatalog;
+  const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
+  const selectedWorkOrder = useMemo(() => {
+    if (selectedWorkOrderId) {
+      const found = workOrderQueueData.find((order) => order.id === selectedWorkOrderId);
+      if (found) {
+        return found;
+      }
+    }
+    return workOrderQueueData[0] ?? null;
+  }, [selectedWorkOrderId, workOrderQueueData]);
+  const locationSummaryData = useMemo(() => {
+    if (!orgConnected) {
+      return locationSummaries;
+    }
+
+    const machineCountByLocation = orgMachines.machines.reduce<Record<string, number>>((accumulator, machine) => {
+      const key = machine.row;
+      accumulator[key] = (accumulator[key] ?? 0) + 1;
+      return accumulator;
+    }, {});
+
+    const openOrdersByLocation = orgWorkOrders.workOrders.reduce<Record<string, number>>((accumulator, order) => {
+      if (order.status === 'completed') {
+        return accumulator;
+      }
+      const key = order.location;
+      accumulator[key] = (accumulator[key] ?? 0) + 1;
+      return accumulator;
+    }, {});
+
+    return orgLocations.locations.map((location, index) => {
+      const status: LocationSummary['status'] = index === 0 ? 'included' : 'add-on';
+      return {
+        id: location.id,
+        name: location.name,
+        address: location.cityState ?? 'Address not set',
+        machines: machineCountByLocation[location.name] ?? 0,
+        openWorkOrders: openOrdersByLocation[location.name] ?? 0,
+        status,
+        planNote: index === 0 ? 'Included in base plan' : 'Additional location add-on',
+      };
+    });
+  }, [orgConnected, orgLocations.locations, orgMachines.machines, orgWorkOrders.workOrders]);
+  const urgentMachineData = useMemo(() => {
+    if (!orgConnected) {
+      return urgentMachines;
+    }
+
+    const computedUrgent = machineCatalogData.filter((machine) => machine.status !== 'running').slice(0, 6);
+    return computedUrgent.length > 0 ? computedUrgent : orgMachines.machines.slice(0, 6);
+  }, [machineCatalogData, orgConnected, orgMachines.machines]);
   const isSetupFlow =
     activeScreen === 'welcome' ||
     activeScreen === 'sign-in' ||
     activeScreen === 'create-account' ||
-    activeScreen === 'technician-invite' ||
     activeScreen === 'owner-onboarding';
   const showBack =
     activeScreen === 'machine-detail' ||
@@ -225,6 +308,11 @@ export function App() {
       setActiveScreen('sign-in');
     }
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
+  useEffect(() => {
+    if (selectedWorkOrderId && !workOrderQueueData.some((order) => order.id === selectedWorkOrderId)) {
+      setSelectedWorkOrderId(null);
+    }
+  }, [selectedWorkOrderId, workOrderQueueData]);
   const handleEmailSignIn = async (email: string, password: string): Promise<string | null> => {
     try {
       await signInWithEmail(email, password);
@@ -264,9 +352,127 @@ export function App() {
       return getAuthErrorMessage(error);
     }
   };
+  const handleStartSubscription = async (): Promise<void> => {
+    setBillingError(null);
+
+    if (!defaultOrganizationId) {
+      setBillingError('No organization is connected yet. Finish onboarding first.');
+      return;
+    }
+
+    setBillingBusyAction('checkout');
+    try {
+      const checkoutUrl = await startStripeCheckout({
+        organizationId: defaultOrganizationId,
+      });
+      window.location.assign(checkoutUrl);
+    } catch (error) {
+      setBillingError(getErrorMessage(error, 'Could not start Stripe checkout. Try again.'));
+    } finally {
+      setBillingBusyAction(null);
+    }
+  };
+  const handleManageBilling = async (): Promise<void> => {
+    setBillingError(null);
+
+    if (!defaultOrganizationId) {
+      setBillingError('No organization is connected yet. Finish onboarding first.');
+      return;
+    }
+
+    setBillingBusyAction('portal');
+    try {
+      const portalUrl = await openStripeBillingPortal({
+        organizationId: defaultOrganizationId,
+      });
+      window.location.assign(portalUrl);
+    } catch (error) {
+      setBillingError(getErrorMessage(error, 'Could not open Stripe billing portal. Try again.'));
+    } finally {
+      setBillingBusyAction(null);
+    }
+  };
   const openCreateWorkOrder = (returnScreen: ScreenKey) => {
+    setWorkOrderError(null);
     setWorkOrderReturnScreen(returnScreen);
     setActiveScreen('create-work-order');
+  };
+  const openWorkOrderDetail = (workOrderId: string) => {
+    setWorkOrderError(null);
+    setCreatedFromDraft(false);
+    setSelectedWorkOrderId(workOrderId);
+    setActiveScreen('work-order-detail');
+  };
+  const handleCreateWorkOrderFromDraft = async (): Promise<void> => {
+    setWorkOrderError(null);
+
+    if (!orgConnected || !defaultOrganizationId) {
+      setCreatedFromDraft(true);
+      setSelectedWorkOrderId(workOrderQueueData[0]?.id ?? null);
+      setActiveScreen('work-order-detail');
+      return;
+    }
+
+    const preferredMachine = orgMachines.machines.find((machine) => machine.machineNumber === aiWorkOrderDraft.machineNumber)
+      ?? orgMachines.machines[0];
+    const preferredLocation = orgLocations.locations.find((location) => location.name === preferredMachine?.row)
+      ?? orgLocations.locations[0];
+
+    if (!preferredLocation) {
+      setWorkOrderError('Add at least one location before creating a work order.');
+      return;
+    }
+
+    setWorkOrderBusy(true);
+    try {
+      const result = await createWorkOrderFromDraft({
+        organizationId: defaultOrganizationId,
+        locationId: preferredLocation.id,
+        locationName: preferredLocation.name,
+        machineId: preferredMachine?.id ?? null,
+        machineNumber: preferredMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber,
+        machineModel: aiWorkOrderDraft.machineModel,
+        title: aiWorkOrderDraft.title,
+        priority: aiWorkOrderDraft.priority as WorkOrderPriority,
+        assigneeName: aiWorkOrderDraft.assignee,
+        dueLabel: aiWorkOrderDraft.due,
+        estimate: aiWorkOrderDraft.estimate,
+      });
+      setCreatedFromDraft(true);
+      setSelectedWorkOrderId(result.workOrderId);
+      setActiveScreen('work-order-detail');
+    } catch (error) {
+      setWorkOrderError(getErrorMessage(error, 'Could not create work order. Try again.'));
+    } finally {
+      setWorkOrderBusy(false);
+    }
+  };
+  const handleUpdateSelectedWorkOrderStatus = async (status: WorkOrderStatus): Promise<void> => {
+    if (!selectedWorkOrder) {
+      return;
+    }
+
+    if (!orgConnected || !defaultOrganizationId) {
+      setActiveScreen('work-orders');
+      return;
+    }
+
+    setWorkOrderError(null);
+    setWorkOrderBusy(true);
+    try {
+      await updateWorkOrderStatus({
+        organizationId: defaultOrganizationId,
+        workOrderId: selectedWorkOrder.id,
+        status,
+      });
+      if (status === 'completed') {
+        setCreatedFromDraft(false);
+      }
+    } catch (error) {
+      setWorkOrderError(getErrorMessage(error, 'Could not update work order status. Try again.'));
+    } finally {
+      setWorkOrderBusy(false);
+    }
   };
   const handleBack = () => {
     if (activeScreen === 'create-work-order') {
@@ -285,7 +491,7 @@ export function App() {
   return (
     <main className="app-canvas">
       <section className="phone-frame" aria-label="LaundryOps mobile UI preview">
-        <div className="phone-shell">
+        <div className={`phone-shell ${isSetupFlow ? 'setup-shell' : 'workspace-shell'}`}>
           <StatusBar />
           {isSetupFlow ? (
             <div className="setup-content">
@@ -295,7 +501,6 @@ export function App() {
                   onStartTrial={() => setActiveScreen('owner-onboarding')}
                   onSignIn={() => setActiveScreen('sign-in')}
                   onCreateAccount={() => setActiveScreen('create-account')}
-                  onTechnicianInvite={() => setActiveScreen('technician-invite')}
                 />
               )}
               {activeScreen === 'sign-in' && (
@@ -312,12 +517,6 @@ export function App() {
                   onSignIn={() => setActiveScreen('sign-in')}
                 />
               )}
-              {activeScreen === 'technician-invite' && (
-                <TechnicianInviteScreen
-                  onBack={() => setActiveScreen('welcome')}
-                  onAccept={() => setActiveScreen('work-orders')}
-                />
-              )}
               {activeScreen === 'owner-onboarding' && (
                 <OwnerOnboardingScreen
                   onBack={() => setActiveScreen('welcome')}
@@ -330,11 +529,39 @@ export function App() {
             </div>
           ) : (
             <>
-              <AppHeader title={title} showBack={showBack} activeScreen={activeScreen} onBack={handleBack} onAccountClick={() => setActiveScreen('account')} />
+              <AppHeader
+                title={title}
+                showBack={showBack}
+                activeScreen={activeScreen}
+                onBack={handleBack}
+                onAccountClick={() => setActiveScreen('account')}
+                locationLabel={onboardingDraft.locationName || 'Main Street'}
+                machineCount={machineCatalogData.length}
+                workOrderCount={workOrderQueueData.length}
+              />
               <div className="screen-content">
                 <BackendSessionBanner authSession={authSession} compact />
-                {activeScreen === 'home' && <HomeScreen setActiveScreen={setActiveScreen} onCreateWorkOrder={() => openCreateWorkOrder('home')} />}
-                {activeScreen === 'machines' && <MachinesScreen setActiveScreen={setActiveScreen} />}
+                {activeScreen === 'home' && (
+                  <HomeScreen
+                    setActiveScreen={setActiveScreen}
+                    onCreateWorkOrder={() => openCreateWorkOrder('home')}
+                    machineCatalogData={machineCatalogData}
+                    urgentMachineData={urgentMachineData}
+                    workOrderQueueData={workOrderQueueData}
+                    orgMachinesLoading={orgMachines.loading}
+                    orgMachinesError={orgMachines.error ?? orgWorkOrders.error}
+                    orgConnected={orgConnected}
+                  />
+                )}
+                {activeScreen === 'machines' && (
+                  <MachinesScreen
+                    setActiveScreen={setActiveScreen}
+                    machineCatalogData={machineCatalogData}
+                    orgMachinesLoading={orgMachines.loading}
+                    orgMachinesError={orgMachines.error}
+                    orgConnected={orgConnected}
+                  />
+                )}
                 {activeScreen === 'machine-detail' && (
                   <MachineDetailScreen setActiveScreen={setActiveScreen} onCreateWorkOrder={() => openCreateWorkOrder('machine-detail')} />
                 )}
@@ -343,21 +570,48 @@ export function App() {
                   <AccountScreen
                     authSession={authSession}
                     userProfile={userProfile}
+                    locationSummaryData={locationSummaryData}
+                    orgDataLoading={orgLocations.loading || orgMachines.loading || orgWorkOrders.loading}
+                    orgDataError={orgLocations.error ?? orgMachines.error ?? orgWorkOrders.error}
+                    orgConnected={orgConnected}
                     signOutBusy={signOutBusy}
                     signOutError={signOutError}
                     onSignOut={handleSignOut}
+                    billingBusyAction={billingBusyAction}
+                    billingError={billingError}
+                    onStartSubscription={handleStartSubscription}
+                    onManageBilling={handleManageBilling}
                   />
                 )}
                 {activeScreen === 'create-work-order' && (
                   <CreateWorkOrderScreen
-                    onSave={() => {
-                      setCreatedFromDraft(true);
-                      setActiveScreen('work-order-detail');
-                    }}
+                    onSave={handleCreateWorkOrderFromDraft}
+                    busy={workOrderBusy}
+                    error={workOrderError}
                   />
                 )}
-                {activeScreen === 'work-orders' && <WorkOrdersScreen setActiveScreen={setActiveScreen} onCreateWorkOrder={() => openCreateWorkOrder('work-orders')} />}
-                {activeScreen === 'work-order-detail' && <WorkOrderDetailScreen setActiveScreen={setActiveScreen} createdFromDraft={createdFromDraft} />}
+                {activeScreen === 'work-orders' && (
+                  <WorkOrdersScreen
+                    setActiveScreen={setActiveScreen}
+                    onCreateWorkOrder={() => openCreateWorkOrder('work-orders')}
+                    onOpenWorkOrderDetail={openWorkOrderDetail}
+                    workOrderQueueData={workOrderQueueData}
+                    orgConnected={orgConnected}
+                    orgWorkOrdersLoading={orgWorkOrders.loading}
+                    orgWorkOrdersError={orgWorkOrders.error}
+                  />
+                )}
+                {activeScreen === 'work-order-detail' && (
+                  <WorkOrderDetailScreen
+                    setActiveScreen={setActiveScreen}
+                    createdFromDraft={createdFromDraft}
+                    order={selectedWorkOrder}
+                    busy={workOrderBusy}
+                    error={workOrderError}
+                    orgConnected={orgConnected}
+                    onUpdateStatus={handleUpdateSelectedWorkOrderStatus}
+                  />
+                )}
                 {activeScreen === 'ai-assist' && <RepairAssistScreen onCreateWorkOrder={() => openCreateWorkOrder('ai-assist')} />}
                 {activeScreen === 'reports' && <ReportsScreen />}
               </div>
@@ -416,12 +670,10 @@ function WelcomeScreen({
   onStartTrial,
   onSignIn,
   onCreateAccount,
-  onTechnicianInvite,
 }: {
   onStartTrial: () => void;
   onSignIn: () => void;
   onCreateAccount: () => void;
-  onTechnicianInvite: () => void;
 }) {
   return (
     <div className="welcome-screen">
@@ -441,7 +693,7 @@ function WelcomeScreen({
       <section className="welcome-hero">
         <div>
           <span>14-Day Free Trial</span>
-          <h1>Keep laundromat machines running.</h1>
+          <h1>More uptime. More revenue.</h1>
           <p>Track machines, work orders, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
         </div>
         <div className="welcome-machine">
@@ -456,9 +708,6 @@ function WelcomeScreen({
       <div className="welcome-secondary-actions">
         <button className="secondary-action" type="button" onClick={onCreateAccount}>
           Create Account
-        </button>
-        <button className="secondary-action" type="button" onClick={onTechnicianInvite}>
-          Accept Technician Invite
         </button>
       </div>
 
@@ -477,8 +726,8 @@ function WelcomeScreen({
       <section className="trial-proof-card">
         <ShieldCheck size={18} />
         <div>
-          <strong>No payment screen in this prototype.</strong>
-          <span>Production billing will activate after the 14-day trial path is wired to Google Play or SaaS billing.</span>
+          <strong>No credit card required to start.</strong>
+          <span>Create your account, add your machines, and test LaundryOps free for 14 days before choosing a paid plan.</span>
         </div>
       </section>
     </div>
@@ -527,9 +776,9 @@ function SignInScreen({
           <LockKeyhole size={23} />
         </div>
         <div className="access-copy">
-          <span>Owner / Manager / Technician</span>
+          <span>Owner / Operator / Service Tech</span>
           <h1>Welcome back.</h1>
-          <p>Use your account to open the right company, location, role, and work queue.</p>
+          <p>Use your account to open your company workspace, locations, machines, and work queue.</p>
         </div>
         <div className="access-fields">
           <AuthField icon={Mail} label="Email" value={email} type="email" onChange={setEmail} />
@@ -645,44 +894,6 @@ function CreateAccountAccessScreen({
   );
 }
 
-function TechnicianInviteScreen({
-  onBack,
-  onAccept,
-}: {
-  onBack: () => void;
-  onAccept: () => void;
-}) {
-  return (
-    <div className="access-screen">
-      <AccessHeader eyebrow="Invite Access" title="Join as technician" onBack={onBack} />
-
-      <section className="access-card">
-        <div className="access-icon invite">
-          <UsersRound size={23} />
-        </div>
-        <div className="access-copy">
-          <span>Sun State Laundry invited you</span>
-          <h1>Mike R. / Technician</h1>
-          <p>Technicians get assigned work, machine lookup, manual search, photos, and Repair Assist. Billing stays hidden.</p>
-        </div>
-        <div className="invite-summary">
-          <InvitePermission icon={MapPin} title="Location Access" detail="Main Street only" />
-          <InvitePermission icon={ClipboardList} title="Work Orders" detail="Assigned work and status updates" />
-          <InvitePermission icon={Camera} title="Photos" detail="Attach repair and machine photos" />
-          <InvitePermission icon={BookOpen} title="Manuals & AI" detail="Search manuals and use Repair Assist" />
-        </div>
-        <div className="access-fields">
-          <AuthField icon={Mail} label="Technician Email" value="mike@sunstatedemo.com" />
-          <AuthField icon={KeyRound} label="Password" value="********" type="password" />
-        </div>
-        <button className="primary-action" type="button" onClick={onAccept}>
-          Accept Invite
-        </button>
-      </section>
-    </div>
-  );
-}
-
 function AccessHeader({
   eyebrow,
   title,
@@ -742,26 +953,6 @@ function AuthField({
   );
 }
 
-function InvitePermission({
-  icon: Icon,
-  title,
-  detail,
-}: {
-  icon: typeof MapPin;
-  title: string;
-  detail: string;
-}) {
-  return (
-    <div className="invite-permission">
-      <span><Icon size={17} /></span>
-      <div>
-        <strong>{title}</strong>
-        <small>{detail}</small>
-      </div>
-    </div>
-  );
-}
-
 function OwnerOnboardingScreen({
   onBack,
   draft,
@@ -780,7 +971,7 @@ function OwnerOnboardingScreen({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const currentStep = onboardingSteps[activeStep];
   const isLastStep = activeStep === onboardingSteps.length - 1;
-  const isOptionalStep = currentStep.id === 'team' || currentStep.id === 'manual';
+  const isOptionalStep = currentStep.id === 'manual';
   const advance = async () => {
     if (isLastStep) {
       if (!draft.businessName.trim() || !draft.locationName.trim() || !draft.machineNumber.trim() || !draft.machineModel.trim()) {
@@ -903,7 +1094,6 @@ function OnboardingStepIcon({ step, compact = false }: { step: OnboardingStep; c
     step.icon === 'account' ? Building2 :
     step.icon === 'location' ? MapPin :
     step.icon === 'machine' ? Wrench :
-    step.icon === 'team' ? UsersRound :
     BookOpen;
 
   return (
@@ -959,15 +1149,6 @@ function OnboardingStepFields({
     );
   }
 
-  if (stepId === 'team') {
-    return (
-      <div className="setup-field-grid">
-        <SetupField label="Technician Name" value={draft.technicianName} onChange={(value) => patchDraft({ technicianName: value })} />
-        <SetupField label="Role" value="Technician" readOnly />
-      </div>
-    );
-  }
-
   return (
     <div className="setup-field-grid">
       <SetupField label="Manual" value={draft.manualName} onChange={(value) => patchDraft({ manualName: value })} />
@@ -1006,7 +1187,6 @@ function getOnboardingStepCopy(stepId: string) {
     account: 'Create the customer account that owns billing, users, locations, machines, manuals, and reports.',
     location: 'Add the first laundromat so every machine and work order has the right operating context.',
     machine: 'Add one real machine now. The full machine directory can be imported or expanded later.',
-    team: 'Invite a technician so repair work can be assigned without giving away owner controls.',
     manual: 'Upload the first manual so Repair Assist can answer from factual service material instead of generic guidance.',
   };
 
@@ -1032,12 +1212,18 @@ function AppHeader({
   activeScreen,
   onBack,
   onAccountClick,
+  locationLabel,
+  machineCount,
+  workOrderCount,
 }: {
   title: string;
   showBack: boolean;
   activeScreen: ScreenKey;
   onBack: () => void;
   onAccountClick: () => void;
+  locationLabel: string;
+  machineCount: number;
+  workOrderCount: number;
 }) {
   const isAssist = activeScreen === 'ai-assist';
   return (
@@ -1055,11 +1241,11 @@ function AppHeader({
         <h1>{title}</h1>
         {!showBack && activeScreen !== 'machines' && activeScreen !== 'work-orders' && (
           <button className="location-chip" type="button" onClick={onAccountClick}>
-            Main Street <ChevronDown size={13} />
+            {locationLabel} <ChevronDown size={13} />
           </button>
         )}
-        {activeScreen === 'machines' && <span className="header-subtitle">Main Street / 60 machines</span>}
-        {activeScreen === 'work-orders' && <span className="header-subtitle">Main Street / {workOrderQueue.length} work orders</span>}
+        {activeScreen === 'machines' && <span className="header-subtitle">{locationLabel} / {machineCount} machines</span>}
+        {activeScreen === 'work-orders' && <span className="header-subtitle">{locationLabel} / {workOrderCount} work orders</span>}
         {activeScreen === 'manuals' && <span className="header-subtitle">Grounded repair answers</span>}
         {activeScreen === 'account' && <span className="header-subtitle">Business, locations, subscription</span>}
         {activeScreen === 'create-work-order' && <span className="header-subtitle">AI draft review</span>}
@@ -1113,9 +1299,21 @@ function BottomNav({
 function HomeScreen({
   setActiveScreen,
   onCreateWorkOrder,
+  machineCatalogData,
+  urgentMachineData,
+  workOrderQueueData,
+  orgMachinesLoading,
+  orgMachinesError,
+  orgConnected,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onCreateWorkOrder: () => void;
+  machineCatalogData: UrgentMachine[];
+  urgentMachineData: UrgentMachine[];
+  workOrderQueueData: WorkOrderSummary[];
+  orgMachinesLoading: boolean;
+  orgMachinesError: string | null;
+  orgConnected: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const normalizedQuery = machineQuery.trim().toLowerCase();
@@ -1124,8 +1322,11 @@ function HomeScreen({
       return [];
     }
 
-    return findMachines(machineQuery, machineCatalog).slice(0, 6);
-  }, [normalizedQuery]);
+    return findMachines(machineQuery, machineCatalogData).slice(0, 6);
+  }, [machineCatalogData, normalizedQuery, machineQuery]);
+  const downCount = machineCatalogData.filter((machine) => machine.status === 'down').length;
+  const waitingCount = machineCatalogData.filter((machine) => machine.status === 'waiting').length;
+  const openWorkOrderCount = workOrderQueueData.filter((order) => order.status !== 'completed').length;
 
   return (
     <div className="screen-stack">
@@ -1142,9 +1343,9 @@ function HomeScreen({
             </div>
           </div>
           <div className="metric-grid">
-            <Metric label="Machines Down" value="3" tone="down" action="View details" />
-            <Metric label="Open Work Orders" value="7" tone="primary" action="View details" />
-            <Metric label="Waiting on Parts" value="2" tone="waiting" action="View details" />
+            <Metric label="Machines Down" value={String(downCount)} tone="down" action="View details" />
+            <Metric label="Open Work Orders" value={String(openWorkOrderCount)} tone="primary" action="View details" />
+            <Metric label="Waiting on Parts" value={String(waitingCount)} tone="waiting" action="View details" />
             <Metric label="Repair Spend (May)" value="$1,245" tone="teal" action="View report" />
           </div>
         </div>
@@ -1153,7 +1354,7 @@ function HomeScreen({
       <section className="content-section machine-search-section">
         <div className="section-heading">
           <h2>Find Machine</h2>
-          <span>{machineCatalog.length} machines</span>
+          <span>{machineCatalogData.length} machines</span>
         </div>
         <label className="machine-search" htmlFor="machine-search">
           <Search size={18} />
@@ -1190,10 +1391,13 @@ function HomeScreen({
           <button type="button" onClick={() => setActiveScreen('machines')}>See all <ChevronRight size={14} /></button>
         </div>
         <div className="machine-list">
-          {urgentMachines.map((machine) => (
+          {urgentMachineData.map((machine) => (
             <UrgentMachineRow key={machine.id} machine={machine} onClick={() => setActiveScreen('machine-detail')} />
           ))}
         </div>
+        {orgConnected && orgMachinesLoading && <p className="search-hint">Refreshing machines from your company data...</p>}
+        {orgConnected && orgMachinesError && <p className="empty-state">Could not load live machines: {orgMachinesError}</p>}
+        {orgConnected && !orgMachinesLoading && !orgMachinesError && <p className="search-hint">Live machines loaded from your company workspace.</p>}
       </section>
 
       <section className="content-section">
@@ -1210,21 +1414,33 @@ function HomeScreen({
   );
 }
 
-function MachinesScreen({ setActiveScreen }: { setActiveScreen: (screen: ScreenKey) => void }) {
+function MachinesScreen({
+  setActiveScreen,
+  machineCatalogData,
+  orgMachinesLoading,
+  orgMachinesError,
+  orgConnected,
+}: {
+  setActiveScreen: (screen: ScreenKey) => void;
+  machineCatalogData: UrgentMachine[];
+  orgMachinesLoading: boolean;
+  orgMachinesError: string | null;
+  orgConnected: boolean;
+}) {
   const [machineQuery, setMachineQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<MachineFilter>('all');
   const filteredMachines = useMemo(() => {
-    const statusFiltered = activeFilter === 'all' ? machineCatalog : machineCatalog.filter((machine) => machine.status === activeFilter);
+    const statusFiltered = activeFilter === 'all' ? machineCatalogData : machineCatalogData.filter((machine) => machine.status === activeFilter);
     return findMachines(machineQuery, statusFiltered);
-  }, [activeFilter, machineQuery]);
-  const downCount = machineCatalog.filter((machine) => machine.status === 'down').length;
-  const needsRepairCount = machineCatalog.filter((machine) => machine.status === 'needs-repair').length;
-  const waitingCount = machineCatalog.filter((machine) => machine.status === 'waiting').length;
+  }, [activeFilter, machineCatalogData, machineQuery]);
+  const downCount = machineCatalogData.filter((machine) => machine.status === 'down').length;
+  const needsRepairCount = machineCatalogData.filter((machine) => machine.status === 'needs-repair').length;
+  const waitingCount = machineCatalogData.filter((machine) => machine.status === 'waiting').length;
 
   return (
     <div className="screen-stack">
       <section className="directory-summary">
-        <DirectoryStat label="Total Machines" value={String(machineCatalog.length)} />
+        <DirectoryStat label="Total Machines" value={String(machineCatalogData.length)} />
         <DirectoryStat label="Down" value={String(downCount)} tone="down" />
         <DirectoryStat label="Needs Repair" value={String(needsRepairCount)} tone="warning" />
         <DirectoryStat label="Waiting Parts" value={String(waitingCount)} tone="waiting" />
@@ -1260,6 +1476,8 @@ function MachinesScreen({ setActiveScreen }: { setActiveScreen: (screen: ScreenK
       </section>
 
       <section className="content-section directory-list-section">
+        {orgConnected && orgMachinesLoading && <p className="search-hint">Refreshing machine directory from your company data...</p>}
+        {orgConnected && orgMachinesError && <p className="empty-state">Could not load live machines: {orgMachinesError}</p>}
         <div className="machine-list directory-machine-list">
           {filteredMachines.slice(0, 24).map((machine) => (
             <UrgentMachineRow key={machine.id} machine={machine} onClick={() => setActiveScreen('machine-detail')} />
@@ -1501,15 +1719,31 @@ function ManualRow({ manual, queuedManual }: { manual: (typeof manualRows)[numbe
 function AccountScreen({
   authSession,
   userProfile,
+  locationSummaryData,
+  orgDataLoading,
+  orgDataError,
+  orgConnected,
   signOutBusy,
   signOutError,
   onSignOut,
+  billingBusyAction,
+  billingError,
+  onStartSubscription,
+  onManageBilling,
 }: {
   authSession: ReturnType<typeof useAuthSession>;
   userProfile: ReturnType<typeof useUserProfile>;
+  locationSummaryData: LocationSummary[];
+  orgDataLoading: boolean;
+  orgDataError: string | null;
+  orgConnected: boolean;
   signOutBusy: boolean;
   signOutError: string | null;
   onSignOut: () => Promise<void>;
+  billingBusyAction: BillingAction | null;
+  billingError: string | null;
+  onStartSubscription: () => Promise<void>;
+  onManageBilling: () => Promise<void>;
 }) {
   return (
     <div className="screen-stack">
@@ -1614,6 +1848,34 @@ function AccountScreen({
           <span>Why this wins</span>
           <strong>Owners get one account, one bill, and one dashboard across all stores.</strong>
         </div>
+        <div className="subscription-actions">
+          <button
+            className="primary-action"
+            type="button"
+            disabled={!orgConnected || billingBusyAction !== null}
+            onClick={() => void onStartSubscription()}
+          >
+            <CreditCard size={18} />
+            {billingBusyAction === 'checkout' ? 'Starting...' : 'Start Subscription'}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={!orgConnected || billingBusyAction !== null}
+            onClick={() => void onManageBilling()}
+          >
+            {billingBusyAction === 'portal' ? 'Opening...' : 'Manage Billing'}
+          </button>
+        </div>
+        {!orgConnected && (
+          <p className="search-hint">Complete onboarding first to connect billing to your organization account.</p>
+        )}
+        {billingError && (
+          <div className="auth-message">
+            <strong>Billing action failed</strong>
+            <span>{billingError}</span>
+          </div>
+        )}
       </section>
 
       <section className="content-section location-list-card">
@@ -1621,11 +1883,14 @@ function AccountScreen({
           <h2>Locations</h2>
           <button type="button"><Plus size={14} /> Add</button>
         </div>
+        {orgConnected && orgDataLoading && <p className="search-hint">Refreshing locations from your company data...</p>}
+        {orgConnected && orgDataError && <p className="empty-state">Could not load live account data: {orgDataError}</p>}
         <div className="location-list">
-          {locationSummaries.map((location) => (
+          {locationSummaryData.map((location) => (
             <LocationRow key={location.id} location={location} />
           ))}
         </div>
+        {locationSummaryData.length === 0 && <p className="empty-state">No locations found yet.</p>}
       </section>
 
       <section className="content-section admin-card">
@@ -1634,7 +1899,7 @@ function AccountScreen({
           <span>Launch setup</span>
         </div>
         <div className="admin-actions">
-          <AdminAction icon={UsersRound} title="Users & Roles" detail="Owner, manager, technician, viewer" />
+          <AdminAction icon={UsersRound} title="Account Access" detail="Every user signs up for their own paid workspace" />
           <AdminAction icon={ShieldCheck} title="Data Separation" detail="Every record belongs to one company account" />
           <AdminAction icon={FileText} title="Billing Decision" detail="Finalize Google Play or SaaS billing path before launch" />
         </div>
@@ -1710,7 +1975,15 @@ function AdminAction({
   );
 }
 
-function CreateWorkOrderScreen({ onSave }: { onSave: () => void }) {
+function CreateWorkOrderScreen({
+  onSave,
+  busy,
+  error,
+}: {
+  onSave: () => Promise<void>;
+  busy: boolean;
+  error: string | null;
+}) {
   const [priority, setPriority] = useState(aiWorkOrderDraft.priority);
   const [assignee, setAssignee] = useState(aiWorkOrderDraft.assignee);
   const priorityOptions = ['High', 'Standard', 'Low'];
@@ -1830,8 +2103,15 @@ function CreateWorkOrderScreen({ onSave }: { onSave: () => void }) {
         </div>
       </section>
 
-      <button className="primary-action sticky-action" type="button" onClick={onSave}>
-        <ClipboardCheck size={19} /> Create Work Order
+      {error && (
+        <div className="auth-message">
+          <strong>Could not create work order</strong>
+          <span>{error}</span>
+        </div>
+      )}
+
+      <button className="primary-action sticky-action" type="button" onClick={() => void onSave()} disabled={busy}>
+        <ClipboardCheck size={19} /> {busy ? 'Creating...' : 'Create Work Order'}
       </button>
     </div>
   );
@@ -1840,14 +2120,24 @@ function CreateWorkOrderScreen({ onSave }: { onSave: () => void }) {
 function WorkOrdersScreen({
   setActiveScreen,
   onCreateWorkOrder,
+  onOpenWorkOrderDetail,
+  workOrderQueueData,
+  orgConnected,
+  orgWorkOrdersLoading,
+  orgWorkOrdersError,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onCreateWorkOrder: () => void;
+  onOpenWorkOrderDetail: (workOrderId: string) => void;
+  workOrderQueueData: WorkOrderSummary[];
+  orgConnected: boolean;
+  orgWorkOrdersLoading: boolean;
+  orgWorkOrdersError: string | null;
 }) {
   const [statusFilter, setStatusFilter] = useState<WorkOrderStatusFilter>('all');
   const [priorityFilter, setPriorityFilter] = useState<WorkOrderPriorityFilter>('all');
   const filteredOrders = useMemo(() => {
-    return workOrderQueue.filter((order) => {
+    return workOrderQueueData.filter((order) => {
       const matchesStatus =
         statusFilter === 'all' ||
         order.status === statusFilter ||
@@ -1855,10 +2145,10 @@ function WorkOrdersScreen({
       const matchesPriority = priorityFilter === 'all' || order.priority === priorityFilter;
       return matchesStatus && matchesPriority;
     });
-  }, [priorityFilter, statusFilter]);
-  const openCount = workOrderQueue.filter((order) => order.status !== 'completed').length;
-  const highCount = workOrderQueue.filter((order) => order.priority === 'High' && order.status !== 'completed').length;
-  const waitingCount = workOrderQueue.filter((order) => order.status === 'waiting').length;
+  }, [priorityFilter, statusFilter, workOrderQueueData]);
+  const openCount = workOrderQueueData.filter((order) => order.status !== 'completed').length;
+  const highCount = workOrderQueueData.filter((order) => order.priority === 'High' && order.status !== 'completed').length;
+  const waitingCount = workOrderQueueData.filter((order) => order.status === 'waiting').length;
 
   return (
     <div className="screen-stack">
@@ -1914,12 +2204,14 @@ function WorkOrdersScreen({
       </section>
 
       <section className="work-order-list" aria-live="polite">
+        {orgConnected && orgWorkOrdersLoading && <p className="search-hint">Refreshing work orders from your company data...</p>}
+        {orgConnected && orgWorkOrdersError && <p className="empty-state">Could not load live work orders: {orgWorkOrdersError}</p>}
         <div className="list-count-line">
           <strong>{filteredOrders.length} shown</strong>
           <span>{statusFilter === 'all' ? 'All statuses' : workOrderStatusFilters.find((filter) => filter.key === statusFilter)?.label}</span>
         </div>
         {filteredOrders.map((order) => (
-          <WorkOrderQueueRow key={order.id} order={order} onClick={() => setActiveScreen('work-order-detail')} />
+          <WorkOrderQueueRow key={order.id} order={order} onClick={() => onOpenWorkOrderDetail(order.id)} />
         ))}
         {filteredOrders.length === 0 && <p className="empty-state">No work orders match those filters.</p>}
       </section>
@@ -1983,11 +2275,52 @@ function WorkOrderStatusBadge({ status, children }: { status: WorkOrderStatus; c
 function WorkOrderDetailScreen({
   setActiveScreen,
   createdFromDraft,
+  order,
+  busy,
+  error,
+  orgConnected,
+  onUpdateStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   createdFromDraft: boolean;
+  order: WorkOrderSummary | null;
+  busy: boolean;
+  error: string | null;
+  orgConnected: boolean;
+  onUpdateStatus: (status: WorkOrderStatus) => Promise<void>;
 }) {
   const steps = useMemo(() => ['Open', 'Assigned', 'In Progress', 'Waiting', 'Completed'], []);
+  const currentStatus = order?.status ?? 'open';
+  const activeIndex = currentStatus === 'completed'
+    ? 4
+    : currentStatus === 'waiting'
+      ? 3
+      : currentStatus === 'in-progress'
+        ? 2
+        : currentStatus === 'assigned'
+          ? 1
+          : 0;
+  const statusButtonLabel = currentStatus === 'waiting'
+    ? 'Mark Completed'
+    : currentStatus === 'completed'
+      ? 'Completed'
+      : 'Mark Waiting on Parts';
+  const nextStatus: WorkOrderStatus = currentStatus === 'waiting' ? 'completed' : 'waiting';
+
+  if (!order) {
+    return (
+      <div className="screen-stack">
+        <section className="content-section">
+          <h2>No Work Order Selected</h2>
+          <p className="empty-state">Open a work order from the queue to view details.</p>
+          <button className="secondary-action" type="button" onClick={() => setActiveScreen('work-orders')}>
+            Back to Work Orders
+          </button>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="screen-stack">
       {createdFromDraft && (
@@ -2002,16 +2335,16 @@ function WorkOrderDetailScreen({
 
       <section className="work-title">
         <div>
-          <h2>W12 won't drain</h2>
-          <span>Created today 8:25 AM</span>
+          <h2>{order.machineNumber} {order.title}</h2>
+          <span>{order.number} / {order.location}</span>
         </div>
-        <StatusBadge status="down">High</StatusBadge>
+        <StatusBadge status={priorityToBadgeStatus(order.priority)}>{order.priority}</StatusBadge>
       </section>
 
       <div className="stepper">
         {steps.map((step, index) => {
-          const active = index <= 2;
-          const current = index === 2;
+          const active = index <= activeIndex;
+          const current = index === activeIndex;
           return (
             <div className={`step ${active ? 'done' : ''} ${current ? 'current' : ''}`} key={step}>
               <span>{active ? (current ? <Wrench size={14} /> : <Check size={14} />) : <Circle size={13} />}</span>
@@ -2026,19 +2359,19 @@ function WorkOrderDetailScreen({
           <div className="avatar"><UserRound size={18} /></div>
           <div>
             <span>Assigned To</span>
-            <strong>Mike R.</strong>
+            <strong>{order.assignee}</strong>
             <small>Technician</small>
           </div>
         </div>
         <div className="status-box">
           <span>Status</span>
-          <strong>In Progress</strong>
-          <small>Since 9:10 AM</small>
+          <strong>{order.statusLabel}</strong>
+          <small>{order.due}</small>
         </div>
       </section>
 
-      <InfoBlock label="Symptoms" value="Water left in drum after cycle" />
-      <InfoBlock label="Error Code" value="E04" />
+      <InfoBlock label="Symptoms" value={order.title} />
+      <InfoBlock label="Machine Model" value={order.machineModel} />
 
       <section className="content-section compact">
         <h2>Photos</h2>
@@ -2060,12 +2393,30 @@ function WorkOrderDetailScreen({
         ))}
         <div className="cost-total">
           <span>Estimated Total</span>
-          <strong>$220.75</strong>
+          <strong>{order.estimate}</strong>
         </div>
       </section>
 
-      <button className="primary-action sticky-action" type="button" onClick={() => setActiveScreen('work-orders')}>
-        <Hourglass size={19} /> Mark Waiting on Parts
+      {error && (
+        <div className="auth-message">
+          <strong>Could not update work order</strong>
+          <span>{error}</span>
+        </div>
+      )}
+
+      <button
+        className="primary-action sticky-action"
+        type="button"
+        disabled={busy || currentStatus === 'completed'}
+        onClick={() => {
+          if (orgConnected) {
+            void onUpdateStatus(nextStatus);
+            return;
+          }
+          setActiveScreen('work-orders');
+        }}
+      >
+        <Hourglass size={19} /> {busy ? 'Saving...' : statusButtonLabel}
       </button>
     </div>
   );
@@ -2372,15 +2723,7 @@ function MachineThumb() {
 function MachineIllustration() {
   return (
     <div className="machine-illustration" aria-hidden="true">
-      <div className="machine-panel">
-        <span />
-        <span />
-        <span />
-      </div>
-      <div className="machine-big-door">
-        <div />
-      </div>
-      <div className="machine-base" />
+      <img src={washerImage} alt="" />
     </div>
   );
 }

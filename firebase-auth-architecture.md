@@ -11,7 +11,7 @@ LaundryOps should use Firebase for:
 - Sign-in and user identity.
 - Company, location, machine, work order, manual, and subscription data.
 - File storage for manuals, photos, invoices, and exports.
-- Server-side functions for account setup, invitations, manual processing, AI Repair Assist, audit logs, backups, and billing updates.
+- Server-side functions for account setup, manual processing, AI Repair Assist, audit logs, backups, and billing updates.
 
 OpenAI should be called only from the backend. The mobile app should never contain an OpenAI API key, service account key, billing webhook secret, or trusted repair-answer logic.
 
@@ -49,7 +49,6 @@ users/{userId}
 
 organizations/{organizationId}
 organizations/{organizationId}/memberships/{userId}
-organizations/{organizationId}/invitations/{inviteId}
 organizations/{organizationId}/locations/{locationId}
 organizations/{organizationId}/machines/{machineId}
 organizations/{organizationId}/workOrders/{workOrderId}
@@ -127,22 +126,19 @@ currentPeriodEnd
 updatedAt
 ```
 
-## Technician Invite Flow
+## Individual Account Flow For V1
 
-Technicians should not self-join a company by typing a company name. They should be invited.
+Launch V1 does not include technician invitations.
 
-Recommended flow:
+Every user who wants LaundryOps creates their own account, starts their own 14-day free trial, and pays for their own subscription. A repair technician can still use LaundryOps, but they use it as their own paying workspace, not as a free invited user inside someone else's account.
 
-1. Owner or admin creates an invitation.
-2. Backend writes `organizations/{organizationId}/invitations/{inviteId}`.
-3. Invitation includes role, allowed location IDs, email, expiration, and status.
-4. Technician opens the invite link and signs in or creates an account.
-5. Backend validates the invite.
-6. Backend creates the technician membership.
-7. Backend marks the invite as accepted.
-8. Backend writes an audit log entry.
+This keeps launch simpler:
 
-This prevents the wrong technician from joining the wrong customer account.
+1. One signup path.
+2. One company workspace per paying account.
+3. One subscription owner.
+4. No invite tokens, invite acceptance screens, or cross-company join risk.
+5. Team seats can be reconsidered later as a paid upgrade.
 
 ## Location Access
 
@@ -245,8 +241,6 @@ Storage access should follow Firestore membership checks:
 Build these backend functions before trusting the app with live customers:
 
 - `createOrganizationTrial`: creates the owner, organization, first location, membership, subscription trial, and audit log.
-- `inviteUser`: creates controlled user invitations.
-- `acceptUserInvite`: validates invite tokens and creates memberships.
 - `processManualUpload`: extracts manual text, chunks it, and prepares it for search.
 - `runRepairAssist`: retrieves relevant manual sections, calls OpenAI, and stores the result.
 - `createWorkOrderFromDiagnosis`: lets AI output become a real work order with human confirmation.
@@ -265,12 +259,11 @@ Build these backend functions before trusting the app with live customers:
 7. Write rule tests for org separation, roles, location access, manuals, billing, and audit logs.
 8. Wire the mobile app to Firebase Auth.
 9. Add owner trial creation.
-10. Add technician invitations.
-11. Connect machines and work orders to Firestore.
-12. Add secure file uploads.
-13. Add manual processing.
-14. Add OpenAI Repair Assist through the backend.
-15. Add billing/trial enforcement.
+10. Connect machines and work orders to Firestore.
+11. Add secure file uploads.
+12. Add manual processing.
+13. Add OpenAI Repair Assist through the backend.
+14. Add billing/trial enforcement.
 
 ## Security Test Checklist
 
@@ -317,4 +310,3 @@ These do not block the architecture, but they should be decided before launch:
 ## Recommended Next Step
 
 Implement the Firebase project foundation and local emulator setup, then write the first version of the security rules and rule tests before connecting the production mobile UI to real customer data.
-

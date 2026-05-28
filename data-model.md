@@ -100,12 +100,11 @@ Membership key fields:
 - `userId`.
 - `role`.
 - `allowedLocationIds`: optional location limits.
-- `status`: invited, active, disabled.
-- `invitedBy`, `invitedAt`, `acceptedAt`.
+- `status`: active, disabled.
 
 Why it matters:
 
-- A technician can work for one organization without seeing another.
+- Launch V1 keeps one paying workspace per account.
 - A multi-location business can limit staff to certain locations.
 - Every important change can show who made it.
 
@@ -381,7 +380,7 @@ Audit logs record important account, security, and data changes. They should be 
 
 Examples:
 
-- User invited.
+- User created account.
 - Role changed.
 - Machine deleted.
 - Work order restored.
@@ -483,7 +482,7 @@ Can:
 - Manage organization profile.
 - Manage billing and subscription.
 - Add, edit, and delete locations.
-- Invite, remove, and change user roles.
+- Manage account access when team seats are added later.
 - Add, edit, and retire machines.
 - Create and manage work orders.
 - Upload and delete manuals.
@@ -633,7 +632,7 @@ For the first paid launch, build these first:
 
 - Organizations.
 - Locations.
-- Users and memberships.
+- Users and owner memberships.
 - Machines.
 - Work orders.
 - Maintenance events.
@@ -644,4 +643,4 @@ For the first paid launch, build these first:
 - Audit logs.
 - Backups/checkpoints.
 
-This is enough to support the core promise of LaundryOps: owners know what is broken, technicians know what to fix, repair history is organized, AI helps with diagnosis, and the business has control over cost and downtime.
+This is enough to support the core promise of LaundryOps: owners know what is broken, repair history is organized, AI helps with diagnosis, and the business has control over cost and downtime. Technicians who want LaundryOps in launch V1 should create their own paid workspace instead of joining by invite.

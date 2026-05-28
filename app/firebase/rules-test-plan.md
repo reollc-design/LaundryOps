@@ -11,7 +11,7 @@ These are the security cases that need automated emulator tests before launch.
 - A manager can work only inside assigned locations.
 - A technician can read assigned-location machines and assigned work orders.
 - A technician cannot read unassigned locations.
-- A technician cannot change billing, roles, memberships, invitations, manual chunks, AI cost fields, backups, or audit logs.
+- A technician cannot change billing, roles, memberships, manual chunks, AI cost fields, backups, or audit logs.
 - A viewer cannot write operational records.
 - Manual chunks cannot be created, updated, or deleted by the mobile app.
 - AI diagnosis records cannot be created, updated, or deleted by the mobile app.
@@ -54,4 +54,3 @@ Create emulator tests for:
 6. Subscription write denial.
 7. Audit log write denial.
 8. Storage upload/read permissions.
-

@@ -366,6 +366,12 @@ button:focus-visible {
   font-weight: 750;
 }
 
+.welcome-brand > div:last-child > span {
+  color: #fff;
+  font-size: 17px;
+  font-weight: 950;
+}
+
 .welcome-brand strong,
 .setup-header strong {
   display: block;
@@ -442,7 +448,7 @@ button:focus-visible {
 
 .welcome-secondary-actions {
   display: grid;
-  grid-template-columns: 1fr 1.25fr;
+  grid-template-columns: 1fr;
   gap: 9px;
 }
 
@@ -542,15 +548,9 @@ button:focus-visible {
   color: var(--ai);
 }
 
-.access-icon.invite {
-  background: #e8f8f5;
-  color: var(--teal);
-}
-
 .access-copy span,
 .auth-field span,
-.auth-message span,
-.invite-permission small {
+.auth-message span {
   display: block;
   color: var(--muted);
   font-size: 11px;
@@ -651,46 +651,6 @@ button:focus-visible {
 
 .trial-proof-card.light {
   background: #f8fffd;
-}
-
-.invite-summary {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.invite-permission {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 30px 1fr;
-  gap: 8px;
-  align-items: start;
-  padding: 10px;
-  border: 1px solid var(--divider);
-  border-radius: 10px;
-  background: #fff;
-}
-
-.invite-permission > span {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: #e8f8f5;
-  color: var(--teal);
-}
-
-.invite-permission strong {
-  display: block;
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.2;
-  font-weight: 950;
-}
-
-.invite-permission small {
-  margin-top: 3px;
 }
 
 .setup-header {
@@ -1446,51 +1406,19 @@ button:focus-visible {
 }
 
 .machine-illustration {
-  height: 142px;
-  border: 1px solid #9eaab6;
-  border-radius: 8px;
-  background: linear-gradient(180deg, #dce3e9 0%, #a9b5c0 100%);
-  padding: 10px;
-}
-
-.machine-panel {
-  display: flex;
-  gap: 5px;
-  height: 24px;
-  padding: 5px;
-  border-radius: 4px;
-  background: #324253;
-}
-
-.machine-panel span {
-  flex: 1;
-  border-radius: 2px;
-  background: #8fb0c6;
-}
-
-.machine-big-door {
-  width: 82px;
-  height: 82px;
-  margin: 10px auto 0;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: #253241;
+  height: 142px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
 }
 
-.machine-big-door div {
-  width: 58px;
-  height: 58px;
-  border-radius: 50%;
-  background: radial-gradient(circle, #e1e9ee 0 35%, #748391 36% 100%);
-}
-
-.machine-base {
-  width: 90%;
-  height: 9px;
-  margin: 8px auto 0;
-  border-radius: 4px;
-  background: #647281;
+.machine-illustration img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .issue-card {
@@ -2737,6 +2665,16 @@ button:focus-visible {
   margin-top: 4px;
 }
 
+.subscription-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.subscription-actions .secondary-action {
+  width: 100%;
+}
+
 .location-list {
   display: flex;
   flex-direction: column;
@@ -3492,6 +3430,241 @@ button:focus-visible {
   color: var(--teal);
 }
 
+@media (min-width: 900px) {
+  body {
+    background:
+      radial-gradient(circle at 18% 0%, rgba(29, 95, 219, 0.12), transparent 34%),
+      linear-gradient(180deg, #f7fafc 0%, #eef3f7 100%);
+  }
+
+  .app-canvas {
+    display: block;
+    min-height: 100vh;
+    padding: 0;
+  }
+
+  .phone-frame {
+    width: 100%;
+  }
+
+  .phone-shell {
+    width: 100%;
+    height: 100vh;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: #eef3f7;
+    box-shadow: none;
+  }
+
+  .phone-shell::before,
+  .status-bar {
+    display: none;
+  }
+
+  .workspace-shell {
+    display: grid;
+    grid-template-columns: 264px minmax(0, 1fr);
+    grid-template-rows: 84px minmax(0, 1fr);
+  }
+
+  .workspace-shell .app-header {
+    grid-column: 2;
+    grid-row: 1;
+    height: auto;
+    padding: 16px 28px;
+    grid-template-columns: 42px minmax(0, 1fr) 46px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.96);
+    color: var(--text);
+    box-shadow: 0 8px 24px rgba(10, 23, 38, 0.05);
+  }
+
+  .workspace-shell .brand-mark {
+    border-radius: 12px;
+    background: #e8f1ff;
+  }
+
+  .workspace-shell .brand-lines,
+  .workspace-shell .brand-lines::before,
+  .workspace-shell .brand-lines::after {
+    background: var(--primary);
+  }
+
+  .workspace-shell .header-copy h1 {
+    font-size: 24px;
+  }
+
+  .workspace-shell .location-chip,
+  .workspace-shell .header-subtitle {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .workspace-shell .header-icon {
+    color: var(--ink);
+  }
+
+  .workspace-shell .screen-content {
+    grid-column: 2;
+    grid-row: 2;
+    height: auto;
+    min-height: 0;
+    padding: 24px 28px 36px;
+    overflow-y: auto;
+  }
+
+  .workspace-shell .screen-content > .screen-stack,
+  .workspace-shell .screen-content > .content-section,
+  .workspace-shell .screen-content > .auth-message {
+    width: min(100%, 1180px);
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  .workspace-shell .bottom-nav {
+    position: relative;
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 24px 16px;
+    border-top: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    background: #061427;
+    color: #c7d3df;
+    backdrop-filter: none;
+  }
+
+  .workspace-shell .bottom-nav::before {
+    content: "LaundryOps";
+    display: block;
+    margin: 3px 0 20px;
+    padding: 0 12px;
+    color: #fff;
+    font-size: 21px;
+    font-weight: 950;
+    letter-spacing: 0;
+  }
+
+  .workspace-shell .nav-item {
+    min-height: 48px;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 0 13px;
+    border-radius: 10px;
+    color: #c7d3df;
+  }
+
+  .workspace-shell .nav-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+  }
+
+  .workspace-shell .nav-item span {
+    max-width: none;
+    font-size: 13px;
+    text-overflow: clip;
+  }
+
+  .workspace-shell .nav-item.is-active {
+    background: #e8f1ff;
+    color: var(--primary);
+  }
+
+  .workspace-shell .nav-item.is-active.is-ai {
+    background: rgba(102, 88, 211, 0.16);
+    color: #cfc9ff;
+  }
+
+  .workspace-shell .screen-stack {
+    gap: 18px;
+  }
+
+  .setup-shell {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .setup-shell .setup-content {
+    min-height: 100vh;
+    height: auto;
+    padding: 32px;
+    background:
+      linear-gradient(180deg, #061427 0 250px, transparent 250px),
+      #eef3f7;
+  }
+
+  .setup-shell .welcome-screen,
+  .setup-shell .onboarding-screen,
+  .setup-shell .access-screen {
+    width: min(100%, 1120px);
+    margin: 0 auto;
+  }
+
+  .setup-shell .welcome-screen {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 420px;
+    align-items: start;
+    gap: 18px;
+  }
+
+  .setup-shell .welcome-top {
+    grid-column: 1 / -1;
+  }
+
+  .setup-shell .welcome-hero {
+    grid-column: 1;
+    grid-row: 2 / span 4;
+    min-height: 390px;
+    grid-template-columns: minmax(0, 1fr) 190px;
+    padding: 34px;
+  }
+
+  .setup-shell .welcome-hero h1 {
+    max-width: 360px;
+    font-size: 46px;
+  }
+
+  .setup-shell .welcome-hero p {
+    max-width: 410px;
+    font-size: 16px;
+    line-height: 1.48;
+  }
+
+  .setup-shell .welcome-machine .machine-illustration {
+    width: 188px;
+    height: 230px;
+  }
+
+  .setup-shell .welcome-primary {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: 0;
+  }
+
+  .setup-shell .welcome-secondary-actions {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .setup-shell .trial-feature-list {
+    grid-column: 2;
+    grid-row: 4;
+  }
+
+  .setup-shell .trial-proof-card {
+    grid-column: 2;
+    grid-row: 5;
+  }
+}
+
 @media (max-width: 460px) {
   .app-canvas {
     padding: 0;
@@ -3522,7 +3695,6 @@ button:focus-visible {
     .trial-card,
     .account-stat-grid,
     .welcome-secondary-actions,
-    .invite-summary,
     .report-period-card,
     .report-hero,
     .report-metric-grid,

@@ -78,7 +78,7 @@ Monthly subscription.
 Recommended initial pricing:
 
 - Starter: $19/month for one location, basic machine tracking, work orders, and reports.
-- Pro: $49/month for AI diagnosis, manual search, photo uploads, advanced reports, and multiple users.
+- Pro: $49/month for AI diagnosis, manual search, photo uploads, and advanced reports.
 - Multi-location: $99+/month for multiple laundromats, location-level reporting, admin roles, and higher AI usage.
 
 Offer a 14-day free trial.
@@ -137,7 +137,11 @@ Must include:
 - Business name.
 - Location setup.
 - Add first machine.
-- Invite technician option.
+- Upload first manual option.
+
+Launch V1 account rule:
+
+- Every user signs up for their own LaundryOps account, starts their own 14-day trial, and pays for their own subscription. Technician invite flows are not part of launch V1.
 
 ### 2. Login
 

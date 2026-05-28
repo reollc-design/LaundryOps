@@ -2,7 +2,6 @@ export type ScreenKey =
   | 'welcome'
   | 'sign-in'
   | 'create-account'
-  | 'technician-invite'
   | 'owner-onboarding'
   | 'home'
   | 'machines'
@@ -87,7 +86,7 @@ export interface OnboardingStep {
   id: string;
   title: string;
   detail: string;
-  icon: 'account' | 'location' | 'machine' | 'team' | 'manual';
+  icon: 'account' | 'location' | 'machine' | 'manual';
 }
 
 export interface TrialFeature {
@@ -492,9 +491,9 @@ export const accountStats: AccountStat[] = [
   },
   {
     id: 'users',
-    label: 'Users',
-    value: '5',
-    detail: 'Owner, manager, and technician seats',
+    label: 'Account',
+    value: '1',
+    detail: 'Every user starts their own trial',
   },
   {
     id: 'ai',
@@ -538,7 +537,7 @@ export const trialFeatures: TrialFeature[] = [
   {
     id: 'work-orders',
     title: 'Professional work orders',
-    detail: 'Track repair status, technician assignment, parts, labor, and photos.',
+    detail: 'Track repair status, assignee, parts, labor, and photos.',
   },
   {
     id: 'manual-ai',
@@ -570,12 +569,6 @@ export const onboardingSteps: OnboardingStep[] = [
     title: 'Add first machine',
     detail: 'W12 / Speed Queen SC40',
     icon: 'machine',
-  },
-  {
-    id: 'team',
-    title: 'Invite technician',
-    detail: 'Optional, can be skipped',
-    icon: 'team',
   },
   {
     id: 'manual',

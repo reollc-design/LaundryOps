@@ -56,7 +56,6 @@ export interface OwnerOnboardingDraft {
   machineNumber: string;
   machineType: string;
   machineModel: string;
-  technicianName: string;
   manualName: string;
 }
 
@@ -81,7 +80,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     machineNumber: draft.machineNumber.trim(),
     machineType: draft.machineType.trim(),
     machineModel: draft.machineModel.trim(),
-    technicianName: draft.technicianName.trim(),
     manualName: draft.manualName.trim(),
   };
 

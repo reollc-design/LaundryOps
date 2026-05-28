@@ -60,13 +60,11 @@ Content order:
    - Create company account.
    - Add first location.
    - Add first machine.
-   - Invite technician, optional.
    - Upload first manual, optional.
 4. Current setup form:
    - Business information.
    - Location information.
    - First machine.
-   - Optional technician.
    - Optional manual.
 5. Continue / skip / finish actions.
 
@@ -78,7 +76,7 @@ Implementation notes:
 ## Screen 0B: Access Screens
 
 Goal:
-Give each user type a clear way into the app before Firebase authentication is wired.
+Give users a clear way to sign in or start their own trial before Firebase authentication is fully wired.
 
 Screens:
 
@@ -95,18 +93,11 @@ Screens:
    - Password.
    - 14-day trial confirmation.
    - Continue to owner onboarding.
-3. Technician Invite:
-   - Invited company.
-   - Technician role.
-   - Location access.
-   - Work order permissions.
-   - Camera/photo and manual/AI access.
-   - Accept invite.
 
 Implementation notes:
 
-- Owners and technicians should not enter through the same generic path.
-- Technician invite should hide billing, subscription, and company admin controls.
+- Launch V1 has no technician invite flow.
+- A technician who wants LaundryOps should create their own account, start their own 14-day trial, and pay like any other user.
 - Forgot password should show a clear reset state now and later connect to Firebase Auth.
 
 ## Product Rule For Repair Assist

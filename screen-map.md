@@ -32,7 +32,7 @@ LaundryOps should have three navigation areas:
    - Subscription trial setup
    - First location setup
    - First machine setup
-   - Invite technician
+   - First manual upload
 
 3. Main app screens
    - Home / Command Center
@@ -68,22 +68,9 @@ Use no more than five bottom navigation items. Android users should always know 
 5. Reports
    - Repair cost, downtime, repeat failures, replacement decisions.
 
-### Technician Bottom Nav
+### Service Tech User
 
-1. Today
-   - Assigned work and urgent issues.
-
-2. Work Orders
-   - Full list of work assigned to the technician.
-
-3. Machines
-   - Machine lookup, QR scan, machine detail, repair history.
-
-4. AI Assist
-   - Troubleshooting while standing in front of the machine.
-
-5. Manuals
-   - Fast manual search and saved machine manuals.
+A technician can still use LaundryOps, but in launch V1 they sign up, start a trial, and pay like any other customer. They do not join another company's account by invite.
 
 ### Global Quick Action
 
@@ -97,7 +84,7 @@ Recommended quick actions:
 - Ask AI
 - Upload photo
 
-The quick action menu should change slightly by role. Owners get Add Machine and Invite Tech. Technicians get Start Work Order and Scan Machine.
+The quick action menu should focus on work: scan machine QR code, create work order, add machine, ask AI, and upload photo.
 
 ## User Roles
 
@@ -124,7 +111,7 @@ Owners should be able to:
 - Add, edit, and retire machines
 - Create and assign work orders
 - Upload manuals
-- Invite technicians
+- Manage their own account and subscription
 - View all locations
 - View all reports
 - Manage subscription
@@ -178,7 +165,6 @@ Key actions:
 
 - Sign in
 - Start free trial
-- Accept technician invite
 
 Notes:
 Keep this practical. Do not make it feel like a marketing website. The app should move users into setup quickly.
@@ -203,13 +189,11 @@ Required states:
 - Wrong password
 - Account not found
 - No internet
-- Invite expired
 
 Recommended UI split:
 
-- Returning owner, admin, manager, or technician uses Sign In.
-- New owner uses Create Account and then starts the 14-day trial setup.
-- Invited technician uses Technician Invite and lands in assigned work, not billing or company admin.
+- Returning users use Sign In.
+- New users use Create Account and then start the 14-day trial setup.
 
 ## 3. Owner Onboarding
 
@@ -223,27 +207,26 @@ Recommended steps:
 3. Add business name
 4. Add first location
 5. Add first machine
-6. Invite technician, optional
-7. Upload first manual, optional
-8. Land on Home / Command Center
+6. Upload first manual, optional
+7. Land on Home / Command Center
 
 The onboarding should not ask for everything upfront. Get enough information to make the app useful, then let the owner continue inside the app.
 
-## 4. Technician Onboarding
+## 4. Individual Account Setup
 
 Purpose:
-Let a technician join an existing business with limited setup.
+Let any user, including an independent service technician, create their own paid LaundryOps workspace.
 
 Recommended steps:
 
-1. Open invite link
-2. Sign in or create account
-3. Confirm name and phone, optional
-4. Accept role and location access
-5. See a short permission screen for camera/photo use
-6. Land on Today
+1. Create account
+2. Start 14-day trial
+3. Add business or service company name
+4. Add first location or customer location
+5. Add first machine
+6. Land on Home / Command Center
 
-Technicians should not create a business unless they choose owner setup instead.
+Launch V1 has no technician invite flow. Team access can be reconsidered later as a paid add-on.
 
 ## 5. Home / Command Center
 
@@ -591,18 +574,18 @@ Fields:
 - QR code
 - Notes
 
-## Add / Invite Technician
+## Account Access
 
 Purpose:
-Let owners add people without giving them full account access.
+Keep launch V1 simple with one paid workspace per account.
 
 Fields:
 
 - Name
-- Email or phone
-- Role
-- Location access
-- Permission level
+- Email
+- Password
+- Company/workspace name
+- Subscription status
 
 ## Subscription / Trial
 
@@ -657,27 +640,23 @@ Should include:
 4. Create company account
 5. Add first location
 6. Add first machine
-7. Optionally invite a technician
-8. Optionally upload a manual
-9. Land on Home / Command Center
+7. Optionally upload a manual
+8. Land on Home / Command Center
 
 Success state:
 The owner sees at least one machine and clear next actions.
 
-## Flow 2: Technician Invite
+## Flow 2: Service Technician Signup
 
-1. Owner sends invite
-2. Technician opens invite
-3. Technician signs in or creates account
-4. Technician confirms profile
-5. Technician accepts role
-6. Technician lands on Today
+1. Technician opens app
+2. Technician taps Start free trial
+3. Technician creates account
+4. Technician adds their business or service workspace
+5. Technician adds machines or customer locations they manage
+6. Technician chooses a paid plan after the trial
 
 Success state:
-The technician sees assigned work and can scan/search machines.
-
-Current UI prototype:
-Technician Invite shows the company, role, location access, work order permissions, photo access, and manual/AI access. Accepting the invite currently lands in Work Orders until a dedicated Today screen is built.
+The technician has their own paid workspace and can use machines, work orders, manuals, and Repair Assist without joining another company's account.
 
 ## Flow 3: Create Work Order
 
@@ -762,10 +741,10 @@ These should be built for the first serious launch.
 
 | Screen | Include In V1 | Notes |
 | --- | --- | --- |
-| Welcome | Yes | Simple entry to sign in, trial, or invite. |
+| Welcome | Yes | Simple entry to sign in or start trial. |
 | Sign in / Create account | Yes | Required for secure account access. |
 | Owner onboarding | Yes | Business, plan, location, first machine. |
-| Technician invite onboarding | Yes | Needed for technician workflow. |
+| Technician invite onboarding | No | Removed from launch V1. Technicians sign up and pay like any other user. |
 | Home / Command Center | Yes | Main operating screen. |
 | Machines | Yes | Search, filters, machine status, add/edit. |
 | Machine Detail | Yes | History, costs, manuals, AI, work orders. |

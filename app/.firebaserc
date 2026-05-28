@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "laundromat-maintenance-app"
+  },
+  "targets": {
+    "laundromat-maintenance-app": {
+      "hosting": {
+        "laundryops": [
+          "laundryops-maintenance-app"
+        ]
+      }
+    }
+  }
+}
