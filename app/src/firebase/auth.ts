@@ -55,7 +55,8 @@ export interface OwnerOnboardingDraft {
   locationCityState: string;
   machineNumber: string;
   machineType: string;
-  machineModel: string;
+  machineMake: string;
+  machineModelNumber: string;
   manualName: string;
 }
 
@@ -79,9 +80,11 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     locationCityState: draft.locationCityState.trim(),
     machineNumber: draft.machineNumber.trim(),
     machineType: draft.machineType.trim(),
-    machineModel: draft.machineModel.trim(),
+    machineMake: draft.machineMake.trim(),
+    machineModelNumber: draft.machineModelNumber.trim(),
     manualName: draft.manualName.trim(),
   };
+  const machineModel = `${trimmedDraft.machineMake} ${trimmedDraft.machineModelNumber}`.trim();
 
   const organizationRef = doc(collection(db, 'organizations'));
   const membershipRef = doc(db, `organizations/${organizationRef.id}/memberships/${user.uid}`);
@@ -116,7 +119,9 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
   await setDoc(machineRef, {
     machineNumber: trimmedDraft.machineNumber,
     type: trimmedDraft.machineType,
-    model: trimmedDraft.machineModel,
+    make: trimmedDraft.machineMake,
+    modelNumber: trimmedDraft.machineModelNumber,
+    model: machineModel || trimmedDraft.machineModelNumber || trimmedDraft.machineMake,
     locationId: locationRef.id,
     status: 'running',
     statusLabel: 'Running',

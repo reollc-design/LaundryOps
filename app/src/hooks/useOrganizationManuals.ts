@@ -57,9 +57,9 @@ function normalizeManualStatus(value: unknown): ManualStatus {
 
 function coverageLabel(status: ManualStatus, linkedMachineCount: number): string {
   if (status === 'missing') {
-    return `${linkedMachineCount} machines ungrounded`;
+    return `${linkedMachineCount} machines need this manual`;
   }
-  return `${linkedMachineCount} machines linked`;
+  return `${linkedMachineCount} machines use this model`;
 }
 
 function pagesLabel(status: ManualStatus, pageCount: number | null): string {
@@ -95,9 +95,9 @@ function sourceLabel(status: ManualStatus, indexError: string | null, source: st
     return 'Ready for grounded AI repair answers';
   }
   if (status === 'processing') {
-    return 'Indexing manual and linking machines';
+    return 'Indexing manual and preparing model matching';
   }
-  return 'AI will use general guidance until linked';
+  return 'AI will use general guidance until a manual is uploaded';
 }
 
 function requireDb(): Firestore | null {

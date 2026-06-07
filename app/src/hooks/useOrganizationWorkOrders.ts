@@ -19,6 +19,28 @@ function asString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.max(0, value));
+}
+
 function normalizeWorkOrderStatus(rawStatus: string | null): WorkOrderStatus {
   if (!rawStatus) {
     return 'open';
@@ -141,10 +163,16 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             (locationId ? locationNames[locationId] : null) ??
             (machineFromLookup?.locationId ? locationNames[machineFromLookup.locationId] : null) ??
             'Location not set';
+          const partsCostValue = asNumber(data.partsCost) ?? 0;
+          const laborCostValue = asNumber(data.laborCost) ?? 0;
+          const partsCost = formatUsd(partsCostValue);
+          const laborCost = formatUsd(laborCostValue);
+          const totalCost = formatUsd(partsCostValue + laborCostValue);
 
           return {
             id,
             number: asString(data.number) ?? id.toUpperCase(),
+            machineId,
             machineNumber,
             machineModel,
             title: asString(data.title) ?? 'Work order',
@@ -155,7 +183,9 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             assignee: asString(data.assigneeName) ?? asString(data.assignedUserId) ?? 'Unassigned',
             due: displayDue(asString(data.dueLabel) ?? asString(data.due)),
             source: (asString(data.source) === 'AI draft' || asString(data.source) === 'Preventive') ? (asString(data.source) as 'AI draft' | 'Preventive') : 'Manual entry',
-            estimate: asString(data.estimate) ?? '$0.00',
+            partsCost,
+            laborCost,
+            estimate: asString(data.estimate) ?? totalCost,
           } satisfies WorkOrderSummary;
         })
         .sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true, sensitivity: 'base' }));

@@ -24,11 +24,12 @@ import {
   Mail,
   MapPin,
   MoreVertical,
+  Pencil,
   Plus,
-  QrCode,
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   TrendingDown,
   UserPlus,
   UserRound,
@@ -38,7 +39,6 @@ import {
 import {
   accountStats,
   aiWorkOrderDraft,
-  costRows,
   downtimeTrend,
   locationSummaries,
   machineCatalog,
@@ -60,18 +60,24 @@ import { useAuthSession } from './hooks/useAuthSession';
 import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
-import { createWorkOrderFromDraft, updateWorkOrderStatus } from './firebase/workOrders';
+import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
+import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
-import { useOrganizationLocations } from './hooks/useOrganizationLocations';
+import { useOrganizationLocations, type OrganizationLocation } from './hooks/useOrganizationLocations';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
-type MachineFilter = 'all' | MachineStatus;
+type MachineFilter = 'all' | MachineOperationalStatus;
 type WorkOrderStatusFilter = 'all' | Exclude<WorkOrderStatus, 'in-progress'>;
 type WorkOrderPriorityFilter = 'all' | WorkOrderPriority;
 type BillingAction = 'checkout' | 'portal';
+type AssistPreset = {
+  machineId: string;
+  machineNumber: string;
+  machineModel: string;
+};
 
 const billingPlans: {
   key: BillingPlanKey;
@@ -118,16 +124,16 @@ const screenTitles: Record<ScreenKey, string> = {
   account: 'Account',
   'create-work-order': 'New Work Order',
   'work-orders': 'Work Orders',
-  'work-order-detail': 'Work Order #WO-1042',
+  'work-order-detail': 'Work Order Detail',
   'ai-assist': 'Repair Assist',
   reports: 'Reports',
 };
 
 const machineFilters: { key: MachineFilter; label: string }[] = [
   { key: 'all', label: 'All' },
+  { key: 'running', label: 'Operational' },
+  { key: 'needs-repair', label: 'Needs Repair' },
   { key: 'down', label: 'Down' },
-  { key: 'needs-repair', label: 'Repair' },
-  { key: 'waiting', label: 'Parts' },
 ];
 
 const workOrderStatusFilters: { key: WorkOrderStatusFilter; label: string }[] = [
@@ -233,25 +239,151 @@ function findMachines(query: string, machines: UrgentMachine[]) {
   });
 }
 
+function machineStatusLabel(status: MachineOperationalStatus): string {
+  if (status === 'down') {
+    return 'Down';
+  }
+  if (status === 'needs-repair') {
+    return 'Needs Repair';
+  }
+  return 'Operational';
+}
+
+function machineStatusSince(status: MachineOperationalStatus): string {
+  if (status === 'down') {
+    return 'Out of service';
+  }
+  if (status === 'needs-repair') {
+    return 'Open work order';
+  }
+  return 'No open issues';
+}
+
+function toOperationalStatus(status: MachineStatus): MachineOperationalStatus {
+  if (status === 'down') {
+    return 'down';
+  }
+  if (status === 'waiting') {
+    return 'down';
+  }
+  if (status === 'needs-repair') {
+    return 'needs-repair';
+  }
+  return 'running';
+}
+
+function applyStatusOverrides(
+  machines: UrgentMachine[],
+  overrides: Record<string, MachineOperationalStatus>,
+): UrgentMachine[] {
+  return machines.map((machine) => {
+    const override = overrides[machine.id];
+    if (!override) {
+      return machine;
+    }
+    return {
+      ...machine,
+      status: override,
+      statusLabel: machineStatusLabel(override),
+      since: machineStatusSince(override),
+    };
+  });
+}
+
+function machineStatusCounts(machines: UrgentMachine[]): {
+  total: number;
+  operational: number;
+  repair: number;
+  down: number;
+} {
+  let operational = 0;
+  let repair = 0;
+  let down = 0;
+
+  for (const machine of machines) {
+    const status = toOperationalStatus(machine.status);
+    if (status === 'running') {
+      operational += 1;
+      continue;
+    }
+    if (status === 'needs-repair') {
+      repair += 1;
+      continue;
+    }
+    down += 1;
+  }
+
+  return {
+    total: machines.length,
+    operational,
+    repair,
+    down,
+  };
+}
+
+interface WorkOrderCostEntry {
+  priority: WorkOrderPriority;
+  assigneeName: string;
+  partsCost: number;
+  laborCost: number;
+}
+
+function parseUsdAmount(value: string): number | null {
+  const sanitized = value.replace(/[^0-9.]/g, '').trim();
+  if (!sanitized) {
+    return null;
+  }
+
+  if ((sanitized.match(/\./g) ?? []).length > 1) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(sanitized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return Math.round(parsed * 100) / 100;
+}
+
+function formatUsdAmount(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 export function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenKey>(() => getInitialScreen());
   const [workOrderReturnScreen, setWorkOrderReturnScreen] = useState<ScreenKey>('machine-detail');
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
+  const [createWorkOrderMachineId, setCreateWorkOrderMachineId] = useState<string | null>(null);
+  const [machineFilterPreset, setMachineFilterPreset] = useState<MachineFilter | null>(null);
+  const [assistPreset, setAssistPreset] = useState<AssistPreset | null>(null);
   const [selectedWorkOrderId, setSelectedWorkOrderId] = useState<string | null>(null);
   const [createdFromDraft, setCreatedFromDraft] = useState(false);
   const [workOrderBusy, setWorkOrderBusy] = useState(false);
   const [workOrderError, setWorkOrderError] = useState<string | null>(null);
+  const [workOrderDeleteBusyId, setWorkOrderDeleteBusyId] = useState<string | null>(null);
+  const [workOrderDeleteError, setWorkOrderDeleteError] = useState<string | null>(null);
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const [billingBusyAction, setBillingBusyAction] = useState<BillingAction | null>(null);
   const [billingError, setBillingError] = useState<string | null>(null);
+  const [machineStatusOverrides, setMachineStatusOverrides] = useState<Record<string, MachineOperationalStatus>>({});
+  const [machineStatusBusyId, setMachineStatusBusyId] = useState<string | null>(null);
+  const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
   const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>({
-    businessName: 'Sun State Laundry',
-    locationName: 'Main Street',
-    locationCityState: 'Daytona Beach, FL',
-    machineNumber: 'W12',
+    businessName: '',
+    locationName: '',
+    locationCityState: '',
+    machineNumber: '',
     machineType: 'Washer',
-    machineModel: 'Speed Queen SC40',
-    manualName: 'SC40 Service Manual',
+    machineMake: '',
+    machineModelNumber: '',
+    manualName: '',
   });
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
@@ -261,8 +393,24 @@ export function App() {
   const orgLocations = useOrganizationLocations(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
-  const machineCatalogData = orgConnected ? orgMachines.machines : machineCatalog;
   const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
+  const machineCatalogBase = orgConnected ? orgMachines.machines : machineCatalog;
+  const machineCatalogData = useMemo(() => applyStatusOverrides(machineCatalogBase, machineStatusOverrides), [machineCatalogBase, machineStatusOverrides]);
+  const selectedMachine = useMemo(() => {
+    if (selectedMachineId) {
+      const found = machineCatalogData.find((machine) => machine.id === selectedMachineId);
+      if (found) {
+        return found;
+      }
+    }
+    return machineCatalogData[0] ?? null;
+  }, [machineCatalogData, selectedMachineId]);
+  const createWorkOrderMachine = useMemo(() => {
+    if (!createWorkOrderMachineId) {
+      return null;
+    }
+    return machineCatalogData.find((machine) => machine.id === createWorkOrderMachineId) ?? null;
+  }, [createWorkOrderMachineId, machineCatalogData]);
   const selectedWorkOrder = useMemo(() => {
     if (selectedWorkOrderId) {
       const found = workOrderQueueData.find((order) => order.id === selectedWorkOrderId);
@@ -341,6 +489,35 @@ export function App() {
       setSelectedWorkOrderId(null);
     }
   }, [selectedWorkOrderId, workOrderQueueData]);
+  useEffect(() => {
+    if (selectedMachineId && !machineCatalogData.some((machine) => machine.id === selectedMachineId)) {
+      setSelectedMachineId(null);
+    }
+  }, [selectedMachineId, machineCatalogData]);
+  useEffect(() => {
+    if (createWorkOrderMachineId && !machineCatalogData.some((machine) => machine.id === createWorkOrderMachineId)) {
+      setCreateWorkOrderMachineId(null);
+    }
+  }, [createWorkOrderMachineId, machineCatalogData]);
+  useEffect(() => {
+    if (!['machines', 'machine-detail'].includes(activeScreen) && machineFilterPreset !== null) {
+      setMachineFilterPreset(null);
+    }
+  }, [activeScreen, machineFilterPreset]);
+  useEffect(() => {
+    if (activeScreen !== 'ai-assist' && assistPreset !== null) {
+      setAssistPreset(null);
+    }
+  }, [activeScreen, assistPreset]);
+  useEffect(() => {
+    const validMachineIds = new Set(machineCatalogBase.map((machine) => machine.id));
+    setMachineStatusOverrides((previous) => {
+      const next = Object.fromEntries(
+        Object.entries(previous).filter(([machineId]) => validMachineIds.has(machineId)),
+      ) as Record<string, MachineOperationalStatus>;
+      return Object.keys(next).length === Object.keys(previous).length ? previous : next;
+    });
+  }, [machineCatalogBase]);
   const handleEmailSignIn = async (email: string, password: string): Promise<string | null> => {
     try {
       await signInWithEmail(email, password);
@@ -421,9 +598,27 @@ export function App() {
       setBillingBusyAction(null);
     }
   };
-  const openCreateWorkOrder = (returnScreen: ScreenKey) => {
+  const openMachinesScreen = (filter: MachineFilter | null = null): void => {
+    setMachineFilterPreset(filter);
+    setActiveScreen('machines');
+  };
+  const openAssistScreen = (machine: UrgentMachine | null = null): void => {
+    if (machine) {
+      const machineModel = [machine.make, machine.modelNumber].filter(Boolean).join(' • ') || machine.type || machine.machineNumber;
+      setAssistPreset({
+        machineId: machine.id,
+        machineNumber: machine.machineNumber,
+        machineModel,
+      });
+    } else {
+      setAssistPreset(null);
+    }
+    setActiveScreen('ai-assist');
+  };
+  const openCreateWorkOrder = (returnScreen: ScreenKey, machineId: string | null = null) => {
     setWorkOrderError(null);
     setWorkOrderReturnScreen(returnScreen);
+    setCreateWorkOrderMachineId(machineId);
     setActiveScreen('create-work-order');
   };
   const openWorkOrderDetail = (workOrderId: string) => {
@@ -432,20 +627,75 @@ export function App() {
     setSelectedWorkOrderId(workOrderId);
     setActiveScreen('work-order-detail');
   };
-  const handleCreateWorkOrderFromDraft = async (): Promise<void> => {
+  const openMachineDetail = (machineId: string) => {
+    setSelectedMachineId(machineId);
+    setActiveScreen('machine-detail');
+  };
+  const handleSetMachineStatus = async (machineId: string, status: MachineOperationalStatus): Promise<void> => {
+    const machine = machineCatalogData.find((item) => item.id === machineId);
+    if (!machine) {
+      return;
+    }
+
+    const normalizedCurrentStatus = toOperationalStatus(machine.status);
+    if (normalizedCurrentStatus === status) {
+      return;
+    }
+
+    setMachineStatusError(null);
+    setMachineStatusOverrides((previous) => ({
+      ...previous,
+      [machineId]: status,
+    }));
+
+    if (!orgConnected || !defaultOrganizationId) {
+      return;
+    }
+
+    setMachineStatusBusyId(machineId);
+    try {
+      await updateMachineStatus({
+        organizationId: defaultOrganizationId,
+        machineId,
+        status,
+      });
+    } catch (error) {
+      setMachineStatusOverrides((previous) => ({
+        ...previous,
+        [machineId]: normalizedCurrentStatus,
+      }));
+      setMachineStatusError(getErrorMessage(error, 'Could not update machine status. Try again.'));
+    } finally {
+      setMachineStatusBusyId((current) => (current === machineId ? null : current));
+    }
+  };
+  const handleCreateWorkOrderFromDraft = async (entry: WorkOrderCostEntry): Promise<void> => {
     setWorkOrderError(null);
+    const draftMachineNumber = createWorkOrderMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
 
     if (!orgConnected || !defaultOrganizationId) {
       setCreatedFromDraft(true);
-      setSelectedWorkOrderId(workOrderQueueData[0]?.id ?? null);
+      setSelectedWorkOrderId(
+        workOrderQueueData.find((order) => order.machineNumber === draftMachineNumber)?.id ?? workOrderQueueData[0]?.id ?? null,
+      );
       setActiveScreen('work-order-detail');
       return;
     }
 
-    const preferredMachine = orgMachines.machines.find((machine) => machine.machineNumber === aiWorkOrderDraft.machineNumber)
+    const preferredMachine = (
+      createWorkOrderMachineId
+        ? orgMachines.machines.find((machine) => machine.id === createWorkOrderMachineId)
+        : null
+    )
+      ?? orgMachines.machines.find((machine) => machine.machineNumber === aiWorkOrderDraft.machineNumber)
       ?? orgMachines.machines[0];
     const preferredLocation = orgLocations.locations.find((location) => location.name === preferredMachine?.row)
       ?? orgLocations.locations[0];
+    const machineNumber = preferredMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
+    const machineModel = preferredMachine?.type ?? aiWorkOrderDraft.machineModel;
+    const workOrderTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
+      ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, machineNumber)
+      : aiWorkOrderDraft.title;
 
     if (!preferredLocation) {
       setWorkOrderError('Add at least one location before creating a work order.');
@@ -454,18 +704,21 @@ export function App() {
 
     setWorkOrderBusy(true);
     try {
+      const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost);
       const result = await createWorkOrderFromDraft({
         organizationId: defaultOrganizationId,
         locationId: preferredLocation.id,
         locationName: preferredLocation.name,
         machineId: preferredMachine?.id ?? null,
-        machineNumber: preferredMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber,
-        machineModel: aiWorkOrderDraft.machineModel,
-        title: aiWorkOrderDraft.title,
-        priority: aiWorkOrderDraft.priority as WorkOrderPriority,
-        assigneeName: aiWorkOrderDraft.assignee,
+        machineNumber,
+        machineModel,
+        title: workOrderTitle,
+        priority: entry.priority,
+        assigneeName: entry.assigneeName,
         dueLabel: aiWorkOrderDraft.due,
-        estimate: aiWorkOrderDraft.estimate,
+        partsCost: entry.partsCost,
+        laborCost: entry.laborCost,
+        totalCostLabel: formatUsdAmount(totalCost),
       });
       setCreatedFromDraft(true);
       setSelectedWorkOrderId(result.workOrderId);
@@ -501,6 +754,33 @@ export function App() {
       setWorkOrderError(getErrorMessage(error, 'Could not update work order status. Try again.'));
     } finally {
       setWorkOrderBusy(false);
+    }
+  };
+  const handleDeleteWorkOrder = async (workOrderId: string): Promise<void> => {
+    if (!orgConnected || !defaultOrganizationId) {
+      setWorkOrderDeleteError('Complete onboarding first before deleting work orders.');
+      return;
+    }
+
+    if (!window.confirm('Delete this work order permanently?')) {
+      return;
+    }
+
+    setWorkOrderDeleteError(null);
+    setWorkOrderDeleteBusyId(workOrderId);
+    try {
+      await deleteWorkOrder({
+        organizationId: defaultOrganizationId,
+        workOrderId,
+      });
+      if (selectedWorkOrderId === workOrderId) {
+        setSelectedWorkOrderId(null);
+        setActiveScreen('work-orders');
+      }
+    } catch (error) {
+      setWorkOrderDeleteError(getErrorMessage(error, 'Could not delete work order. Try again.'));
+    } finally {
+      setWorkOrderDeleteBusyId((current) => (current === workOrderId ? null : current));
     }
   };
   const handleBack = () => {
@@ -564,7 +844,7 @@ export function App() {
                 activeScreen={activeScreen}
                 onBack={handleBack}
                 onAccountClick={() => setActiveScreen('account')}
-                locationLabel={onboardingDraft.locationName || 'Main Street'}
+                locationLabel={onboardingDraft.locationName || 'No location set'}
                 machineCount={machineCatalogData.length}
                 workOrderCount={workOrderQueueData.length}
               />
@@ -573,26 +853,46 @@ export function App() {
                 {activeScreen === 'home' && (
                   <HomeScreen
                     setActiveScreen={setActiveScreen}
+                    onOpenMachines={openMachinesScreen}
                     onCreateWorkOrder={() => openCreateWorkOrder('home')}
+                    onOpenMachineDetail={openMachineDetail}
+                    onSetMachineStatus={handleSetMachineStatus}
                     machineCatalogData={machineCatalogData}
                     urgentMachineData={urgentMachineData}
-                    workOrderQueueData={workOrderQueueData}
                     orgMachinesLoading={orgMachines.loading}
                     orgMachinesError={orgMachines.error ?? orgWorkOrders.error}
+                    machineStatusBusyId={machineStatusBusyId}
+                    machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                   />
                 )}
                 {activeScreen === 'machines' && (
                   <MachinesScreen
                     setActiveScreen={setActiveScreen}
+                    initialFilter={machineFilterPreset}
+                    onOpenMachineDetail={openMachineDetail}
+                    onCreateWorkOrder={(machineId) => openCreateWorkOrder('machines', machineId)}
+                    onOpenAiAssist={openAssistScreen}
+                    onSetMachineStatus={handleSetMachineStatus}
+                    organizationId={defaultOrganizationId}
+                    locations={orgLocations.locations}
                     machineCatalogData={machineCatalogData}
                     orgMachinesLoading={orgMachines.loading}
                     orgMachinesError={orgMachines.error}
+                    machineStatusBusyId={machineStatusBusyId}
+                    machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                   />
                 )}
                 {activeScreen === 'machine-detail' && (
-                  <MachineDetailScreen setActiveScreen={setActiveScreen} onCreateWorkOrder={() => openCreateWorkOrder('machine-detail')} />
+                  <MachineDetailScreen
+                    setActiveScreen={setActiveScreen}
+                    machine={selectedMachine}
+                    busy={machineStatusBusyId === selectedMachine?.id}
+                    onSetMachineStatus={handleSetMachineStatus}
+                    onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
+                    onOpenAiAssist={() => openAssistScreen(selectedMachine)}
+                  />
                 )}
                 {activeScreen === 'manuals' && (
                   <ManualLibraryScreen
@@ -626,6 +926,7 @@ export function App() {
                     onSave={handleCreateWorkOrderFromDraft}
                     busy={workOrderBusy}
                     error={workOrderError}
+                    machine={createWorkOrderMachine}
                   />
                 )}
                 {activeScreen === 'work-orders' && (
@@ -633,10 +934,14 @@ export function App() {
                     setActiveScreen={setActiveScreen}
                     onCreateWorkOrder={() => openCreateWorkOrder('work-orders')}
                     onOpenWorkOrderDetail={openWorkOrderDetail}
+                    onOpenMachineDetail={openMachineDetail}
+                    onDeleteWorkOrder={handleDeleteWorkOrder}
                     workOrderQueueData={workOrderQueueData}
                     orgConnected={orgConnected}
                     orgWorkOrdersLoading={orgWorkOrders.loading}
                     orgWorkOrdersError={orgWorkOrders.error}
+                    workOrderDeleteBusyId={workOrderDeleteBusyId}
+                    workOrderDeleteError={workOrderDeleteError}
                   />
                 )}
                 {activeScreen === 'work-order-detail' && (
@@ -652,6 +957,8 @@ export function App() {
                 )}
                 {activeScreen === 'ai-assist' && (
                   <RepairAssistScreen
+                    assistPreset={assistPreset}
+                    onClearAssistPreset={() => setAssistPreset(null)}
                     onCreateWorkOrder={() => openCreateWorkOrder('ai-assist')}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
@@ -788,7 +1095,7 @@ function SignInScreen({
   onCreateAccount: () => void;
 }) {
   const [showReset, setShowReset] = useState(false);
-  const [email, setEmail] = useState('owner@sunstatedemo.com');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
@@ -874,8 +1181,8 @@ function CreateAccountAccessScreen({
   onStartTrial: (displayName: string, email: string, password: string) => Promise<string | null>;
   onSignIn: () => void;
 }) {
-  const [ownerName, setOwnerName] = useState('Robert');
-  const [email, setEmail] = useState('owner@sunstatedemo.com');
+  const [ownerName, setOwnerName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1018,8 +1325,14 @@ function OwnerOnboardingScreen({
   const isOptionalStep = currentStep.id === 'manual';
   const advance = async () => {
     if (isLastStep) {
-      if (!draft.businessName.trim() || !draft.locationName.trim() || !draft.machineNumber.trim() || !draft.machineModel.trim()) {
-        setSubmitError('Business, location, machine number, and model are required before finishing setup.');
+      if (
+        !draft.businessName.trim() ||
+        !draft.locationName.trim() ||
+        !draft.machineNumber.trim() ||
+        !draft.machineMake.trim() ||
+        !draft.machineModelNumber.trim()
+      ) {
+        setSubmitError('Business, location, machine ID, make, and model number are required before finishing setup.');
         return;
       }
 
@@ -1187,8 +1500,14 @@ function OnboardingStepFields({
     return (
       <div className="setup-field-grid two-column">
         <SetupField label="Machine ID" value={draft.machineNumber} onChange={(value) => patchDraft({ machineNumber: value })} />
-        <SetupField label="Type" value={draft.machineType} onChange={(value) => patchDraft({ machineType: value })} />
-        <SetupField label="Make / Model" value={draft.machineModel} onChange={(value) => patchDraft({ machineModel: value })} wide />
+        <SetupSelectField
+          label="Type"
+          value={draft.machineType}
+          options={['Washer', 'Dryer', 'Other']}
+          onChange={(value) => patchDraft({ machineType: value })}
+        />
+        <SetupField label="Machine Make" value={draft.machineMake} onChange={(value) => patchDraft({ machineMake: value })} wide />
+        <SetupField label="Model Number" value={draft.machineModelNumber} onChange={(value) => patchDraft({ machineModelNumber: value })} wide />
       </div>
     );
   }
@@ -1196,7 +1515,6 @@ function OnboardingStepFields({
   return (
     <div className="setup-field-grid">
       <SetupField label="Manual" value={draft.manualName} onChange={(value) => patchDraft({ manualName: value })} />
-      <SetupField label="Linked Machines" value="30 washers" readOnly />
     </div>
   );
 }
@@ -1226,11 +1544,37 @@ function SetupField({
   );
 }
 
+function SetupSelectField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[] | Array<{ value: string; label: string }>;
+  onChange: (nextValue: string) => void;
+}) {
+  const normalizedOptions = options.map((option) =>
+    typeof option === 'string' ? { value: option, label: option } : option);
+
+  return (
+    <label>
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {normalizedOptions.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function getOnboardingStepCopy(stepId: string) {
   const copy: Record<string, string> = {
     account: 'Create the customer account that owns billing, users, locations, machines, manuals, and reports.',
     location: 'Add the first laundromat so every machine and work order has the right operating context.',
-    machine: 'Add one real machine now. The full machine directory can be imported or expanded later.',
+    machine: 'Add one real machine now with machine ID, type, make, and model number. The full directory can be imported later.',
     manual: 'Upload the first manual so Repair Assist can answer from factual service material instead of generic guidance.',
   };
 
@@ -1342,21 +1686,29 @@ function BottomNav({
 
 function HomeScreen({
   setActiveScreen,
+  onOpenMachines,
   onCreateWorkOrder,
+  onOpenMachineDetail,
+  onSetMachineStatus,
   machineCatalogData,
   urgentMachineData,
-  workOrderQueueData,
   orgMachinesLoading,
   orgMachinesError,
+  machineStatusBusyId,
+  machineStatusError,
   orgConnected,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
+  onOpenMachines: (filter: MachineFilter | null) => void;
   onCreateWorkOrder: () => void;
+  onOpenMachineDetail: (machineId: string) => void;
+  onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
   machineCatalogData: UrgentMachine[];
   urgentMachineData: UrgentMachine[];
-  workOrderQueueData: WorkOrderSummary[];
   orgMachinesLoading: boolean;
   orgMachinesError: string | null;
+  machineStatusBusyId: string | null;
+  machineStatusError: string | null;
   orgConnected: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
@@ -1368,32 +1720,11 @@ function HomeScreen({
 
     return findMachines(machineQuery, machineCatalogData).slice(0, 6);
   }, [machineCatalogData, normalizedQuery, machineQuery]);
-  const downCount = machineCatalogData.filter((machine) => machine.status === 'down').length;
-  const waitingCount = machineCatalogData.filter((machine) => machine.status === 'waiting').length;
-  const openWorkOrderCount = workOrderQueueData.filter((order) => order.status !== 'completed').length;
+  const counts = useMemo(() => machineStatusCounts(machineCatalogData), [machineCatalogData]);
 
   return (
     <div className="screen-stack">
-      <section className="section-card fleet-card">
-        <div className="section-heading">
-          <h2>Machine Health</h2>
-          <span>Updated 9:41 AM</span>
-        </div>
-        <div className="fleet-grid">
-          <div className="health-ring" aria-label="Machine health score 72 good">
-            <div className="ring-score">
-              <strong>72</strong>
-              <span>Good</span>
-            </div>
-          </div>
-          <div className="metric-grid">
-            <Metric label="Machines Down" value={String(downCount)} tone="down" action="View details" />
-            <Metric label="Open Work Orders" value={String(openWorkOrderCount)} tone="primary" action="View details" />
-            <Metric label="Waiting on Parts" value={String(waitingCount)} tone="waiting" action="View details" />
-            <Metric label="Repair Spend (May)" value="$1,245" tone="teal" action="View report" />
-          </div>
-        </div>
-      </section>
+      <MachineStatusOverview counts={counts} onSelectStatus={onOpenMachines} />
 
       <section className="content-section machine-search-section">
         <div className="section-heading">
@@ -1407,7 +1738,7 @@ function HomeScreen({
             type="search"
             value={machineQuery}
             onChange={(event) => setMachineQuery(event.target.value)}
-            placeholder="Search W12, 12, dryer, row 2"
+            placeholder="Search machine ID, type, location, or status"
           />
         </label>
         {normalizedQuery ? (
@@ -1419,7 +1750,13 @@ function HomeScreen({
             {machineResults.length > 0 && (
               <div className="machine-list search-machine-list">
                 {machineResults.map((machine) => (
-                  <UrgentMachineRow key={machine.id} machine={machine} onClick={() => setActiveScreen('machine-detail')} />
+                  <UrgentMachineRow
+                    key={machine.id}
+                    machine={machine}
+                    busy={machineStatusBusyId === machine.id}
+                    onClick={() => onOpenMachineDetail(machine.id)}
+                    onSetStatus={onSetMachineStatus}
+                  />
                 ))}
               </div>
             )}
@@ -1432,16 +1769,24 @@ function HomeScreen({
       <section className="content-section">
         <div className="section-heading">
           <h2>Urgent Machines</h2>
-          <button type="button" onClick={() => setActiveScreen('machines')}>See all <ChevronRight size={14} /></button>
+          <button type="button" onClick={() => onOpenMachines(null)}>See all <ChevronRight size={14} /></button>
         </div>
         <div className="machine-list">
           {urgentMachineData.map((machine) => (
-            <UrgentMachineRow key={machine.id} machine={machine} onClick={() => setActiveScreen('machine-detail')} />
+            <UrgentMachineRow
+              key={machine.id}
+              machine={machine}
+              busy={machineStatusBusyId === machine.id}
+              onClick={() => onOpenMachineDetail(machine.id)}
+              onSetStatus={onSetMachineStatus}
+            />
           ))}
         </div>
+        {urgentMachineData.length === 0 && <p className="empty-state">No machines need attention yet.</p>}
         {orgConnected && orgMachinesLoading && <p className="search-hint">Refreshing machines from your company data...</p>}
         {orgConnected && orgMachinesError && <p className="empty-state">Could not load live machines: {orgMachinesError}</p>}
         {orgConnected && !orgMachinesLoading && !orgMachinesError && <p className="search-hint">Live machines loaded from your company workspace.</p>}
+        {machineStatusError && <p className="empty-state">{machineStatusError}</p>}
       </section>
 
       <section className="content-section">
@@ -1449,7 +1794,7 @@ function HomeScreen({
           <h2>Quick Actions</h2>
         </div>
         <div className="quick-grid">
-          <QuickAction icon={QrCode} label="Scan Machine" tone="teal" />
+          <QuickAction icon={BookOpen} label="Manual Library" tone="teal" onClick={() => setActiveScreen('manuals')} />
           <QuickAction icon={ClipboardList} label="New Work Order" tone="primary" onClick={onCreateWorkOrder} />
           <QuickAction icon={Sparkles} label="Ask AI" tone="ai" onClick={() => setActiveScreen('ai-assist')} />
         </div>
@@ -1460,41 +1805,213 @@ function HomeScreen({
 
 function MachinesScreen({
   setActiveScreen,
+  initialFilter,
+  onOpenMachineDetail,
+  onCreateWorkOrder,
+  onOpenAiAssist,
+  onSetMachineStatus,
+  organizationId,
+  locations,
   machineCatalogData,
   orgMachinesLoading,
   orgMachinesError,
+  machineStatusBusyId,
+  machineStatusError,
   orgConnected,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
+  initialFilter: MachineFilter | null;
+  onOpenMachineDetail: (machineId: string) => void;
+  onCreateWorkOrder: (machineId: string) => void;
+  onOpenAiAssist: (machine: UrgentMachine) => void;
+  onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
+  organizationId: string | null;
+  locations: OrganizationLocation[];
   machineCatalogData: UrgentMachine[];
   orgMachinesLoading: boolean;
   orgMachinesError: string | null;
+  machineStatusBusyId: string | null;
+  machineStatusError: string | null;
   orgConnected: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<MachineFilter>('all');
+  const [showAddMachineForm, setShowAddMachineForm] = useState(false);
+  const [machineNumberInput, setMachineNumberInput] = useState('');
+  const [machineTypeInput, setMachineTypeInput] = useState('Washer');
+  const [machineMakeInput, setMachineMakeInput] = useState('');
+  const [machineModelNumberInput, setMachineModelNumberInput] = useState('');
+  const [locationIdInput, setLocationIdInput] = useState('');
+  const [addMachineBusy, setAddMachineBusy] = useState(false);
+  const [addMachineError, setAddMachineError] = useState<string | null>(null);
+  const [editingMachine, setEditingMachine] = useState<UrgentMachine | null>(null);
+  const [editMachineNumberInput, setEditMachineNumberInput] = useState('');
+  const [editMachineTypeInput, setEditMachineTypeInput] = useState('Washer');
+  const [editMachineMakeInput, setEditMachineMakeInput] = useState('');
+  const [editMachineModelNumberInput, setEditMachineModelNumberInput] = useState('');
+  const [editLocationIdInput, setEditLocationIdInput] = useState('');
+  const [editMachineBusy, setEditMachineBusy] = useState(false);
+  const [editMachineError, setEditMachineError] = useState<string | null>(null);
+  const [deletingMachine, setDeletingMachine] = useState<UrgentMachine | null>(null);
+  const [deleteMachineBusy, setDeleteMachineBusy] = useState(false);
+  const [deleteMachineError, setDeleteMachineError] = useState<string | null>(null);
   const filteredMachines = useMemo(() => {
-    const statusFiltered = activeFilter === 'all' ? machineCatalogData : machineCatalogData.filter((machine) => machine.status === activeFilter);
+    const statusFiltered = activeFilter === 'all'
+      ? machineCatalogData
+      : machineCatalogData.filter((machine) => toOperationalStatus(machine.status) === activeFilter);
     return findMachines(machineQuery, statusFiltered);
   }, [activeFilter, machineCatalogData, machineQuery]);
-  const downCount = machineCatalogData.filter((machine) => machine.status === 'down').length;
-  const needsRepairCount = machineCatalogData.filter((machine) => machine.status === 'needs-repair').length;
-  const waitingCount = machineCatalogData.filter((machine) => machine.status === 'waiting').length;
+  const counts = useMemo(() => machineStatusCounts(machineCatalogData), [machineCatalogData]);
+  const selectedLocationId = locationIdInput || locations[0]?.id || '';
+
+  useEffect(() => {
+    if (initialFilter && initialFilter !== activeFilter) {
+      setActiveFilter(initialFilter);
+    }
+  }, [activeFilter, initialFilter]);
+  useEffect(() => {
+    if (!locationIdInput && locations[0]?.id) {
+      setLocationIdInput(locations[0].id);
+    }
+  }, [locationIdInput, locations]);
+  useEffect(() => {
+    if (editingMachine && !editLocationIdInput && locations[0]?.id) {
+      setEditLocationIdInput(locations[0].id);
+    }
+  }, [editLocationIdInput, editingMachine, locations]);
+
+  const resetAddMachineForm = () => {
+    setMachineNumberInput('');
+    setMachineTypeInput('Washer');
+    setMachineMakeInput('');
+    setMachineModelNumberInput('');
+    setLocationIdInput(locations[0]?.id ?? '');
+    setAddMachineError(null);
+  };
+  const closeEditMachine = () => {
+    setEditingMachine(null);
+    setEditMachineError(null);
+    setEditMachineBusy(false);
+  };
+  const closeDeleteMachine = () => {
+    setDeletingMachine(null);
+    setDeleteMachineError(null);
+    setDeleteMachineBusy(false);
+  };
+  const openEditMachine = (machine: UrgentMachine) => {
+    const fallbackLocationId = locations.find((location) => location.name === machine.row)?.id ?? locations[0]?.id ?? '';
+    setEditingMachine(machine);
+    setEditMachineNumberInput(machine.machineNumber);
+    setEditMachineTypeInput(machine.type || 'Washer');
+    setEditMachineMakeInput(machine.make ?? '');
+    setEditMachineModelNumberInput(machine.modelNumber ?? '');
+    setEditLocationIdInput(machine.locationId ?? fallbackLocationId);
+    setEditMachineError(null);
+  };
+
+  const handleAddMachine = async (): Promise<void> => {
+    setAddMachineError(null);
+    if (!orgConnected || !organizationId) {
+      setAddMachineError('Complete onboarding first before adding machines.');
+      return;
+    }
+    if (!selectedLocationId) {
+      setAddMachineError('Add a location first, then create a machine.');
+      return;
+    }
+    if (!machineNumberInput.trim() || !machineMakeInput.trim() || !machineModelNumberInput.trim()) {
+      setAddMachineError('Machine ID, make, and model number are required.');
+      return;
+    }
+
+    setAddMachineBusy(true);
+    try {
+      await createMachine({
+        organizationId,
+        locationId: selectedLocationId,
+        machineNumber: machineNumberInput.trim(),
+        type: machineTypeInput,
+        make: machineMakeInput.trim(),
+        modelNumber: machineModelNumberInput.trim(),
+      });
+      setShowAddMachineForm(false);
+      resetAddMachineForm();
+    } catch (error) {
+      setAddMachineError(getErrorMessage(error, 'Could not add machine. Try again.'));
+    } finally {
+      setAddMachineBusy(false);
+    }
+  };
+  const handleSaveMachineEdits = async (): Promise<void> => {
+    setEditMachineError(null);
+    if (!editingMachine) {
+      return;
+    }
+    if (!orgConnected || !organizationId) {
+      setEditMachineError('Complete onboarding first before editing machines.');
+      return;
+    }
+    if (!editLocationIdInput.trim()) {
+      setEditMachineError('Select a location.');
+      return;
+    }
+    if (!editMachineNumberInput.trim() || !editMachineMakeInput.trim() || !editMachineModelNumberInput.trim()) {
+      setEditMachineError('Machine ID, make, and model number are required.');
+      return;
+    }
+
+    setEditMachineBusy(true);
+    try {
+      await updateMachine({
+        organizationId,
+        machineId: editingMachine.id,
+        locationId: editLocationIdInput.trim(),
+        machineNumber: editMachineNumberInput.trim(),
+        type: editMachineTypeInput.trim(),
+        make: editMachineMakeInput.trim(),
+        modelNumber: editMachineModelNumberInput.trim(),
+      });
+      closeEditMachine();
+    } catch (error) {
+      setEditMachineError(getErrorMessage(error, 'Could not update machine. Try again.'));
+    } finally {
+      setEditMachineBusy(false);
+    }
+  };
+  const handleDeleteMachine = async (): Promise<void> => {
+    setDeleteMachineError(null);
+    if (!deletingMachine) {
+      return;
+    }
+    if (!orgConnected || !organizationId) {
+      setDeleteMachineError('Complete onboarding first before deleting machines.');
+      return;
+    }
+
+    setDeleteMachineBusy(true);
+    try {
+      await deleteMachineRecord({
+        organizationId,
+        machineId: deletingMachine.id,
+      });
+      closeDeleteMachine();
+    } catch (error) {
+      setDeleteMachineError(getErrorMessage(error, 'Could not delete machine. Try again.'));
+    } finally {
+      setDeleteMachineBusy(false);
+    }
+  };
 
   return (
     <div className="screen-stack">
-      <section className="directory-summary">
-        <DirectoryStat label="Total Machines" value={String(machineCatalogData.length)} />
-        <DirectoryStat label="Down" value={String(downCount)} tone="down" />
-        <DirectoryStat label="Needs Repair" value={String(needsRepairCount)} tone="warning" />
-        <DirectoryStat label="Waiting Parts" value={String(waitingCount)} tone="waiting" />
-      </section>
+      <MachineStatusOverview counts={counts} />
 
       <section className="content-section machine-search-section">
         <div className="section-heading">
-          <h2>Machine Directory</h2>
-          <span>{filteredMachines.length} shown</span>
+          <h2>Maintenance Ledger</h2>
+          <button type="button" onClick={() => setActiveScreen('manuals')}>Manuals <ChevronRight size={14} /></button>
         </div>
+        <p className="search-hint">{filteredMachines.length} shown</p>
         <label className="machine-search" htmlFor="directory-machine-search">
           <Search size={18} />
           <input
@@ -1502,7 +2019,7 @@ function MachinesScreen({
             type="search"
             value={machineQuery}
             onChange={(event) => setMachineQuery(event.target.value)}
-            placeholder="Search W12, 12, dryer, row 2"
+            placeholder="Search machine ID, type, location, or status"
           />
         </label>
         <div className="filter-strip" aria-label="Machine status filters">
@@ -1524,90 +2041,374 @@ function MachinesScreen({
         {orgConnected && orgMachinesError && <p className="empty-state">Could not load live machines: {orgMachinesError}</p>}
         <div className="machine-list directory-machine-list">
           {filteredMachines.slice(0, 24).map((machine) => (
-            <UrgentMachineRow key={machine.id} machine={machine} onClick={() => setActiveScreen('machine-detail')} />
+            <UrgentMachineRow
+              key={machine.id}
+              machine={machine}
+              busy={machineStatusBusyId === machine.id}
+              onClick={() => onOpenMachineDetail(machine.id)}
+              onOpenLog={() => onOpenMachineDetail(machine.id)}
+              onAskAi={() => onOpenAiAssist(machine)}
+              onCreateWorkOrder={() => onCreateWorkOrder(machine.id)}
+              onSetStatus={onSetMachineStatus}
+              onEdit={() => openEditMachine(machine)}
+              onDelete={() => {
+                setDeletingMachine(machine);
+                setDeleteMachineError(null);
+              }}
+            />
           ))}
         </div>
-        {filteredMachines.length === 0 && <p className="empty-state">No machines match that search.</p>}
+        {filteredMachines.length === 0 && <p className="empty-state">{machineQuery.trim() ? 'No machines match that search.' : 'No machines found yet.'}</p>}
         {filteredMachines.length > 24 && <p className="search-hint">Showing first 24. Search to narrow the list.</p>}
+        {machineStatusError && <p className="empty-state">{machineStatusError}</p>}
       </section>
+
+      <button
+        className="machine-fab"
+        type="button"
+        onClick={() => {
+          setShowAddMachineForm(true);
+          setAddMachineError(null);
+        }}
+        aria-label="Add machine"
+      >
+        <Plus size={22} />
+      </button>
+
+      {showAddMachineForm && (
+        <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Add machine">
+          <div className="machine-modal-card">
+            <div className="section-heading">
+              <h2>Add Machine</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddMachineForm(false);
+                  resetAddMachineForm();
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div className="setup-field-grid">
+              <SetupField label="Machine ID" value={machineNumberInput} onChange={setMachineNumberInput} />
+              <SetupSelectField label="Type" value={machineTypeInput} options={['Washer', 'Dryer', 'Other']} onChange={setMachineTypeInput} />
+              <SetupField label="Machine Make" value={machineMakeInput} onChange={setMachineMakeInput} />
+              <SetupField label="Model Number" value={machineModelNumberInput} onChange={setMachineModelNumberInput} />
+              <SetupSelectField
+                label="Location"
+                value={selectedLocationId}
+                options={locations.map((location) => ({ value: location.id, label: location.name }))}
+                onChange={setLocationIdInput}
+              />
+            </div>
+            {locations.length === 0 && <p className="search-hint">Create a location first, then add machines.</p>}
+            {addMachineError && (
+              <div className="auth-message">
+                <strong>Could not add machine</strong>
+                <span>{addMachineError}</span>
+              </div>
+            )}
+            <button
+              className="primary-action"
+              type="button"
+              onClick={() => void handleAddMachine()}
+              disabled={addMachineBusy || locations.length === 0}
+            >
+              {addMachineBusy ? 'Saving...' : 'Save Machine'}
+            </button>
+          </div>
+        </section>
+      )}
+      {editingMachine && (
+        <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Edit machine">
+          <div className="machine-modal-card">
+            <div className="section-heading">
+              <h2>Edit Machine</h2>
+              <button type="button" onClick={closeEditMachine}>
+                Close
+              </button>
+            </div>
+            <div className="setup-field-grid">
+              <SetupField label="Machine ID" value={editMachineNumberInput} onChange={setEditMachineNumberInput} />
+              <SetupSelectField label="Type" value={editMachineTypeInput} options={['Washer', 'Dryer', 'Other']} onChange={setEditMachineTypeInput} />
+              <SetupField label="Machine Make" value={editMachineMakeInput} onChange={setEditMachineMakeInput} />
+              <SetupField label="Model Number" value={editMachineModelNumberInput} onChange={setEditMachineModelNumberInput} />
+              <SetupSelectField
+                label="Location"
+                value={editLocationIdInput}
+                options={locations.map((location) => ({ value: location.id, label: location.name }))}
+                onChange={setEditLocationIdInput}
+              />
+            </div>
+            {locations.length === 0 && <p className="search-hint">Create a location first, then edit machines.</p>}
+            {editMachineError && (
+              <div className="auth-message">
+                <strong>Could not update machine</strong>
+                <span>{editMachineError}</span>
+              </div>
+            )}
+            <div className="machine-modal-actions">
+              <button className="secondary-action" type="button" onClick={closeEditMachine} disabled={editMachineBusy}>
+                Cancel
+              </button>
+              <button
+                className="primary-action"
+                type="button"
+                onClick={() => void handleSaveMachineEdits()}
+                disabled={editMachineBusy || locations.length === 0}
+              >
+                {editMachineBusy ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+      {deletingMachine && (
+        <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Delete machine">
+          <div className="machine-modal-card">
+            <div className="section-heading">
+              <h2>Delete Machine</h2>
+              <button type="button" onClick={closeDeleteMachine}>
+                Close
+              </button>
+            </div>
+            <p className="delete-machine-text">
+              Delete machine <strong>{deletingMachine.machineNumber}</strong>? This removes the card from your machine list.
+            </p>
+            {deleteMachineError && (
+              <div className="auth-message">
+                <strong>Could not delete machine</strong>
+                <span>{deleteMachineError}</span>
+              </div>
+            )}
+            <div className="machine-modal-actions">
+              <button className="secondary-action" type="button" onClick={closeDeleteMachine} disabled={deleteMachineBusy}>
+                Cancel
+              </button>
+              <button className="danger-action" type="button" onClick={() => void handleDeleteMachine()} disabled={deleteMachineBusy}>
+                {deleteMachineBusy ? 'Deleting...' : 'Delete Machine'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
-function DirectoryStat({ label, value, tone }: { label: string; value: string; tone?: 'down' | 'warning' | 'waiting' }) {
+function MachineStatusOverview({
+  counts,
+  onSelectStatus,
+}: {
+  counts: {
+    total: number;
+    operational: number;
+    repair: number;
+    down: number;
+  };
+  onSelectStatus?: (filter: MachineFilter) => void;
+}) {
   return (
-    <div className="directory-stat">
-      <span>{label}</span>
-      <strong className={tone ? `directory-${tone}` : ''}>{value}</strong>
-    </div>
+    <section className="machine-overview-grid">
+      <OverviewCard label="Total Machines" value={String(counts.total)} tone="total" onClick={() => onSelectStatus?.('all')} />
+      <OverviewCard label="Operational" value={String(counts.operational)} tone="operational" onClick={() => onSelectStatus?.('running')} />
+      <OverviewCard label="Needs Repair" value={String(counts.repair)} tone="repair" onClick={() => onSelectStatus?.('needs-repair')} />
+      <OverviewCard label="Out of Service" value={String(counts.down)} tone="down" onClick={() => onSelectStatus?.('down')} />
+    </section>
   );
 }
 
-function Metric({
+function OverviewCard({
   label,
   value,
   tone,
-  action,
+  onClick,
 }: {
   label: string;
   value: string;
-  tone: 'down' | 'primary' | 'waiting' | 'teal';
-  action: string;
+  tone: 'total' | 'operational' | 'repair' | 'down';
+  onClick?: () => void;
 }) {
-  return (
-    <div className="metric-tile">
+  const content = (
+    <>
       <span>{label}</span>
-      <strong className={`metric-value tone-${tone}`}>{value}</strong>
-      <button type="button">
-        {action} <ChevronRight size={12} />
+      <strong>{value}</strong>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button className={`overview-card overview-${tone} is-clickable`} type="button" onClick={onClick}>
+        {content}
       </button>
+    );
+  }
+
+  return (
+    <div className={`overview-card overview-${tone}`}>
+      {content}
     </div>
   );
 }
 
-function UrgentMachineRow({ machine, onClick }: { machine: UrgentMachine; onClick: () => void }) {
+function UrgentMachineRow({
+  machine,
+  onClick,
+  onOpenLog,
+  onAskAi,
+  onCreateWorkOrder,
+  onSetStatus,
+  busy = false,
+  onEdit,
+  onDelete,
+}: {
+  machine: UrgentMachine;
+  onClick: () => void;
+  onOpenLog?: () => void;
+  onAskAi?: () => void;
+  onCreateWorkOrder?: () => void;
+  onSetStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
+  busy?: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
+}) {
+  const activeStatus = toOperationalStatus(machine.status);
+
   return (
-    <button className={`machine-row status-${machine.status}`} type="button" onClick={onClick}>
-      <MachineThumb />
-      <div className="machine-row-main">
-        <strong>{machine.machineNumber}</strong>
-        <span>{machine.type} / {machine.row}</span>
+    <div className={`machine-row status-${activeStatus}`}>
+      <button className="machine-row-open" type="button" onClick={onClick}>
+        <MachineThumb />
+        <div className="machine-row-main">
+          <strong>{machine.machineNumber}</strong>
+          <span>{machine.type} / {machine.row}</span>
+        </div>
+        <div className="machine-row-status">
+          <StatusBadge status={activeStatus}>{machineStatusLabel(activeStatus)}</StatusBadge>
+          <span>{machine.since}</span>
+        </div>
+        <ChevronRight className="row-chevron" size={18} />
+      </button>
+      <div className="machine-status-toggle" role="group" aria-label={`Status for ${machine.machineNumber}`}>
+        {([
+          ['running', 'Op'],
+          ['needs-repair', 'Repair'],
+          ['down', 'Down'],
+        ] as Array<[MachineOperationalStatus, string]>).map(([statusKey, label]) => (
+          <button
+            key={statusKey}
+            type="button"
+            className={`status-chip ${activeStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
+            onClick={() => void onSetStatus(machine.id, statusKey)}
+            disabled={busy}
+            aria-pressed={activeStatus === statusKey}
+          >
+            {label}
+          </button>
+        ))}
       </div>
-      <div className="machine-row-status">
-        <StatusBadge status={machine.status}>{machine.statusLabel}</StatusBadge>
-        <span>{machine.since}</span>
-      </div>
-      <ChevronRight className="row-chevron" size={18} />
-    </button>
+      {(onAskAi || onOpenLog || onCreateWorkOrder || onEdit || onDelete) && (
+        <div className="machine-row-actions">
+          {onAskAi && (
+            <button className="row-action-button row-action-ai" type="button" onClick={onAskAi} disabled={busy}>
+              <Sparkles size={14} /> AI Assist
+            </button>
+          )}
+          {onOpenLog && (
+            <button className="row-action-button" type="button" onClick={onOpenLog} disabled={busy}>
+              <FileText size={14} /> Log
+            </button>
+          )}
+          {onCreateWorkOrder && (
+            <button className="row-action-button row-action-primary" type="button" onClick={onCreateWorkOrder} disabled={busy}>
+              <ClipboardList size={14} /> Work Order
+            </button>
+          )}
+          {onEdit && (
+            <button className="row-action-button" type="button" onClick={onEdit} disabled={busy}>
+              <Pencil size={14} /> Edit
+            </button>
+          )}
+          {onDelete && (
+            <button className="row-action-button row-action-delete" type="button" onClick={onDelete} disabled={busy}>
+              <Trash2 size={14} /> Delete
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
 function MachineDetailScreen({
   setActiveScreen,
+  machine,
+  busy,
+  onSetMachineStatus,
   onCreateWorkOrder,
+  onOpenAiAssist,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
+  machine: UrgentMachine | null;
+  busy: boolean;
+  onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
   onCreateWorkOrder: () => void;
+  onOpenAiAssist: () => void;
 }) {
+  const machineStatus = machine ? toOperationalStatus(machine.status) : 'running';
+  const machineStatusText = machine ? machineStatusLabel(machineStatus) : 'Operational';
+  const machineNumber = machine?.machineNumber ?? 'Machine';
+  const machineModel = machine?.type ?? 'Model not set';
+  const machineLocation = machine?.row ?? 'Location not set';
+  const issueLabel = machineStatus === 'down'
+    ? 'Machine offline'
+    : machineStatus === 'needs-repair'
+      ? 'Needs repair attention'
+      : 'No active issue';
+
   return (
     <div className="screen-stack detail-stack">
       <section className="machine-hero">
         <div className="machine-hero-copy">
           <div className="machine-title-line">
-            <h2>W12</h2>
-            <StatusBadge status="down">Down</StatusBadge>
+            <h2>{machineNumber}</h2>
+            <StatusBadge status={machineStatus}>{machineStatusText}</StatusBadge>
           </div>
-          <strong>Speed Queen SC40</strong>
-          <span>Main Street / Washer Row 2</span>
+          <strong>{machineModel}</strong>
+          <span>{machineLocation}</span>
           <span>S/N 123456789</span>
         </div>
         <MachineIllustration />
       </section>
 
+      {machine && (
+        <section className="content-section compact">
+          <h2>Status</h2>
+          <div className="machine-status-toggle detail-status-toggle" role="group" aria-label={`Status for ${machine.machineNumber}`}>
+            {([
+              ['running', 'Op'],
+              ['needs-repair', 'Repair'],
+              ['down', 'Down'],
+            ] as Array<[MachineOperationalStatus, string]>).map(([statusKey, label]) => (
+              <button
+                key={statusKey}
+                type="button"
+                className={`status-chip ${machineStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
+                onClick={() => void onSetMachineStatus(machine.id, statusKey)}
+                disabled={busy}
+                aria-pressed={machineStatus === statusKey}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="issue-card">
         <span>Current Issue</span>
-        <strong>Won't drain after cycle</strong>
-        <p>Reported today 8:15 AM</p>
+        <strong>{issueLabel}</strong>
+        <p>{machine?.since ?? 'Status just updated'}</p>
       </section>
 
       <button className="primary-action" type="button" onClick={onCreateWorkOrder}>
@@ -1615,15 +2416,15 @@ function MachineDetailScreen({
       </button>
 
       <div className="shortcut-grid">
-        <Shortcut icon={Sparkles} label="Ask AI" onClick={() => setActiveScreen('ai-assist')} tone="ai" />
+        <Shortcut icon={Sparkles} label="Ask AI" onClick={onOpenAiAssist} tone="ai" />
         <Shortcut icon={BookOpen} label="Search Manual" onClick={() => setActiveScreen('manuals')} />
         <Shortcut icon={Camera} label="Add Photo" />
       </div>
 
       <div className="stat-grid">
-        <SmallStat label="Lifetime Repair Cost" value="$2,842" tone="teal" />
-        <SmallStat label="Last Service" value="Apr 22, 2026" />
-        <SmallStat label="Downtime (May)" value="16.2 hrs" tone="down" />
+        <SmallStat label="Lifetime Repair Cost" value="Not set" tone="teal" />
+        <SmallStat label="Last Service" value="Not set" />
+        <SmallStat label="Downtime (Current)" value="Not set" tone="down" />
       </div>
 
       <section className="content-section">
@@ -1643,6 +2444,7 @@ function MachineDetailScreen({
             </div>
           ))}
         </div>
+        {machineHistory.length === 0 && <p className="empty-state">No maintenance history recorded yet.</p>}
       </section>
     </div>
   );
@@ -1663,7 +2465,6 @@ function ManualLibraryScreen({
   orgManualsError: string | null;
   orgManualsData: ManualLibraryRow[];
 }) {
-  const [showUpload, setShowUpload] = useState(false);
   const [machineModel, setMachineModel] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
@@ -1738,48 +2539,40 @@ function ManualLibraryScreen({
             <p>Link a PDF to a machine model so AI Repair Assist answers from the actual manual.</p>
           </div>
         </div>
-        {showUpload && (
-          <div className="upload-form">
-            <label>
-              <span>Machine Model</span>
-              <input
-                value={machineModel}
-                placeholder="Ex: Speed Queen SC40"
-                onChange={(event) => setMachineModel(event.target.value)}
-                disabled={uploadBusy}
-              />
-            </label>
-            <label>
-              <span>Manual PDF</span>
-              <input
-                key={filePickerKey}
-                type="file"
-                accept="application/pdf,.pdf"
-                onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-                disabled={uploadBusy}
-              />
-            </label>
-            {selectedFile && (
-              <div className="upload-status-line">
-                <Check size={15} />
-                <span>{selectedFile.name} ready to upload and index.</span>
-              </div>
-            )}
-          </div>
-        )}
+        <div className="upload-form">
+          <label>
+            <span>Machine Model</span>
+            <input
+              value={machineModel}
+              placeholder="Ex: Washer Model 123"
+              onChange={(event) => setMachineModel(event.target.value)}
+              disabled={uploadBusy}
+            />
+          </label>
+          <label>
+            <span>Manual PDF</span>
+            <input
+              key={filePickerKey}
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+              disabled={uploadBusy}
+            />
+          </label>
+          {selectedFile && (
+            <div className="upload-status-line">
+              <Check size={15} />
+              <span>{selectedFile.name} ready to upload and index.</span>
+            </div>
+          )}
+        </div>
         <button
           className={uploadBusy ? 'secondary-action full-width-action' : 'primary-action'}
           type="button"
-          onClick={() => {
-            if (!showUpload) {
-              setShowUpload(true);
-              return;
-            }
-            void handleUpload();
-          }}
+          onClick={() => void handleUpload()}
           disabled={uploadBusy}
         >
-          {uploadBusy ? 'Processing Manual...' : showUpload ? 'Process Manual' : 'Upload Manual'}
+          {uploadBusy ? 'Processing Manual...' : 'Upload & Index Manual'}
         </button>
         {!orgConnected && (
           <p className="search-hint">Complete onboarding first to connect manual uploads to your organization account.</p>
@@ -1800,7 +2593,7 @@ function ManualLibraryScreen({
 
       <section className="content-section">
         <div className="section-heading">
-          <h2>Linked Manuals</h2>
+          <h2>Manual Library</h2>
           <span>{manualData.length} models</span>
         </div>
         {orgConnected && orgManualsLoading && <p className="search-hint">Refreshing manuals from your company data...</p>}
@@ -1815,7 +2608,7 @@ function ManualLibraryScreen({
       <section className="ai-grounding-card">
         <BookOpen size={18} />
         <div>
-          <strong>Repair Assist uses linked manuals first.</strong>
+          <strong>Repair Assist uses uploaded manuals first.</strong>
           <span>When no manual exists, the answer is marked as general guidance until a manual is uploaded.</span>
         </div>
       </section>
@@ -1893,7 +2686,7 @@ function AccountScreen({
         </div>
         <div>
           <span>Company Account</span>
-          <strong>Sun State Laundry</strong>
+          <strong>LaundryOps Company</strong>
           <p>One company account can manage one store today and multiple laundromats later.</p>
         </div>
       </section>
@@ -1971,6 +2764,7 @@ function AccountScreen({
           <AccountStatTile key={stat.id} stat={stat} />
         ))}
       </section>
+      {accountStats.length === 0 && <p className="empty-state">No account metrics yet.</p>}
 
       <section className="content-section subscription-card">
         <div className="section-heading">
@@ -2137,15 +2931,46 @@ function CreateWorkOrderScreen({
   onSave,
   busy,
   error,
+  machine,
 }: {
-  onSave: () => Promise<void>;
+  onSave: (entry: WorkOrderCostEntry) => Promise<void>;
   busy: boolean;
   error: string | null;
+  machine: UrgentMachine | null;
 }) {
   const [priority, setPriority] = useState(aiWorkOrderDraft.priority);
   const [assignee, setAssignee] = useState(aiWorkOrderDraft.assignee);
+  const [partsCostInput, setPartsCostInput] = useState('');
+  const [laborCostInput, setLaborCostInput] = useState('');
+  const [costInputError, setCostInputError] = useState<string | null>(null);
   const priorityOptions = ['High', 'Standard', 'Low'];
   const assigneeOptions = ['Mike R.', 'Tom J.', 'Unassigned'];
+  const draftMachineNumber = machine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
+  const draftMachineModel = machine?.type ?? aiWorkOrderDraft.machineModel;
+  const draftMachineLocation = machine?.row ?? aiWorkOrderDraft.location;
+  const draftTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
+    ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, draftMachineNumber)
+    : aiWorkOrderDraft.title;
+  const parsedPartsCost = parseUsdAmount(partsCostInput);
+  const parsedLaborCost = parseUsdAmount(laborCostInput);
+  const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0);
+
+  const submitCreateWorkOrder = async (): Promise<void> => {
+    const partsCost = parseUsdAmount(partsCostInput);
+    const laborCost = parseUsdAmount(laborCostInput);
+    if (partsCost === null || laborCost === null) {
+      setCostInputError('Enter valid parts and labor costs before creating the work order.');
+      return;
+    }
+
+    setCostInputError(null);
+    await onSave({
+      priority: priority as WorkOrderPriority,
+      assigneeName: assignee,
+      partsCost,
+      laborCost,
+    });
+  };
 
   return (
     <div className="screen-stack">
@@ -2153,7 +2978,7 @@ function CreateWorkOrderScreen({
         <span className="draft-banner-icon"><ClipboardCheck size={22} /></span>
         <div className="draft-banner-copy">
           <strong>Draft created from Repair Assist</strong>
-          <span>Review the AI notes, manual source, assignee, and parts before opening the work order.</span>
+          <span>Review AI notes, manual source, assignee, then enter parts and labor costs before opening the work order.</span>
         </div>
         <StatusBadge status={priority === 'High' ? 'down' : 'primary'}>{priority}</StatusBadge>
       </section>
@@ -2162,9 +2987,9 @@ function CreateWorkOrderScreen({
         <MachineThumb />
         <div>
           <span>Machine</span>
-          <strong>{aiWorkOrderDraft.machineNumber}</strong>
-          <small>{aiWorkOrderDraft.machineModel}</small>
-          <small>{aiWorkOrderDraft.location}</small>
+          <strong>{draftMachineNumber}</strong>
+          <small>{draftMachineModel}</small>
+          <small>{draftMachineLocation}</small>
         </div>
         <CalendarClock size={20} />
       </section>
@@ -2176,7 +3001,7 @@ function CreateWorkOrderScreen({
         </div>
         <label className="review-field">
           <span>Title</span>
-          <input value={aiWorkOrderDraft.title} readOnly />
+          <input value={draftTitle} readOnly />
         </label>
         <div className="review-control-group">
           <span>Priority</span>
@@ -2248,16 +3073,34 @@ function CreateWorkOrderScreen({
       </section>
 
       <section className="cost-card">
-        <h2>Parts & Estimate</h2>
-        {aiWorkOrderDraft.parts.map((part) => (
-          <div className="cost-row" key={part}>
-            <span>{part}</span>
-            <strong>Needed</strong>
+        <h2>Technician Cost Entry</h2>
+        <label className="review-field">
+          <span>Parts Cost (USD)</span>
+          <input
+            value={partsCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => setPartsCostInput(event.target.value)}
+          />
+        </label>
+        <label className="review-field">
+          <span>Labor Cost (USD)</span>
+          <input
+            value={laborCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => setLaborCostInput(event.target.value)}
+          />
+        </label>
+        {costInputError && (
+          <div className="auth-message">
+            <strong>Cost input required</strong>
+            <span>{costInputError}</span>
           </div>
-        ))}
+        )}
         <div className="cost-total">
-          <span>Estimated Total</span>
-          <strong>{aiWorkOrderDraft.estimate}</strong>
+          <span>Total Cost</span>
+          <strong>{formatUsdAmount(totalCost)}</strong>
         </div>
       </section>
 
@@ -2268,7 +3111,7 @@ function CreateWorkOrderScreen({
         </div>
       )}
 
-      <button className="primary-action sticky-action" type="button" onClick={() => void onSave()} disabled={busy}>
+      <button className="primary-action sticky-action" type="button" onClick={() => void submitCreateWorkOrder()} disabled={busy}>
         <ClipboardCheck size={19} /> {busy ? 'Creating...' : 'Create Work Order'}
       </button>
     </div>
@@ -2279,18 +3122,26 @@ function WorkOrdersScreen({
   setActiveScreen,
   onCreateWorkOrder,
   onOpenWorkOrderDetail,
+  onOpenMachineDetail,
+  onDeleteWorkOrder,
   workOrderQueueData,
   orgConnected,
   orgWorkOrdersLoading,
   orgWorkOrdersError,
+  workOrderDeleteBusyId,
+  workOrderDeleteError,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onCreateWorkOrder: () => void;
   onOpenWorkOrderDetail: (workOrderId: string) => void;
+  onOpenMachineDetail: (machineId: string) => void;
+  onDeleteWorkOrder: (workOrderId: string) => Promise<void>;
   workOrderQueueData: WorkOrderSummary[];
   orgConnected: boolean;
   orgWorkOrdersLoading: boolean;
   orgWorkOrdersError: string | null;
+  workOrderDeleteBusyId: string | null;
+  workOrderDeleteError: string | null;
 }) {
   const [statusFilter, setStatusFilter] = useState<WorkOrderStatusFilter>('all');
   const [priorityFilter, setPriorityFilter] = useState<WorkOrderPriorityFilter>('all');
@@ -2369,9 +3220,21 @@ function WorkOrdersScreen({
           <span>{statusFilter === 'all' ? 'All statuses' : workOrderStatusFilters.find((filter) => filter.key === statusFilter)?.label}</span>
         </div>
         {filteredOrders.map((order) => (
-          <WorkOrderQueueRow key={order.id} order={order} onClick={() => onOpenWorkOrderDetail(order.id)} />
+          <WorkOrderQueueRow
+            key={order.id}
+            order={order}
+            busy={workOrderDeleteBusyId === order.id}
+            onClick={() => onOpenWorkOrderDetail(order.id)}
+            onOpenMachine={() => {
+              if (order.machineId) {
+                onOpenMachineDetail(order.machineId);
+              }
+            }}
+            onDelete={() => void onDeleteWorkOrder(order.id)}
+          />
         ))}
         {filteredOrders.length === 0 && <p className="empty-state">No work orders match those filters.</p>}
+        {workOrderDeleteError && <p className="empty-state">{workOrderDeleteError}</p>}
       </section>
     </div>
   );
@@ -2386,31 +3249,60 @@ function WorkQueueStat({ label, value, tone }: { label: string; value: string; t
   );
 }
 
-function WorkOrderQueueRow({ order, onClick }: { order: WorkOrderSummary; onClick: () => void }) {
+function WorkOrderQueueRow({
+  order,
+  onClick,
+  onOpenMachine,
+  onDelete,
+  busy = false,
+}: {
+  order: WorkOrderSummary;
+  onClick: () => void;
+  onOpenMachine?: () => void;
+  onDelete?: () => void;
+  busy?: boolean;
+}) {
   return (
-    <button className={`work-order-row wo-${order.status}`} type="button" onClick={onClick}>
-      <div className="work-row-top">
-        <div>
-          <span>{order.number}</span>
-          <strong>{order.machineNumber} / {order.title}</strong>
+    <div className={`work-order-card wo-${order.status}`}>
+      <button className="work-order-row" type="button" onClick={onClick}>
+        <div className="work-row-top">
+          <div>
+            <span>{order.number}</span>
+            <strong>{order.machineNumber} / {order.title}</strong>
+          </div>
+          <StatusBadge status={priorityToBadgeStatus(order.priority)}>{order.priority}</StatusBadge>
         </div>
-        <StatusBadge status={priorityToBadgeStatus(order.priority)}>{order.priority}</StatusBadge>
+        <div className="work-row-meta">
+          <span>{order.machineModel}</span>
+          <span>{order.location}</span>
+        </div>
+        <div className="work-row-footer">
+          <WorkOrderStatusBadge status={order.status}>{order.statusLabel}</WorkOrderStatusBadge>
+          <span>{order.assignee}</span>
+          <span>{order.due}</span>
+          <strong>{order.estimate}</strong>
+        </div>
+        <div className="work-row-source">
+          <span>{order.source}</span>
+          <ChevronRight size={17} />
+        </div>
+      </button>
+      <div className="work-order-actions">
+        {onOpenMachine && order.machineId && (
+          <button className="row-action-button row-action-ai" type="button" onClick={onOpenMachine} disabled={busy}>
+            <Building2 size={14} /> Machine
+          </button>
+        )}
+        <button className="row-action-button row-action-primary" type="button" onClick={onClick} disabled={busy}>
+          <Pencil size={14} /> Edit
+        </button>
+        {onDelete && (
+          <button className="row-action-button row-action-delete" type="button" onClick={onDelete} disabled={busy}>
+            <Trash2 size={14} /> Delete
+          </button>
+        )}
       </div>
-      <div className="work-row-meta">
-        <span>{order.machineModel}</span>
-        <span>{order.location}</span>
-      </div>
-      <div className="work-row-footer">
-        <WorkOrderStatusBadge status={order.status}>{order.statusLabel}</WorkOrderStatusBadge>
-        <span>{order.assignee}</span>
-        <span>{order.due}</span>
-        <strong>{order.estimate}</strong>
-      </div>
-      <div className="work-row-source">
-        <span>{order.source}</span>
-        <ChevronRight size={17} />
-      </div>
-    </button>
+    </div>
   );
 }
 
@@ -2533,24 +3425,22 @@ function WorkOrderDetailScreen({
 
       <section className="content-section compact">
         <h2>Photos</h2>
-        <div className="photo-strip">
-          <PhotoTile />
-          <PhotoTile variant="pump" />
-          <PhotoTile variant="fan" />
-          <button className="add-photo" type="button"><Plus size={21} /> Add</button>
-        </div>
+        <p className="empty-state">No photos attached yet.</p>
+        <button className="secondary-action full-width-action" type="button"><Plus size={18} /> Add Photo</button>
       </section>
 
       <section className="cost-card">
         <h2>Parts & Cost</h2>
-        {costRows.map(([name, cost]) => (
-          <div className="cost-row" key={name}>
-            <span>{name}</span>
-            <strong>{cost}</strong>
-          </div>
-        ))}
+        <div className="cost-row">
+          <span>Parts Cost</span>
+          <strong>{order.partsCost ?? '$0.00'}</strong>
+        </div>
+        <div className="cost-row">
+          <span>Labor Cost</span>
+          <strong>{order.laborCost ?? '$0.00'}</strong>
+        </div>
         <div className="cost-total">
-          <span>Estimated Total</span>
+          <span>Total Cost</span>
           <strong>{order.estimate}</strong>
         </div>
       </section>
@@ -2581,17 +3471,21 @@ function WorkOrderDetailScreen({
 }
 
 function RepairAssistScreen({
+  assistPreset,
+  onClearAssistPreset,
   onCreateWorkOrder,
   orgConnected,
   organizationId,
 }: {
+  assistPreset: AssistPreset | null;
+  onClearAssistPreset: () => void;
   onCreateWorkOrder: () => void;
   orgConnected: boolean;
   organizationId: string | null;
 }) {
-  const [machineModel, setMachineModel] = useState('Speed Queen SC40');
-  const [symptoms, setSymptoms] = useState('Water remains after final spin');
-  const [errorCode, setErrorCode] = useState('E04');
+  const [machineModel, setMachineModel] = useState('');
+  const [symptoms, setSymptoms] = useState('');
+  const [errorCode, setErrorCode] = useState('');
   const [manualGroundingEnabled, setManualGroundingEnabled] = useState(true);
   const [assistBusy, setAssistBusy] = useState(false);
   const [assistError, setAssistError] = useState<string | null>(null);
@@ -2599,6 +3493,19 @@ function RepairAssistScreen({
   const [assistManualTitle, setAssistManualTitle] = useState<string | null>(null);
   const [assistGrounded, setAssistGrounded] = useState(false);
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
+
+  useEffect(() => {
+    if (assistPreset) {
+      setMachineModel(assistPreset.machineModel);
+      setSymptoms('');
+      setErrorCode('');
+      return;
+    }
+
+    setMachineModel('');
+    setSymptoms('');
+    setErrorCode('');
+  }, [assistPreset?.machineId, assistPreset?.machineModel, assistPreset]);
 
   const runRepairAssist = async (): Promise<void> => {
     setAssistError(null);
@@ -2640,11 +3547,21 @@ function RepairAssistScreen({
       <section className="assist-machine-card">
         <MachineThumb />
         <div>
-          <strong>W12</strong>
-          <span>Speed Queen SC40</span>
-          <small>Main Street / Washer Row 2</small>
+          <strong>{assistPreset?.machineNumber ?? 'Machine not selected'}</strong>
+          <span>{assistPreset?.machineModel ?? 'Choose a machine to prefill Repair Assist'}</span>
+          <small>{assistPreset ? 'Machine context loaded from the card action' : 'Enter a machine model to generate guidance'}</small>
         </div>
-        <button type="button">Change</button>
+        <button
+          type="button"
+          onClick={() => {
+            onClearAssistPreset();
+            setMachineModel('');
+            setSymptoms('');
+            setErrorCode('');
+          }}
+        >
+          Change
+        </button>
       </section>
 
       <section className="assist-form">
@@ -2666,7 +3583,7 @@ function RepairAssistScreen({
         </div>
         <div className="manual-toggle">
           <div>
-            <strong>Use linked manual</strong>
+            <strong>Use uploaded manual</strong>
             <span>{assistManualTitle ? `${assistManualTitle} found` : 'Manual source will appear after generation'}</span>
           </div>
           <button
@@ -2760,7 +3677,14 @@ function RepairAssistScreen({
 
 function ReportsScreen() {
   const [activePeriod, setActivePeriod] = useState(reportPeriods[1]);
-  const maxDowntime = Math.max(...downtimeTrend.map((point) => point.hours));
+  const maxDowntime = downtimeTrend.length > 0 ? Math.max(...downtimeTrend.map((point) => point.hours)) : 1;
+  const hasReportData =
+    reportMetrics.length > 0 ||
+    downtimeTrend.length > 0 ||
+    spendBreakdownRows.length > 0 ||
+    repeatFailureRows.length > 0 ||
+    technicianLoadRows.length > 0 ||
+    manualCoverageRows.length > 0;
 
   return (
     <div className="screen-stack">
@@ -2787,13 +3711,13 @@ function ReportsScreen() {
       <section className="report-hero">
         <div>
           <span>Owner Summary</span>
-          <strong>Maintenance cost is up, downtime is improving.</strong>
-          <p>W12 and D07 are the machines to watch. Combo machines still need manuals before AI coverage is complete.</p>
+          <strong>{hasReportData ? 'Live maintenance data loaded.' : 'No report data yet.'}</strong>
+          <p>{hasReportData ? 'Review trends across downtime, costs, repeat failures, and manual coverage.' : 'Create machines and work orders to start generating report insights.'}</p>
         </div>
         <div className="report-score">
           <span>Health</span>
-          <strong>72</strong>
-          <small>Good</small>
+          <strong>{hasReportData ? 'Active' : '--'}</strong>
+          <small>{hasReportData ? 'Live' : 'Waiting data'}</small>
         </div>
       </section>
 
@@ -2801,6 +3725,7 @@ function ReportsScreen() {
         {reportMetrics.map((metric) => (
           <ReportMetricTile key={metric.id} metric={metric} />
         ))}
+        {reportMetrics.length === 0 && <p className="empty-state">No report metrics yet.</p>}
       </section>
 
       <section className="content-section report-chart-card">
@@ -2819,20 +3744,21 @@ function ReportsScreen() {
             </div>
           ))}
         </div>
+        {downtimeTrend.length === 0 && <p className="empty-state">No downtime data yet.</p>}
       </section>
 
       <section className="report-insight-card">
         <TrendingDown size={20} />
         <div>
-          <strong>Downtime improved 18% this week.</strong>
-          <span>Most of the remaining downtime is concentrated in two machines: W12 and D07.</span>
+          <strong>{hasReportData ? 'Review trends before making operational changes.' : 'Insights will appear as live data is added.'}</strong>
+          <span>{hasReportData ? 'Use this page to monitor downtime, spend, and repeat issues over time.' : 'Once your team logs repairs and updates machine statuses, this section will populate automatically.'}</span>
         </div>
       </section>
 
       <section className="content-section report-list-card">
         <div className="section-heading">
           <h2>Repair Spend</h2>
-          <span>$1,245 total</span>
+          <span>{spendBreakdownRows.length > 0 ? 'Parts + labor' : 'No entries yet'}</span>
         </div>
         <ReportRows rows={spendBreakdownRows} />
       </section>
@@ -2865,7 +3791,7 @@ function ReportsScreen() {
         <ShieldCheck size={20} />
         <div>
           <strong>Manual upload is now a launch requirement.</strong>
-          <span>Upload the Combo 100 Series manual to make every machine family eligible for manual-grounded AI answers.</span>
+          <span>Upload manuals for each machine family to keep AI Repair Assist grounded in factual repair documents.</span>
         </div>
       </section>
     </div>
@@ -2883,6 +3809,10 @@ function ReportMetricTile({ metric }: { metric: ReportMetric }) {
 }
 
 function ReportRows({ rows }: { rows: ReportRow[] }) {
+  if (rows.length === 0) {
+    return <p className="empty-state">No data yet.</p>;
+  }
+
   return (
     <div className="report-rows">
       {rows.map((row) => (
@@ -2909,7 +3839,7 @@ function QuickAction({
   tone,
   onClick,
 }: {
-  icon: typeof QrCode;
+  icon: typeof BookOpen;
   label: string;
   tone: 'teal' | 'primary' | 'ai';
   onClick?: () => void;

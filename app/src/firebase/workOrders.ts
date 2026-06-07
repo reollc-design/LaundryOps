@@ -1,5 +1,5 @@
 import type { Auth } from 'firebase/auth';
-import { addDoc, collection, doc, serverTimestamp, updateDoc, type Firestore } from 'firebase/firestore';
+import { addDoc, collection, doc, deleteDoc, serverTimestamp, updateDoc, type Firestore } from 'firebase/firestore';
 import type { WorkOrderStatus } from '../data';
 import { getFirebaseClient } from './client';
 
@@ -43,7 +43,9 @@ export interface CreateWorkOrderFromDraftInput {
   priority: 'High' | 'Standard' | 'Low';
   assigneeName: string;
   dueLabel: string;
-  estimate: string;
+  partsCost: number;
+  laborCost: number;
+  totalCostLabel: string;
 }
 
 export interface CreateWorkOrderFromDraftResult {
@@ -71,7 +73,10 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     assigneeName: input.assigneeName,
     dueLabel: input.dueLabel,
     source: 'AI draft',
-    estimate: input.estimate,
+    partsCost: input.partsCost,
+    laborCost: input.laborCost,
+    totalCost: input.partsCost + input.laborCost,
+    estimate: input.totalCostLabel,
     createdAt: serverTimestamp(),
     createdBy: user.uid,
     updatedAt: serverTimestamp(),
@@ -102,4 +107,20 @@ export async function updateWorkOrderStatus(input: UpdateWorkOrderStatusInput): 
     updatedBy: user.uid,
     ...(input.status === 'completed' ? { completedAt: serverTimestamp() } : {}),
   });
+}
+
+export interface DeleteWorkOrderInput {
+  organizationId: string;
+  workOrderId: string;
+}
+
+export async function deleteWorkOrder(input: DeleteWorkOrderInput): Promise<void> {
+  const { auth, db } = requireFirebaseAuth();
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('No authenticated user. Sign in before deleting work orders.');
+  }
+
+  const workOrderRef = doc(db, `organizations/${input.organizationId}/workOrders/${input.workOrderId}`);
+  await deleteDoc(workOrderRef);
 }

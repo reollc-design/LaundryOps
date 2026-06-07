@@ -25,8 +25,11 @@ function normalizeMachineStatus(rawStatus: string | null): MachineStatus {
   }
 
   const normalized = rawStatus.trim().toLowerCase();
-  if (normalized === 'running' || normalized === 'needs-repair' || normalized === 'down' || normalized === 'waiting') {
+  if (normalized === 'running' || normalized === 'needs-repair' || normalized === 'down') {
     return normalized;
+  }
+  if (normalized === 'waiting') {
+    return 'down';
   }
   if (normalized === 'healthy' || normalized === 'online' || normalized === 'up') {
     return 'running';
@@ -35,7 +38,7 @@ function normalizeMachineStatus(rawStatus: string | null): MachineStatus {
     return 'needs-repair';
   }
   if (normalized.includes('wait') || normalized.includes('part')) {
-    return 'waiting';
+    return 'down';
   }
   if (normalized.includes('down') || normalized.includes('offline') || normalized.includes('error')) {
     return 'down';
@@ -45,7 +48,16 @@ function normalizeMachineStatus(rawStatus: string | null): MachineStatus {
 
 function labelForStatus(status: MachineStatus, preferredLabel: string | null): string {
   if (preferredLabel) {
-    return preferredLabel;
+    const normalizedLabel = preferredLabel.trim().toLowerCase();
+    if (status === 'running' && normalizedLabel.includes('op')) {
+      return 'Operational';
+    }
+    if (status === 'needs-repair' && normalizedLabel.includes('repair')) {
+      return 'Needs Repair';
+    }
+    if (status === 'down' && !normalizedLabel.includes('repair') && !normalizedLabel.includes('op')) {
+      return 'Down';
+    }
   }
 
   if (status === 'down') {
@@ -54,18 +66,12 @@ function labelForStatus(status: MachineStatus, preferredLabel: string | null): s
   if (status === 'needs-repair') {
     return 'Needs Repair';
   }
-  if (status === 'waiting') {
-    return 'Waiting on Parts';
-  }
-  return 'Running';
+  return 'Operational';
 }
 
 function sinceForStatus(status: MachineStatus): string {
   if (status === 'running') {
     return 'No open issues';
-  }
-  if (status === 'waiting') {
-    return 'Waiting on parts';
   }
   if (status === 'needs-repair') {
     return 'Needs service';
@@ -123,12 +129,17 @@ export function useOrganizationMachines(user: User | null, organizationId: strin
         const model = asString(data.model);
         const locationName = locationId ? locationNames[locationId] : null;
         const row = locationName ?? model ?? 'Location not set';
+        const make = asString(data.make);
+        const modelNumber = asString(data.modelNumber);
 
         return {
           id,
           machineNumber,
           type,
           row,
+          locationId: locationId ?? undefined,
+          make: make ?? undefined,
+          modelNumber: modelNumber ?? undefined,
           status,
           statusLabel: labelForStatus(status, asString(data.statusLabel)),
           since: sinceForStatus(status),
