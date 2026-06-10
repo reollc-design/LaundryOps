@@ -2102,7 +2102,6 @@ function MachinesScreen({
                 onChange={setLocationIdInput}
               />
             </div>
-            {locations.length === 0 && <p className="search-hint">Create a location first, then add machines.</p>}
             {addMachineError && (
               <div className="auth-message">
                 <strong>Could not add machine</strong>
