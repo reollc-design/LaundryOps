@@ -72,5 +72,8 @@ jobs:
         with:
           credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_LAUNDROMAT_MAINTENANCE_APP }}'
 
+      - name: Build
+        run: npm run build
+
       - name: Deploy LaundryOps hosting
         run: npx firebase-tools deploy --only hosting:laundryops --project laundromat-maintenance-app --non-interactive
