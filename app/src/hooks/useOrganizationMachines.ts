@@ -117,27 +117,23 @@ export function useOrganizationMachines(user: User | null, organizationId: strin
       error: null,
     }));
 
-    let locationNames: Record<string, string> = {};
     let machineDocs: Array<{ id: string; data: Record<string, unknown> }> = [];
 
     const publishState = () => {
       const machines = machineDocs.map(({ id, data }) => {
         const status = normalizeMachineStatus(asString(data.status));
-        const locationId = asString(data.locationId);
         const machineNumber = asString(data.machineNumber) ?? asString(data.label) ?? id.toUpperCase();
         const type = asString(data.type) ?? asString(data.category) ?? 'Machine';
         const model = asString(data.model);
-        const locationName = locationId ? locationNames[locationId] : null;
-        const row = locationName ?? model ?? 'Location not set';
         const make = asString(data.make);
         const modelNumber = asString(data.modelNumber);
+        const row = model ?? ([make, modelNumber].filter(Boolean).join(' ') || 'Machine details not set');
 
         return {
           id,
           machineNumber,
           type,
           row,
-          locationId: locationId ?? undefined,
           make: make ?? undefined,
           modelNumber: modelNumber ?? undefined,
           status,
@@ -155,27 +151,7 @@ export function useOrganizationMachines(user: User | null, organizationId: strin
       });
     };
 
-    const locationsRef = collection(db, `organizations/${organizationId}/locations`);
     const machinesRef = collection(db, `organizations/${organizationId}/machines`);
-
-    const unsubscribeLocations = onSnapshot(
-      locationsRef,
-      (snapshot) => {
-        locationNames = snapshot.docs.reduce<Record<string, string>>((accumulator, docSnapshot) => {
-          const name = asString(docSnapshot.data().name) ?? docSnapshot.id;
-          accumulator[docSnapshot.id] = name;
-          return accumulator;
-        }, {});
-        publishState();
-      },
-      (error) => {
-        setState({
-          loading: false,
-          machines: [],
-          error: error.message,
-        });
-      },
-    );
 
     const unsubscribeMachines = onSnapshot(
       machinesRef,
@@ -196,7 +172,6 @@ export function useOrganizationMachines(user: User | null, organizationId: strin
     );
 
     return () => {
-      unsubscribeLocations();
       unsubscribeMachines();
     };
   }, [db, organizationId, user]);

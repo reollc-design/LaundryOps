@@ -138,8 +138,7 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
       error: null,
     }));
 
-    let locationNames: Record<string, string> = {};
-    let machineLookup: Record<string, { machineNumber: string; machineModel: string; locationId: string | null }> = {};
+    let machineLookup: Record<string, { machineNumber: string; machineModel: string }> = {};
     let workOrderDocs: Array<{ id: string; data: Record<string, unknown> }> = [];
 
     const publishState = () => {
@@ -147,7 +146,6 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
         .map(({ id, data }) => {
           const status = normalizeWorkOrderStatus(asString(data.status));
           const priority = normalizePriority(asString(data.priority));
-          const locationId = asString(data.locationId);
           const machineId = asString(data.machineId);
           const machineFromLookup = machineId ? machineLookup[machineId] : undefined;
           const machineNumber =
@@ -158,11 +156,6 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             asString(data.machineModel) ??
             (machineFromLookup ? machineFromLookup.machineModel : null) ??
             'Model not set';
-          const locationName =
-            asString(data.locationName) ??
-            (locationId ? locationNames[locationId] : null) ??
-            (machineFromLookup?.locationId ? locationNames[machineFromLookup.locationId] : null) ??
-            'Location not set';
           const partsCostValue = asNumber(data.partsCost) ?? 0;
           const laborCostValue = asNumber(data.laborCost) ?? 0;
           const partsCost = formatUsd(partsCostValue);
@@ -176,7 +169,6 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             machineNumber,
             machineModel,
             title: asString(data.title) ?? 'Work order',
-            location: locationName,
             status,
             statusLabel: asString(data.statusLabel) ?? statusLabel(status),
             priority,
@@ -197,39 +189,18 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
       });
     };
 
-    const locationsRef = collection(db, `organizations/${organizationId}/locations`);
     const machinesRef = collection(db, `organizations/${organizationId}/machines`);
     const workOrdersRef = collection(db, `organizations/${organizationId}/workOrders`);
-
-    const unsubscribeLocations = onSnapshot(
-      locationsRef,
-      (snapshot) => {
-        locationNames = snapshot.docs.reduce<Record<string, string>>((accumulator, docSnapshot) => {
-          const name = asString(docSnapshot.data().name) ?? docSnapshot.id;
-          accumulator[docSnapshot.id] = name;
-          return accumulator;
-        }, {});
-        publishState();
-      },
-      (error) => {
-        setState({
-          loading: false,
-          workOrders: [],
-          error: error.message,
-        });
-      },
-    );
 
     const unsubscribeMachines = onSnapshot(
       machinesRef,
       (snapshot) => {
-        machineLookup = snapshot.docs.reduce<Record<string, { machineNumber: string; machineModel: string; locationId: string | null }>>(
+        machineLookup = snapshot.docs.reduce<Record<string, { machineNumber: string; machineModel: string }>>(
           (accumulator, docSnapshot) => {
             const data = docSnapshot.data();
             accumulator[docSnapshot.id] = {
               machineNumber: asString(data.machineNumber) ?? asString(data.label) ?? docSnapshot.id.toUpperCase(),
               machineModel: asString(data.model) ?? 'Model not set',
-              locationId: asString(data.locationId),
             };
             return accumulator;
           },
@@ -265,7 +236,6 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
     );
 
     return () => {
-      unsubscribeLocations();
       unsubscribeMachines();
       unsubscribeWorkOrders();
     };

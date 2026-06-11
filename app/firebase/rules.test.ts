@@ -44,65 +44,87 @@ async function seedBaseData() {
     await db.doc('organizations/orgA/memberships/ownerA').set({
       role: 'owner',
       status: 'active',
-      allowedLocationIds: ['all'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerA',
     });
     await db.doc('organizations/orgA/memberships/adminA').set({
       role: 'admin',
       status: 'active',
-      allowedLocationIds: ['all'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerA',
     });
     await db.doc('organizations/orgA/memberships/managerA1').set({
       role: 'manager',
       status: 'active',
-      allowedLocationIds: ['locA1'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerA',
     });
     await db.doc('organizations/orgA/memberships/techA1').set({
       role: 'technician',
       status: 'active',
-      allowedLocationIds: ['locA1'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerA',
     });
     await db.doc('organizations/orgA/memberships/viewerA').set({
       role: 'viewer',
       status: 'active',
-      allowedLocationIds: ['locA1'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerA',
     });
     await db.doc('organizations/orgB/memberships/ownerB').set({
       role: 'owner',
       status: 'active',
-      allowedLocationIds: ['all'],
+      createdAt: '2026-05-18T00:00:00.000Z',
+      createdBy: 'ownerB',
     });
-
-    await db.doc('organizations/orgA/locations/locA1').set({ name: 'Main Street' });
-    await db.doc('organizations/orgA/locations/locA2').set({ name: 'Beachside' });
-    await db.doc('organizations/orgB/locations/locB1').set({ name: 'Other Main' });
 
     await db.doc('organizations/orgA/machines/washerA1').set({
-      label: 'W12',
-      locationId: 'locA1',
-      status: 'healthy',
+      machineNumber: 'W12',
+      type: 'Washer',
+      make: 'Speed Queen',
+      modelNumber: 'SC40',
+      model: 'Speed Queen SC40',
+      status: 'running',
+      statusLabel: 'Operational',
     });
     await db.doc('organizations/orgA/machines/washerA2').set({
-      label: 'W18',
-      locationId: 'locA2',
+      machineNumber: 'D07',
+      type: 'Dryer',
+      make: 'Huebsch',
+      modelNumber: 'HX12',
+      model: 'Huebsch HX12',
       status: 'down',
+      statusLabel: 'Down',
     });
     await db.doc('organizations/orgB/machines/washerB1').set({
-      label: 'W01',
-      locationId: 'locB1',
-      status: 'healthy',
+      machineNumber: 'W01',
+      type: 'Washer',
+      make: 'Speed Queen',
+      modelNumber: 'SQ11',
+      model: 'Speed Queen SQ11',
+      status: 'running',
+      statusLabel: 'Operational',
     });
 
     await db.doc('organizations/orgA/workOrders/workA1').set({
+      number: 'WO-1001',
       title: 'Door lock fault',
-      locationId: 'locA1',
+      machineId: 'washerA1',
+      machineNumber: 'W12',
+      machineModel: 'Speed Queen SC40',
       assignedUserId: 'techA1',
       status: 'open',
+      statusLabel: 'Open',
     });
     await db.doc('organizations/orgA/workOrders/workA2').set({
+      number: 'WO-1002',
       title: 'Drain fault',
-      locationId: 'locA2',
+      machineId: 'washerA2',
+      machineNumber: 'D07',
+      machineModel: 'Huebsch HX12',
       assignedUserId: 'techA1',
       status: 'open',
+      statusLabel: 'Open',
     });
 
     await db.doc('organizations/orgA/manuals/manualA1').set({
@@ -115,7 +137,6 @@ async function seedBaseData() {
     });
 
     await db.doc('organizations/orgA/aiDiagnoses/diagnosisA1').set({
-      locationId: 'locA1',
       workOrderId: 'workA1',
       groundingStatus: 'manual-grounded',
     });
@@ -177,31 +198,44 @@ describe('Firestore organization security', () => {
     await assertFails(ownerA.doc('organizations/orgA/auditLogs/logA2').set({ action: 'manual.clientWrite' }));
   });
 
-  it('limits managers and technicians to assigned locations', async () => {
+  it('allows managers and technicians to manage operations without locations', async () => {
     const managerA1 = dbFor('managerA1');
     const techA1 = dbFor('techA1');
 
     await assertSucceeds(managerA1.doc('organizations/orgA/machines/washerA1').get());
-    await assertFails(managerA1.doc('organizations/orgA/machines/washerA2').get());
+    await assertSucceeds(managerA1.doc('organizations/orgA/machines/washerA2').get());
     await assertSucceeds(
       managerA1.doc('organizations/orgA/machines/washerNew').set({
-        label: 'W19',
-        locationId: 'locA1',
-        status: 'healthy',
+        machineNumber: 'W19',
+        type: 'Washer',
+        make: 'Speed Queen',
+        modelNumber: 'SQ19',
+        model: 'Speed Queen SQ19',
+        status: 'running',
+        statusLabel: 'Operational',
       }),
     );
-    await assertFails(
-      managerA1.doc('organizations/orgA/machines/washerBlocked').set({
-        label: 'W20',
-        locationId: 'locA2',
-        status: 'healthy',
+
+    await assertSucceeds(techA1.doc('organizations/orgA/machines/washerA2').get());
+    await assertSucceeds(
+      techA1.doc('organizations/orgA/machines/washerA1').update({
+        status: 'down',
+        statusLabel: 'Down',
+        updatedAt: '2026-05-20T00:00:00.000Z',
+        updatedBy: 'techA1',
       }),
     );
 
     await assertSucceeds(techA1.doc('organizations/orgA/workOrders/workA1').get());
-    await assertFails(techA1.doc('organizations/orgA/workOrders/workA2').get());
-    await assertSucceeds(techA1.doc('organizations/orgA/workOrders/workA1').update({ status: 'in-progress' }));
-    await assertFails(techA1.doc('organizations/orgA/workOrders/workA1').update({ locationId: 'locA2' }));
+    await assertSucceeds(techA1.doc('organizations/orgA/workOrders/workA2').get());
+    await assertSucceeds(
+      techA1.doc('organizations/orgA/workOrders/workA1').update({
+        status: 'in-progress',
+        statusLabel: 'In Progress',
+        updatedAt: '2026-05-20T00:00:00.000Z',
+        updatedBy: 'techA1',
+      }),
+    );
   });
 
   it('keeps manual chunks and AI diagnoses backend-only for writes', async () => {
@@ -210,7 +244,7 @@ describe('Firestore organization security', () => {
 
     await assertSucceeds(techA1.doc('organizations/orgA/manuals/manualA1/chunks/chunkA1').get());
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1/chunks/chunkA2').set({ text: 'client write' }));
-    await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ locationId: 'locA1' }));
+    await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ workOrderId: 'workA1' }));
   });
 
   it('allows controlled owner bootstrap org creation and self-membership only', async () => {
@@ -232,7 +266,6 @@ describe('Firestore organization security', () => {
       ownerA.doc('organizations/orgBootstrap/memberships/ownerA').set({
         role: 'owner',
         status: 'active',
-        allowedLocationIds: ['all'],
         createdAt: '2026-05-20T00:00:00.000Z',
         createdBy: 'ownerA',
       }),
@@ -242,7 +275,6 @@ describe('Firestore organization security', () => {
       ownerA.doc('organizations/orgBootstrap/memberships/ownerB').set({
         role: 'owner',
         status: 'active',
-        allowedLocationIds: ['all'],
         createdBy: 'ownerA',
       }),
     );
@@ -277,16 +309,15 @@ describe('Storage organization security', () => {
     await assertFails(techStorage.ref('orgs/orgA/manuals/manualA1/manual.pdf').put(pdf));
   });
 
-  it('limits machine photos and work order files by location access', async () => {
+  it('allows operational uploads for machine photos and work order attachments', async () => {
     const techStorage = storageFor('techA1');
     const ownerBStorage = storageFor('ownerB');
     const image = new Blob(['photo'], { type: 'image/png' });
 
     await assertSucceeds(techStorage.ref('orgs/orgA/machines/washerA1/photos/photo.png').put(image));
-    await assertFails(techStorage.ref('orgs/orgA/machines/washerA2/photos/photo.png').put(image));
-    await assertFails(ownerBStorage.ref('orgs/orgA/machines/washerA1/photos/photo.png').put(image));
     await assertSucceeds(techStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').put(image));
-    await assertFails(techStorage.ref('orgs/orgA/workOrders/workA2/attachments/photo.png').put(image));
+    await assertFails(ownerBStorage.ref('orgs/orgA/machines/washerA1/photos/photo.png').put(image));
+    await assertFails(ownerBStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').put(image));
   });
 
   it('blocks client writes to exports and backups', async () => {

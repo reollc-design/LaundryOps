@@ -51,8 +51,6 @@ export async function signOutCurrentUser(): Promise<void> {
 
 export interface OwnerOnboardingDraft {
   businessName: string;
-  locationName: string;
-  locationCityState: string;
   machineNumber: string;
   machineType: string;
   machineMake: string;
@@ -62,7 +60,6 @@ export interface OwnerOnboardingDraft {
 
 export interface OwnerOnboardingResult {
   organizationId: string;
-  locationId: string;
   machineId: string;
 }
 
@@ -76,8 +73,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
 
   const trimmedDraft: OwnerOnboardingDraft = {
     businessName: draft.businessName.trim(),
-    locationName: draft.locationName.trim(),
-    locationCityState: draft.locationCityState.trim(),
     machineNumber: draft.machineNumber.trim(),
     machineType: draft.machineType.trim(),
     machineMake: draft.machineMake.trim(),
@@ -88,7 +83,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
 
   const organizationRef = doc(collection(db, 'organizations'));
   const membershipRef = doc(db, `organizations/${organizationRef.id}/memberships/${user.uid}`);
-  const locationRef = doc(collection(db, `organizations/${organizationRef.id}/locations`));
   const machineRef = doc(collection(db, `organizations/${organizationRef.id}/machines`));
 
   await setDoc(organizationRef, {
@@ -104,14 +98,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
   await setDoc(membershipRef, {
     role: 'owner',
     status: 'active',
-    allowedLocationIds: ['all'],
-    createdAt: serverTimestamp(),
-    createdBy: user.uid,
-  });
-
-  await setDoc(locationRef, {
-    name: trimmedDraft.locationName,
-    cityState: trimmedDraft.locationCityState,
     createdAt: serverTimestamp(),
     createdBy: user.uid,
   });
@@ -122,7 +108,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     make: trimmedDraft.machineMake,
     modelNumber: trimmedDraft.machineModelNumber,
     model: machineModel || trimmedDraft.machineModelNumber || trimmedDraft.machineMake,
-    locationId: locationRef.id,
     status: 'running',
     statusLabel: 'Running',
     createdAt: serverTimestamp(),
@@ -141,7 +126,6 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
 
   return {
     organizationId: organizationRef.id,
-    locationId: locationRef.id,
     machineId: machineRef.id,
   };
 }

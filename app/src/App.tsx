@@ -8,7 +8,6 @@ import {
   Camera,
   CalendarClock,
   Check,
-  ChevronDown,
   ChevronRight,
   Circle,
   ClipboardCheck,
@@ -22,7 +21,6 @@ import {
   KeyRound,
   LockKeyhole,
   Mail,
-  MapPin,
   MoreVertical,
   Pencil,
   Plus,
@@ -40,7 +38,6 @@ import {
   accountStats,
   aiWorkOrderDraft,
   downtimeTrend,
-  locationSummaries,
   machineCatalog,
   machineHistory,
   manualCoverageRows,
@@ -54,7 +51,7 @@ import {
   urgentMachines,
   workOrderQueue,
 } from './data';
-import type { AccountStat, LocationSummary, MachineStatus, ManualStatus, OnboardingStep, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
+import type { AccountStat, MachineStatus, ManualStatus, OnboardingStep, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
 import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
 import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
@@ -64,7 +61,6 @@ import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, upd
 import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
-import { useOrganizationLocations, type OrganizationLocation } from './hooks/useOrganizationLocations';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 
@@ -228,7 +224,8 @@ function findMachines(query: string, machines: UrgentMachine[]) {
       machineId,
       numericId,
       machine.type,
-      machine.row,
+      machine.make ?? '',
+      machine.modelNumber ?? '',
       machine.statusLabel,
       machine.status,
     ]
@@ -377,8 +374,6 @@ export function App() {
   const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
   const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>({
     businessName: '',
-    locationName: '',
-    locationCityState: '',
     machineNumber: '',
     machineType: 'Washer',
     machineMake: '',
@@ -390,9 +385,9 @@ export function App() {
   const defaultOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
   const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
-  const orgLocations = useOrganizationLocations(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
+  const workspaceLabel = userProfile.profile?.displayName ?? 'Company Account';
   const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
   const machineCatalogBase = orgConnected ? orgMachines.machines : machineCatalog;
   const machineCatalogData = useMemo(() => applyStatusOverrides(machineCatalogBase, machineStatusOverrides), [machineCatalogBase, machineStatusOverrides]);
@@ -420,39 +415,6 @@ export function App() {
     }
     return workOrderQueueData[0] ?? null;
   }, [selectedWorkOrderId, workOrderQueueData]);
-  const locationSummaryData = useMemo(() => {
-    if (!orgConnected) {
-      return locationSummaries;
-    }
-
-    const machineCountByLocation = orgMachines.machines.reduce<Record<string, number>>((accumulator, machine) => {
-      const key = machine.row;
-      accumulator[key] = (accumulator[key] ?? 0) + 1;
-      return accumulator;
-    }, {});
-
-    const openOrdersByLocation = orgWorkOrders.workOrders.reduce<Record<string, number>>((accumulator, order) => {
-      if (order.status === 'completed') {
-        return accumulator;
-      }
-      const key = order.location;
-      accumulator[key] = (accumulator[key] ?? 0) + 1;
-      return accumulator;
-    }, {});
-
-    return orgLocations.locations.map((location, index) => {
-      const status: LocationSummary['status'] = index === 0 ? 'included' : 'add-on';
-      return {
-        id: location.id,
-        name: location.name,
-        address: location.cityState ?? 'Address not set',
-        machines: machineCountByLocation[location.name] ?? 0,
-        openWorkOrders: openOrdersByLocation[location.name] ?? 0,
-        status,
-        planNote: index === 0 ? 'Included in base plan' : 'Additional location add-on',
-      };
-    });
-  }, [orgConnected, orgLocations.locations, orgMachines.machines, orgWorkOrders.workOrders]);
   const urgentMachineData = useMemo(() => {
     if (!orgConnected) {
       return urgentMachines;
@@ -689,26 +651,20 @@ export function App() {
     )
       ?? orgMachines.machines.find((machine) => machine.machineNumber === aiWorkOrderDraft.machineNumber)
       ?? orgMachines.machines[0];
-    const preferredLocation = orgLocations.locations.find((location) => location.name === preferredMachine?.row)
-      ?? orgLocations.locations[0];
     const machineNumber = preferredMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
-    const machineModel = preferredMachine?.type ?? aiWorkOrderDraft.machineModel;
+    const machineModel = [
+      preferredMachine?.make?.trim(),
+      preferredMachine?.modelNumber?.trim(),
+    ].filter(Boolean).join(' ') || preferredMachine?.type || aiWorkOrderDraft.machineModel;
     const workOrderTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
       ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, machineNumber)
       : aiWorkOrderDraft.title;
-
-    if (!preferredLocation) {
-      setWorkOrderError('Add at least one location before creating a work order.');
-      return;
-    }
 
     setWorkOrderBusy(true);
     try {
       const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost);
       const result = await createWorkOrderFromDraft({
         organizationId: defaultOrganizationId,
-        locationId: preferredLocation.id,
-        locationName: preferredLocation.name,
         machineId: preferredMachine?.id ?? null,
         machineNumber,
         machineModel,
@@ -844,7 +800,7 @@ export function App() {
                 activeScreen={activeScreen}
                 onBack={handleBack}
                 onAccountClick={() => setActiveScreen('account')}
-                locationLabel={onboardingDraft.locationName || 'No location set'}
+                workspaceLabel={workspaceLabel}
                 machineCount={machineCatalogData.length}
                 workOrderCount={workOrderQueueData.length}
               />
@@ -875,7 +831,6 @@ export function App() {
                     onOpenAiAssist={openAssistScreen}
                     onSetMachineStatus={handleSetMachineStatus}
                     organizationId={defaultOrganizationId}
-                    locations={orgLocations.locations}
                     machineCatalogData={machineCatalogData}
                     orgMachinesLoading={orgMachines.loading}
                     orgMachinesError={orgMachines.error}
@@ -908,9 +863,6 @@ export function App() {
                   <AccountScreen
                     authSession={authSession}
                     userProfile={userProfile}
-                    locationSummaryData={locationSummaryData}
-                    orgDataLoading={orgLocations.loading || orgMachines.loading || orgWorkOrders.loading}
-                    orgDataError={orgLocations.error ?? orgMachines.error ?? orgWorkOrders.error}
                     orgConnected={orgConnected}
                     signOutBusy={signOutBusy}
                     signOutError={signOutError}
@@ -1129,7 +1081,7 @@ function SignInScreen({
         <div className="access-copy">
           <span>Owner / Operator / Service Tech</span>
           <h1>Welcome back.</h1>
-          <p>Use your account to open your company workspace, locations, machines, and work queue.</p>
+          <p>Use your account to open your company workspace, machines, and work queue.</p>
         </div>
         <div className="access-fields">
           <AuthField icon={Mail} label="Email" value={email} type="email" onChange={setEmail} />
@@ -1214,7 +1166,7 @@ function CreateAccountAccessScreen({
         <div className="access-copy">
           <span>Owner setup</span>
           <h1>Start with Pro trial.</h1>
-          <p>Create the owner login first. The next step builds the company, first location, and first machine.</p>
+          <p>Create the owner login first. The next step adds the company and first machine.</p>
         </div>
         <div className="access-fields">
           <AuthField icon={UserRound} label="Owner Name" value={ownerName} onChange={setOwnerName} />
@@ -1327,12 +1279,11 @@ function OwnerOnboardingScreen({
     if (isLastStep) {
       if (
         !draft.businessName.trim() ||
-        !draft.locationName.trim() ||
         !draft.machineNumber.trim() ||
         !draft.machineMake.trim() ||
         !draft.machineModelNumber.trim()
       ) {
-        setSubmitError('Business, location, machine ID, make, and model number are required before finishing setup.');
+        setSubmitError('Business, machine ID, make, and model number are required before finishing setup.');
         return;
       }
 
@@ -1449,7 +1400,6 @@ function OnboardingStepIcon({ step, compact = false }: { step: OnboardingStep; c
   const iconProps = { size: compact ? 17 : 22 };
   const Icon =
     step.icon === 'account' ? Building2 :
-    step.icon === 'location' ? MapPin :
     step.icon === 'machine' ? Wrench :
     BookOpen;
 
@@ -1483,15 +1433,6 @@ function OnboardingStepFields({
       <div className="setup-field-grid">
         <SetupField label="Business Name" value={draft.businessName} onChange={(value) => patchDraft({ businessName: value })} />
         <SetupField label="Owner Email" value={ownerEmail} readOnly />
-      </div>
-    );
-  }
-
-  if (stepId === 'location') {
-    return (
-      <div className="setup-field-grid">
-        <SetupField label="Location Name" value={draft.locationName} onChange={(value) => patchDraft({ locationName: value })} />
-        <SetupField label="City / State" value={draft.locationCityState} onChange={(value) => patchDraft({ locationCityState: value })} />
       </div>
     );
   }
@@ -1572,8 +1513,7 @@ function SetupSelectField({
 
 function getOnboardingStepCopy(stepId: string) {
   const copy: Record<string, string> = {
-    account: 'Create the customer account that owns billing, users, locations, machines, manuals, and reports.',
-    location: 'Add the first laundromat so every machine and work order has the right operating context.',
+    account: 'Create the customer account that owns billing, users, machines, manuals, and reports.',
     machine: 'Add one real machine now with machine ID, type, make, and model number. The full directory can be imported later.',
     manual: 'Upload the first manual so Repair Assist can answer from factual service material instead of generic guidance.',
   };
@@ -1600,7 +1540,7 @@ function AppHeader({
   activeScreen,
   onBack,
   onAccountClick,
-  locationLabel,
+  workspaceLabel,
   machineCount,
   workOrderCount,
 }: {
@@ -1609,7 +1549,7 @@ function AppHeader({
   activeScreen: ScreenKey;
   onBack: () => void;
   onAccountClick: () => void;
-  locationLabel: string;
+  workspaceLabel: string;
   machineCount: number;
   workOrderCount: number;
 }) {
@@ -1628,14 +1568,14 @@ function AppHeader({
       <div className="header-copy">
         <h1>{title}</h1>
         {!showBack && activeScreen !== 'machines' && activeScreen !== 'work-orders' && (
-          <button className="location-chip" type="button" onClick={onAccountClick}>
-            {locationLabel} <ChevronDown size={13} />
+          <button className="workspace-chip" type="button" onClick={onAccountClick}>
+            {workspaceLabel}
           </button>
         )}
-        {activeScreen === 'machines' && <span className="header-subtitle">{locationLabel} / {machineCount} machines</span>}
-        {activeScreen === 'work-orders' && <span className="header-subtitle">{locationLabel} / {workOrderCount} work orders</span>}
+        {activeScreen === 'machines' && <span className="header-subtitle">{machineCount} machines</span>}
+        {activeScreen === 'work-orders' && <span className="header-subtitle">{workOrderCount} work orders</span>}
         {activeScreen === 'manuals' && <span className="header-subtitle">Grounded repair answers</span>}
-        {activeScreen === 'account' && <span className="header-subtitle">Business, locations, subscription</span>}
+        {activeScreen === 'account' && <span className="header-subtitle">Business, subscription</span>}
         {activeScreen === 'create-work-order' && <span className="header-subtitle">AI draft review</span>}
       </div>
       {isAssist ? (
@@ -1738,7 +1678,7 @@ function HomeScreen({
             type="search"
             value={machineQuery}
             onChange={(event) => setMachineQuery(event.target.value)}
-            placeholder="Search machine ID, type, location, or status"
+            placeholder="Search machine ID, type, make, model, or status"
           />
         </label>
         {normalizedQuery ? (
@@ -1811,7 +1751,6 @@ function MachinesScreen({
   onOpenAiAssist,
   onSetMachineStatus,
   organizationId,
-  locations,
   machineCatalogData,
   orgMachinesLoading,
   orgMachinesError,
@@ -1826,7 +1765,6 @@ function MachinesScreen({
   onOpenAiAssist: (machine: UrgentMachine) => void;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
   organizationId: string | null;
-  locations: OrganizationLocation[];
   machineCatalogData: UrgentMachine[];
   orgMachinesLoading: boolean;
   orgMachinesError: string | null;
@@ -1841,7 +1779,6 @@ function MachinesScreen({
   const [machineTypeInput, setMachineTypeInput] = useState('Washer');
   const [machineMakeInput, setMachineMakeInput] = useState('');
   const [machineModelNumberInput, setMachineModelNumberInput] = useState('');
-  const [locationIdInput, setLocationIdInput] = useState('');
   const [addMachineBusy, setAddMachineBusy] = useState(false);
   const [addMachineError, setAddMachineError] = useState<string | null>(null);
   const [editingMachine, setEditingMachine] = useState<UrgentMachine | null>(null);
@@ -1849,7 +1786,6 @@ function MachinesScreen({
   const [editMachineTypeInput, setEditMachineTypeInput] = useState('Washer');
   const [editMachineMakeInput, setEditMachineMakeInput] = useState('');
   const [editMachineModelNumberInput, setEditMachineModelNumberInput] = useState('');
-  const [editLocationIdInput, setEditLocationIdInput] = useState('');
   const [editMachineBusy, setEditMachineBusy] = useState(false);
   const [editMachineError, setEditMachineError] = useState<string | null>(null);
   const [deletingMachine, setDeletingMachine] = useState<UrgentMachine | null>(null);
@@ -1862,30 +1798,18 @@ function MachinesScreen({
     return findMachines(machineQuery, statusFiltered);
   }, [activeFilter, machineCatalogData, machineQuery]);
   const counts = useMemo(() => machineStatusCounts(machineCatalogData), [machineCatalogData]);
-  const selectedLocationId = locationIdInput || locations[0]?.id || '';
 
   useEffect(() => {
     if (initialFilter && initialFilter !== activeFilter) {
       setActiveFilter(initialFilter);
     }
   }, [activeFilter, initialFilter]);
-  useEffect(() => {
-    if (!locationIdInput && locations[0]?.id) {
-      setLocationIdInput(locations[0].id);
-    }
-  }, [locationIdInput, locations]);
-  useEffect(() => {
-    if (editingMachine && !editLocationIdInput && locations[0]?.id) {
-      setEditLocationIdInput(locations[0].id);
-    }
-  }, [editLocationIdInput, editingMachine, locations]);
 
   const resetAddMachineForm = () => {
     setMachineNumberInput('');
     setMachineTypeInput('Washer');
     setMachineMakeInput('');
     setMachineModelNumberInput('');
-    setLocationIdInput(locations[0]?.id ?? '');
     setAddMachineError(null);
   };
   const closeEditMachine = () => {
@@ -1899,13 +1823,11 @@ function MachinesScreen({
     setDeleteMachineBusy(false);
   };
   const openEditMachine = (machine: UrgentMachine) => {
-    const fallbackLocationId = locations.find((location) => location.name === machine.row)?.id ?? locations[0]?.id ?? '';
     setEditingMachine(machine);
     setEditMachineNumberInput(machine.machineNumber);
     setEditMachineTypeInput(machine.type || 'Washer');
     setEditMachineMakeInput(machine.make ?? '');
     setEditMachineModelNumberInput(machine.modelNumber ?? '');
-    setEditLocationIdInput(machine.locationId ?? fallbackLocationId);
     setEditMachineError(null);
   };
 
@@ -1913,10 +1835,6 @@ function MachinesScreen({
     setAddMachineError(null);
     if (!orgConnected || !organizationId) {
       setAddMachineError('Complete onboarding first before adding machines.');
-      return;
-    }
-    if (!selectedLocationId) {
-      setAddMachineError('Add a location first, then create a machine.');
       return;
     }
     if (!machineNumberInput.trim() || !machineMakeInput.trim() || !machineModelNumberInput.trim()) {
@@ -1928,7 +1846,6 @@ function MachinesScreen({
     try {
       await createMachine({
         organizationId,
-        locationId: selectedLocationId,
         machineNumber: machineNumberInput.trim(),
         type: machineTypeInput,
         make: machineMakeInput.trim(),
@@ -1951,10 +1868,6 @@ function MachinesScreen({
       setEditMachineError('Complete onboarding first before editing machines.');
       return;
     }
-    if (!editLocationIdInput.trim()) {
-      setEditMachineError('Select a location.');
-      return;
-    }
     if (!editMachineNumberInput.trim() || !editMachineMakeInput.trim() || !editMachineModelNumberInput.trim()) {
       setEditMachineError('Machine ID, make, and model number are required.');
       return;
@@ -1965,7 +1878,6 @@ function MachinesScreen({
       await updateMachine({
         organizationId,
         machineId: editingMachine.id,
-        locationId: editLocationIdInput.trim(),
         machineNumber: editMachineNumberInput.trim(),
         type: editMachineTypeInput.trim(),
         make: editMachineMakeInput.trim(),
@@ -2019,7 +1931,7 @@ function MachinesScreen({
             type="search"
             value={machineQuery}
             onChange={(event) => setMachineQuery(event.target.value)}
-            placeholder="Search machine ID, type, location, or status"
+            placeholder="Search machine ID, type, make, model, or status"
           />
         </label>
         <div className="filter-strip" aria-label="Machine status filters">
@@ -2095,12 +2007,6 @@ function MachinesScreen({
               <SetupSelectField label="Type" value={machineTypeInput} options={['Washer', 'Dryer', 'Other']} onChange={setMachineTypeInput} />
               <SetupField label="Machine Make" value={machineMakeInput} onChange={setMachineMakeInput} />
               <SetupField label="Model Number" value={machineModelNumberInput} onChange={setMachineModelNumberInput} />
-              <SetupSelectField
-                label="Location"
-                value={selectedLocationId}
-                options={locations.map((location) => ({ value: location.id, label: location.name }))}
-                onChange={setLocationIdInput}
-              />
             </div>
             {addMachineError && (
               <div className="auth-message">
@@ -2112,7 +2018,7 @@ function MachinesScreen({
               className="primary-action"
               type="button"
               onClick={() => void handleAddMachine()}
-              disabled={addMachineBusy || locations.length === 0}
+              disabled={addMachineBusy}
             >
               {addMachineBusy ? 'Saving...' : 'Save Machine'}
             </button>
@@ -2133,14 +2039,7 @@ function MachinesScreen({
               <SetupSelectField label="Type" value={editMachineTypeInput} options={['Washer', 'Dryer', 'Other']} onChange={setEditMachineTypeInput} />
               <SetupField label="Machine Make" value={editMachineMakeInput} onChange={setEditMachineMakeInput} />
               <SetupField label="Model Number" value={editMachineModelNumberInput} onChange={setEditMachineModelNumberInput} />
-              <SetupSelectField
-                label="Location"
-                value={editLocationIdInput}
-                options={locations.map((location) => ({ value: location.id, label: location.name }))}
-                onChange={setEditLocationIdInput}
-              />
             </div>
-            {locations.length === 0 && <p className="search-hint">Create a location first, then edit machines.</p>}
             {editMachineError && (
               <div className="auth-message">
                 <strong>Could not update machine</strong>
@@ -2155,7 +2054,7 @@ function MachinesScreen({
                 className="primary-action"
                 type="button"
                 onClick={() => void handleSaveMachineEdits()}
-                disabled={editMachineBusy || locations.length === 0}
+                disabled={editMachineBusy}
               >
                 {editMachineBusy ? 'Saving...' : 'Save Changes'}
               </button>
@@ -2280,7 +2179,7 @@ function UrgentMachineRow({
         <MachineThumb />
         <div className="machine-row-main">
           <strong>{machine.machineNumber}</strong>
-          <span>{machine.type} / {machine.row}</span>
+          <span>{machine.type} / {machine.make ?? 'Make not set'}</span>
         </div>
         <div className="machine-row-status">
           <StatusBadge status={activeStatus}>{machineStatusLabel(activeStatus)}</StatusBadge>
@@ -2357,8 +2256,9 @@ function MachineDetailScreen({
   const machineStatus = machine ? toOperationalStatus(machine.status) : 'running';
   const machineStatusText = machine ? machineStatusLabel(machineStatus) : 'Operational';
   const machineNumber = machine?.machineNumber ?? 'Machine';
-  const machineModel = machine?.type ?? 'Model not set';
-  const machineLocation = machine?.row ?? 'Location not set';
+  const machineModel = machine?.make && machine?.modelNumber
+    ? `${machine.make} ${machine.modelNumber}`.trim()
+    : machine?.make ?? machine?.modelNumber ?? machine?.type ?? 'Model not set';
   const issueLabel = machineStatus === 'down'
     ? 'Machine offline'
     : machineStatus === 'needs-repair'
@@ -2374,7 +2274,7 @@ function MachineDetailScreen({
             <StatusBadge status={machineStatus}>{machineStatusText}</StatusBadge>
           </div>
           <strong>{machineModel}</strong>
-          <span>{machineLocation}</span>
+          <span>{machine?.type ?? 'Machine type not set'}</span>
           <span>S/N 123456789</span>
         </div>
         <MachineIllustration />
@@ -2648,9 +2548,6 @@ function ManualRow({ manual }: { manual: ManualLibraryRow }) {
 function AccountScreen({
   authSession,
   userProfile,
-  locationSummaryData,
-  orgDataLoading,
-  orgDataError,
   orgConnected,
   signOutBusy,
   signOutError,
@@ -2662,9 +2559,6 @@ function AccountScreen({
 }: {
   authSession: ReturnType<typeof useAuthSession>;
   userProfile: ReturnType<typeof useUserProfile>;
-  locationSummaryData: LocationSummary[];
-  orgDataLoading: boolean;
-  orgDataError: string | null;
   orgConnected: boolean;
   signOutBusy: boolean;
   signOutError: string | null;
@@ -2686,7 +2580,7 @@ function AccountScreen({
         <div>
           <span>Company Account</span>
           <strong>LaundryOps Company</strong>
-          <p>One company account can manage one store today and multiple laundromats later.</p>
+          <p>One company account manages your machines, work orders, manuals, and reports.</p>
         </div>
       </section>
 
@@ -2774,7 +2668,7 @@ function AccountScreen({
           <CreditCard size={18} />
           <div>
             <strong>One company subscription</strong>
-            <span>Base plan includes one location. Additional locations are paid add-ons under the same login.</span>
+            <span>Use one login for the full machine and repair workflow.</span>
           </div>
         </div>
         <div className="billing-plan-grid" role="radiogroup" aria-label="Subscription plan">
@@ -2829,21 +2723,6 @@ function AccountScreen({
         )}
       </section>
 
-      <section className="content-section location-list-card">
-        <div className="section-heading">
-          <h2>Locations</h2>
-          <button type="button"><Plus size={14} /> Add</button>
-        </div>
-        {orgConnected && orgDataLoading && <p className="search-hint">Refreshing locations from your company data...</p>}
-        {orgConnected && orgDataError && <p className="empty-state">Could not load live account data: {orgDataError}</p>}
-        <div className="location-list">
-          {locationSummaryData.map((location) => (
-            <LocationRow key={location.id} location={location} />
-          ))}
-        </div>
-        {locationSummaryData.length === 0 && <p className="empty-state">No locations found yet.</p>}
-      </section>
-
       <section className="content-section admin-card">
         <div className="section-heading">
           <h2>Admin Readiness</h2>
@@ -2874,34 +2753,6 @@ function AccountStatTile({ stat }: { stat: AccountStat }) {
       <span>{stat.label}</span>
       <strong>{stat.value}</strong>
       <small>{stat.detail}</small>
-    </div>
-  );
-}
-
-function LocationRow({ location }: { location: LocationSummary }) {
-  const statusLabel: Record<LocationSummary['status'], string> = {
-    included: 'Included',
-    'add-on': 'Add-On',
-    setup: 'Setup',
-  };
-
-  return (
-    <div className={`location-row location-${location.status}`}>
-      <div className="location-row-icon">
-        <MapPin size={19} />
-      </div>
-      <div className="location-row-main">
-        <strong>{location.name}</strong>
-        <span>{location.address}</span>
-        <small>{location.planNote}</small>
-      </div>
-      <div className="location-row-meta">
-        <StatusBadge status={location.status === 'included' ? 'running' : location.status === 'add-on' ? 'primary' : 'waiting'}>
-          {statusLabel[location.status]}
-        </StatusBadge>
-        <span>{location.machines} machines</span>
-        <small>{location.openWorkOrders} open work orders</small>
-      </div>
     </div>
   );
 }
@@ -2945,8 +2796,9 @@ function CreateWorkOrderScreen({
   const priorityOptions = ['High', 'Standard', 'Low'];
   const assigneeOptions = ['Mike R.', 'Tom J.', 'Unassigned'];
   const draftMachineNumber = machine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
-  const draftMachineModel = machine?.type ?? aiWorkOrderDraft.machineModel;
-  const draftMachineLocation = machine?.row ?? aiWorkOrderDraft.location;
+  const draftMachineModel = machine?.make && machine?.modelNumber
+    ? `${machine.make} ${machine.modelNumber}`.trim()
+    : machine?.make ?? machine?.modelNumber ?? machine?.type ?? aiWorkOrderDraft.machineModel;
   const draftTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
     ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, draftMachineNumber)
     : aiWorkOrderDraft.title;
@@ -2988,7 +2840,6 @@ function CreateWorkOrderScreen({
           <span>Machine</span>
           <strong>{draftMachineNumber}</strong>
           <small>{draftMachineModel}</small>
-          <small>{draftMachineLocation}</small>
         </div>
         <CalendarClock size={20} />
       </section>
@@ -3273,7 +3124,7 @@ function WorkOrderQueueRow({
         </div>
         <div className="work-row-meta">
           <span>{order.machineModel}</span>
-          <span>{order.location}</span>
+          <span>{order.machineNumber}</span>
         </div>
         <div className="work-row-footer">
           <WorkOrderStatusBadge status={order.status}>{order.statusLabel}</WorkOrderStatusBadge>
@@ -3385,7 +3236,7 @@ function WorkOrderDetailScreen({
       <section className="work-title">
         <div>
           <h2>{order.machineNumber} {order.title}</h2>
-          <span>{order.number} / {order.location}</span>
+          <span>{order.number} / {order.machineModel}</span>
         </div>
         <StatusBadge status={priorityToBadgeStatus(order.priority)}>{order.priority}</StatusBadge>
       </section>

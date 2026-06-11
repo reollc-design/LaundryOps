@@ -20,26 +20,16 @@ service cloud.firestore {
       return isMember(orgId) && get(memberPath(orgId)).data.role in roles;
     }
 
-    function hasAssignedLocation(orgId, locationId) {
-      return isMember(orgId)
-        && get(memberPath(orgId)).data.allowedLocationIds is list
-        && (
-          locationId in get(memberPath(orgId)).data.allowedLocationIds
-          || 'all' in get(memberPath(orgId)).data.allowedLocationIds
-        );
-    }
-
-    function hasLocationAccess(orgId, locationId) {
-      return hasRole(orgId, ['owner', 'admin']) || hasAssignedLocation(orgId, locationId);
-    }
-
     function isOwnerOrAdmin(orgId) {
       return hasRole(orgId, ['owner', 'admin']);
     }
 
-    function isOperationsLead(orgId, locationId) {
-      return isOwnerOrAdmin(orgId)
-        || (hasRole(orgId, ['manager']) && hasLocationAccess(orgId, locationId));
+    function isOperationsLead(orgId) {
+      return hasRole(orgId, ['owner', 'admin', 'manager']);
+    }
+
+    function isTechnician(orgId) {
+      return hasRole(orgId, ['technician']);
     }
 
     function unchanged(keys) {
@@ -95,65 +85,54 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUserId == request.auth.uid
           && request.resource.data.role == 'owner'
           && request.resource.data.status == 'active'
-          && request.resource.data.allowedLocationIds is list
-          && 'all' in request.resource.data.allowedLocationIds
-          && request.resource.data.createdBy == request.auth.uid;
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'role',
+            'status',
+            'createdAt',
+            'createdBy'
+          ]);
         allow update, delete: if false;
       }
 
-      match /locations/{locationId} {
-        allow read: if hasLocationAccess(orgId, locationId);
-        allow create, update, delete: if isOwnerOrAdmin(orgId);
-      }
-
       match /machines/{machineId} {
-        allow read: if hasLocationAccess(orgId, resource.data.locationId);
-        allow create: if isOperationsLead(orgId, request.resource.data.locationId);
-        allow update: if (
-          isOperationsLead(orgId, resource.data.locationId)
-          && request.resource.data.locationId == resource.data.locationId
-        ) || (
-          hasRole(orgId, ['technician'])
-          && hasLocationAccess(orgId, resource.data.locationId)
-          && request.resource.data.locationId == resource.data.locationId
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'status',
-            'lastServicedAt',
-            'updatedAt'
-          ])
-        );
+        allow read: if isMember(orgId);
+        allow create: if isOperationsLead(orgId);
+        allow update: if isOperationsLead(orgId)
+          || (
+            isTechnician(orgId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'statusLabel',
+              'updatedAt',
+              'updatedBy',
+              'lastServicedAt'
+            ])
+          );
         allow delete: if isOwnerOrAdmin(orgId);
       }
 
       match /workOrders/{workOrderId} {
-        allow read: if hasLocationAccess(orgId, resource.data.locationId);
-        allow create: if isOperationsLead(orgId, request.resource.data.locationId);
-        allow update: if (
-          isOperationsLead(orgId, resource.data.locationId)
-          && request.resource.data.locationId == resource.data.locationId
-        ) || (
-          hasRole(orgId, ['technician'])
-          && hasLocationAccess(orgId, resource.data.locationId)
-          && resource.data.assignedUserId == request.auth.uid
-          && request.resource.data.locationId == resource.data.locationId
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'status',
-            'notes',
-            'partsUsed',
-            'completedAt',
-            'updatedAt'
-          ])
-        );
+        allow read: if isMember(orgId);
+        allow create: if isOperationsLead(orgId);
+        allow update: if isOperationsLead(orgId)
+          || (
+            isTechnician(orgId)
+            && resource.data.assignedUserId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'statusLabel',
+              'updatedAt',
+              'updatedBy',
+              'completedAt'
+            ])
+          );
         allow delete: if isOwnerOrAdmin(orgId);
       }
 
       match /maintenanceEvents/{eventId} {
-        allow read: if hasLocationAccess(orgId, resource.data.locationId);
-        allow create: if isOperationsLead(orgId, request.resource.data.locationId)
-          || (
-            hasRole(orgId, ['technician'])
-            && hasLocationAccess(orgId, request.resource.data.locationId)
-          );
+        allow read: if isMember(orgId);
+        allow create: if hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
         allow update, delete: if isOwnerOrAdmin(orgId);
       }
 
@@ -173,7 +152,7 @@ service cloud.firestore {
       }
 
       match /aiDiagnoses/{diagnosisId} {
-        allow read: if hasLocationAccess(orgId, resource.data.locationId);
+        allow read: if isMember(orgId);
         allow create, update, delete: if false;
       }
 

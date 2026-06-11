@@ -47,7 +47,6 @@ export async function updateMachineStatus(input: UpdateMachineStatusInput): Prom
 
 export interface CreateMachineInput {
   organizationId: string;
-  locationId: string;
   machineNumber: string;
   type: string;
   make: string;
@@ -76,7 +75,6 @@ export async function createMachine(input: CreateMachineInput): Promise<{ machin
     make,
     modelNumber,
     model,
-    locationId: input.locationId,
     status: 'running',
     statusLabel: 'Operational',
     createdAt: serverTimestamp(),
@@ -91,7 +89,6 @@ export async function createMachine(input: CreateMachineInput): Promise<{ machin
 export interface UpdateMachineInput {
   organizationId: string;
   machineId: string;
-  locationId: string;
   machineNumber: string;
   type: string;
   make: string;
@@ -113,9 +110,6 @@ export async function updateMachine(input: UpdateMachineInput): Promise<void> {
   if (!machineNumber || !model) {
     throw new Error('Machine number, make, and model number are required.');
   }
-  if (!input.locationId.trim()) {
-    throw new Error('Location is required.');
-  }
 
   const machineRef = doc(db, `organizations/${input.organizationId}/machines/${input.machineId}`);
   await updateDoc(machineRef, {
@@ -124,7 +118,6 @@ export async function updateMachine(input: UpdateMachineInput): Promise<void> {
     make,
     modelNumber,
     model,
-    locationId: input.locationId.trim(),
     updatedAt: serverTimestamp(),
     updatedBy: user.uid,
   });

@@ -23,7 +23,6 @@ export interface UrgentMachine {
   machineNumber: string;
   type: string;
   row: string;
-  locationId?: string;
   make?: string;
   modelNumber?: string;
   status: MachineStatus;
@@ -38,7 +37,6 @@ export interface WorkOrderSummary {
   machineNumber: string;
   machineModel: string;
   title: string;
-  location: string;
   status: WorkOrderStatus;
   statusLabel: string;
   priority: WorkOrderPriority;
@@ -71,16 +69,6 @@ export interface ReportRow {
   tone?: 'primary' | 'teal' | 'down' | 'waiting';
 }
 
-export interface LocationSummary {
-  id: string;
-  name: string;
-  address: string;
-  machines: number;
-  openWorkOrders: number;
-  status: 'included' | 'add-on' | 'setup';
-  planNote: string;
-}
-
 export interface AccountStat {
   id: string;
   label: string;
@@ -92,7 +80,7 @@ export interface OnboardingStep {
   id: string;
   title: string;
   detail: string;
-  icon: 'account' | 'location' | 'machine' | 'manual';
+  icon: 'account' | 'machine' | 'manual';
 }
 
 export interface TrialFeature {
@@ -118,7 +106,6 @@ export const costRows: Array<[string, string]> = [];
 export const aiWorkOrderDraft = {
   machineNumber: 'Machine',
   machineModel: 'Model not set',
-  location: 'Location not set',
   title: 'New maintenance issue',
   priority: 'High',
   assignee: 'Unassigned',
@@ -168,8 +155,6 @@ export const manualCoverageRows: ReportRow[] = [];
 
 export const accountStats: AccountStat[] = [];
 
-export const locationSummaries: LocationSummary[] = [];
-
 export const trialFeatures: TrialFeature[] = [
   {
     id: 'work-orders',
@@ -194,12 +179,6 @@ export const onboardingSteps: OnboardingStep[] = [
     title: 'Create company account',
     detail: 'Your company / owner profile',
     icon: 'account',
-  },
-  {
-    id: 'location',
-    title: 'Add first location',
-    detail: 'Primary laundromat location',
-    icon: 'location',
   },
   {
     id: 'machine',

@@ -20,25 +20,8 @@ service firebase.storage {
       return isMember(orgId) && firestore.get(memberPath(orgId)).data.role in roles;
     }
 
-    function hasAssignedLocation(orgId, locationId) {
-      return isMember(orgId)
-        && firestore.get(memberPath(orgId)).data.allowedLocationIds is list
-        && (
-          locationId in firestore.get(memberPath(orgId)).data.allowedLocationIds
-          || 'all' in firestore.get(memberPath(orgId)).data.allowedLocationIds
-        );
-    }
-
-    function hasLocationAccess(orgId, locationId) {
-      return hasRole(orgId, ['owner', 'admin']) || hasAssignedLocation(orgId, locationId);
-    }
-
-    function machineLocation(orgId, machineId) {
-      return firestore.get(/databases/(default)/documents/organizations/$(orgId)/machines/$(machineId)).data.locationId;
-    }
-
-    function workOrderLocation(orgId, workOrderId) {
-      return firestore.get(/databases/(default)/documents/organizations/$(orgId)/workOrders/$(workOrderId)).data.locationId;
+    function isOperationalRole(orgId) {
+      return hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
     }
 
     function isPdf() {
@@ -61,15 +44,15 @@ service firebase.storage {
     }
 
     match /orgs/{orgId}/machines/{machineId}/photos/{fileName=**} {
-      allow read: if hasLocationAccess(orgId, machineLocation(orgId, machineId));
-      allow write: if hasLocationAccess(orgId, machineLocation(orgId, machineId))
+      allow read: if isMember(orgId);
+      allow write: if isOperationalRole(orgId)
         && isReasonableUpload()
         && isImage();
     }
 
     match /orgs/{orgId}/workOrders/{workOrderId}/attachments/{fileName=**} {
-      allow read: if hasLocationAccess(orgId, workOrderLocation(orgId, workOrderId));
-      allow write: if hasLocationAccess(orgId, workOrderLocation(orgId, workOrderId))
+      allow read: if isMember(orgId);
+      allow write: if isOperationalRole(orgId)
         && isReasonableUpload()
         && (isImage() || isPdf());
     }

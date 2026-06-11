@@ -34,8 +34,6 @@ function createWorkOrderNumber(): string {
 
 export interface CreateWorkOrderFromDraftInput {
   organizationId: string;
-  locationId: string;
-  locationName: string;
   machineId?: string | null;
   machineNumber: string;
   machineModel: string;
@@ -65,8 +63,6 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     machineNumber: input.machineNumber,
     machineModel: input.machineModel,
     title: input.title,
-    locationId: input.locationId,
-    locationName: input.locationName,
     status: 'open',
     statusLabel: 'Open',
     priority: input.priority,
