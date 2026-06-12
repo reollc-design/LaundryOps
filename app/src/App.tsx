@@ -229,6 +229,11 @@ function findMachines(query: string, machines: UrgentMachine[]) {
     const typeInitial = type[0] ?? '';
     const compactMachineId = machineId.replace(/[^a-z0-9]+/g, '');
     const compactNumericId = numericId.replace(/[^a-z0-9]+/g, '');
+
+    if (singleLetterQuery.length > 0) {
+      return compactMachineId.startsWith(singleLetterQuery);
+    }
+
     const letteredAliases = compactNumericId
       ? [
         `${typeInitial}${compactNumericId}`,
@@ -254,7 +259,6 @@ function findMachines(query: string, machines: UrgentMachine[]) {
       searchableText.includes(normalizedQuery)
       || searchableText.replace(/[^a-z0-9]+/g, '').includes(compactQuery)
       || (letteredQueryNumber.length > 0 && compactNumericId === letteredQueryNumber)
-      || (singleLetterQuery.length > 0 && (typeInitial === singleLetterQuery || compactMachineId.startsWith(singleLetterQuery)))
     );
   });
 }
