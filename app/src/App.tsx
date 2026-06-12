@@ -842,7 +842,8 @@ export function App() {
                 {activeScreen === 'machines' && (
                   <MachinesScreen
                     setActiveScreen={setActiveScreen}
-                    initialFilter={machineFilterPreset}
+                    activeFilter={machineFilterPreset ?? 'all'}
+                    onFilterChange={setMachineFilterPreset}
                     onOpenMachineDetail={openMachineDetail}
                     onCreateWorkOrder={(machineId) => openCreateWorkOrder('machines', machineId)}
                     onOpenAiAssist={openAssistScreen}
@@ -1783,7 +1784,8 @@ function HomeScreen({
 
 function MachinesScreen({
   setActiveScreen,
-  initialFilter,
+  activeFilter,
+  onFilterChange,
   onOpenMachineDetail,
   onCreateWorkOrder,
   onOpenAiAssist,
@@ -1797,7 +1799,8 @@ function MachinesScreen({
   orgConnected,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
-  initialFilter: MachineFilter | null;
+  activeFilter: MachineFilter;
+  onFilterChange: (filter: MachineFilter | null) => void;
   onOpenMachineDetail: (machineId: string) => void;
   onCreateWorkOrder: (machineId: string) => void;
   onOpenAiAssist: (machine: UrgentMachine) => void;
@@ -1811,7 +1814,6 @@ function MachinesScreen({
   orgConnected: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState<MachineFilter>(initialFilter ?? 'all');
   const [showAddMachineForm, setShowAddMachineForm] = useState(false);
   const [machineNumberInput, setMachineNumberInput] = useState('');
   const [machineTypeInput, setMachineTypeInput] = useState('Washer');
@@ -1836,13 +1838,6 @@ function MachinesScreen({
     return findMachines(machineQuery, statusFiltered);
   }, [activeFilter, machineCatalogData, machineQuery]);
   const counts = useMemo(() => machineStatusCounts(machineCatalogData), [machineCatalogData]);
-
-  useEffect(() => {
-    if (initialFilter && initialFilter !== activeFilter) {
-      setActiveFilter(initialFilter);
-      setMachineQuery('');
-    }
-  }, [activeFilter, initialFilter]);
 
   const resetAddMachineForm = () => {
     setMachineNumberInput('');
@@ -1958,7 +1953,7 @@ function MachinesScreen({
       <MachineStatusOverview
         counts={counts}
         onSelectStatus={(filter) => {
-          setActiveFilter(filter);
+          onFilterChange(filter);
           setMachineQuery('');
         }}
       />
@@ -1985,7 +1980,10 @@ function MachinesScreen({
               className={activeFilter === filter.key ? 'is-selected' : ''}
               key={filter.key}
               type="button"
-              onClick={() => setActiveFilter(filter.key)}
+              onClick={() => {
+                onFilterChange(filter.key);
+                setMachineQuery('');
+              }}
             >
               {filter.label}
             </button>
