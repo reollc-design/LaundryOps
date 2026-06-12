@@ -1811,7 +1811,7 @@ function MachinesScreen({
   orgConnected: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState<MachineFilter>('all');
+  const [activeFilter, setActiveFilter] = useState<MachineFilter>(initialFilter ?? 'all');
   const [showAddMachineForm, setShowAddMachineForm] = useState(false);
   const [machineNumberInput, setMachineNumberInput] = useState('');
   const [machineTypeInput, setMachineTypeInput] = useState('Washer');
@@ -1840,6 +1840,7 @@ function MachinesScreen({
   useEffect(() => {
     if (initialFilter && initialFilter !== activeFilter) {
       setActiveFilter(initialFilter);
+      setMachineQuery('');
     }
   }, [activeFilter, initialFilter]);
 
