@@ -214,6 +214,10 @@ function getErrorMessage(error: unknown, fallback: string): string {
 function findMachines(query: string, machines: UrgentMachine[]) {
   const normalizedQuery = query.trim().toLowerCase();
   const compactQuery = normalizedQuery.replace(/[^a-z0-9]+/g, '');
+  const letteredQueryNumber = /^[a-z]+\d+$/.test(compactQuery)
+    ? compactQuery.replace(/^[a-z]+0*/, '')
+    : '';
+  const singleLetterQuery = /^[a-z]$/.test(compactQuery) ? compactQuery : '';
   if (!normalizedQuery) {
     return machines;
   }
@@ -246,7 +250,12 @@ function findMachines(query: string, machines: UrgentMachine[]) {
       .join(' ')
       .toLowerCase();
 
-    return searchableText.includes(normalizedQuery) || searchableText.replace(/[^a-z0-9]+/g, '').includes(compactQuery);
+    return (
+      searchableText.includes(normalizedQuery)
+      || searchableText.replace(/[^a-z0-9]+/g, '').includes(compactQuery)
+      || (letteredQueryNumber.length > 0 && compactNumericId === letteredQueryNumber)
+      || (singleLetterQuery.length > 0 && (typeInitial === singleLetterQuery || compactMachineId.startsWith(singleLetterQuery)))
+    );
   });
 }
 
