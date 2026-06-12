@@ -213,6 +213,7 @@ function getErrorMessage(error: unknown, fallback: string): string {
 
 function findMachines(query: string, machines: UrgentMachine[]) {
   const normalizedQuery = query.trim().toLowerCase();
+  const compactQuery = normalizedQuery.replace(/[^a-z0-9]+/g, '');
   if (!normalizedQuery) {
     return machines;
   }
@@ -220,10 +221,23 @@ function findMachines(query: string, machines: UrgentMachine[]) {
   return machines.filter((machine) => {
     const machineId = machine.machineNumber.toLowerCase();
     const numericId = machineId.replace(/^[a-z]+0*/, '');
+    const type = machine.type.trim().toLowerCase();
+    const typeInitial = type[0] ?? '';
+    const compactMachineId = machineId.replace(/[^a-z0-9]+/g, '');
+    const compactNumericId = numericId.replace(/[^a-z0-9]+/g, '');
+    const letteredAliases = compactNumericId
+      ? [
+        `${typeInitial}${compactNumericId}`,
+        `${type} ${numericId}`,
+        `${type}${compactNumericId}`,
+      ]
+      : [];
     const searchableText = [
       machineId,
       numericId,
+      compactMachineId,
       machine.type,
+      ...letteredAliases,
       machine.make ?? '',
       machine.modelNumber ?? '',
       machine.statusLabel,
@@ -232,7 +246,7 @@ function findMachines(query: string, machines: UrgentMachine[]) {
       .join(' ')
       .toLowerCase();
 
-    return searchableText.includes(normalizedQuery);
+    return searchableText.includes(normalizedQuery) || searchableText.replace(/[^a-z0-9]+/g, '').includes(compactQuery);
   });
 }
 
