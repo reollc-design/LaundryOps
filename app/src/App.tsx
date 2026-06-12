@@ -1702,7 +1702,7 @@ function HomeScreen({
             )}
           </div>
         ) : (
-          <p className="search-hint">Search by machine ID, number, type, row, or status.</p>
+          <p className="search-hint">Search by machine ID, number, type, make, model, or status.</p>
         )}
       </section>
 
