@@ -253,12 +253,15 @@ describe('Firestore organization security', () => {
     await assertSucceeds(
       ownerA.doc('organizations/orgBootstrap').set({
         name: 'Bootstrap Laundry',
+        operatorName: 'Owner A',
+        businessAddress: '123 Main Street',
+        ownerEmail: 'owner@example.com',
         ownerUserId: 'ownerA',
         createdBy: 'ownerA',
         createdAt: '2026-05-20T00:00:00.000Z',
         subscriptionStatus: 'trialing',
         trialStartedAt: '2026-05-20T00:00:00.000Z',
-        onboardingStatus: 'in-progress',
+        onboardingStatus: 'completed',
       }),
     );
 

@@ -177,19 +177,7 @@ export const onboardingSteps: OnboardingStep[] = [
   {
     id: 'account',
     title: 'Create company account',
-    detail: 'Your company / owner profile',
+    detail: 'Business name / operator / address / email',
     icon: 'account',
-  },
-  {
-    id: 'machine',
-    title: 'Add first machine',
-    detail: 'ID / type / make / model',
-    icon: 'machine',
-  },
-  {
-    id: 'manual',
-    title: 'Upload first manual',
-    detail: 'Optional, improves AI answers',
-    icon: 'manual',
   },
 ];

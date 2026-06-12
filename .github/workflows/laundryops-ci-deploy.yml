@@ -104,5 +104,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Deploy LaundryOps hosting
-        run: npx firebase-tools deploy --only hosting:laundryops --project laundromat-maintenance-app --non-interactive
+      - name: Deploy LaundryOps hosting and Firestore rules
+        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules --project laundromat-maintenance-app --non-interactive

@@ -3341,6 +3341,10 @@ button:focus-visible {
   color: var(--primary);
 }
 
+.home-sign-out {
+  width: 100%;
+}
+
 .ai-action {
   background: var(--ai);
   color: #fff;

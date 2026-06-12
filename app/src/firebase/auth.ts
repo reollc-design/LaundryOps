@@ -51,16 +51,13 @@ export async function signOutCurrentUser(): Promise<void> {
 
 export interface OwnerOnboardingDraft {
   businessName: string;
-  machineNumber: string;
-  machineType: string;
-  machineMake: string;
-  machineModelNumber: string;
-  manualName: string;
+  operatorName: string;
+  businessAddress: string;
+  ownerEmail: string;
 }
 
 export interface OwnerOnboardingResult {
   organizationId: string;
-  machineId: string;
 }
 
 export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Promise<OwnerOnboardingResult> {
@@ -73,26 +70,28 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
 
   const trimmedDraft: OwnerOnboardingDraft = {
     businessName: draft.businessName.trim(),
-    machineNumber: draft.machineNumber.trim(),
-    machineType: draft.machineType.trim(),
-    machineMake: draft.machineMake.trim(),
-    machineModelNumber: draft.machineModelNumber.trim(),
-    manualName: draft.manualName.trim(),
+    operatorName: draft.operatorName.trim(),
+    businessAddress: draft.businessAddress.trim(),
+    ownerEmail: draft.ownerEmail.trim() || user.email || '',
   };
-  const machineModel = `${trimmedDraft.machineMake} ${trimmedDraft.machineModelNumber}`.trim();
+  if (!trimmedDraft.businessName || !trimmedDraft.operatorName || !trimmedDraft.businessAddress || !trimmedDraft.ownerEmail) {
+    throw new Error('Business name, operator name, address, and email are required.');
+  }
 
   const organizationRef = doc(collection(db, 'organizations'));
   const membershipRef = doc(db, `organizations/${organizationRef.id}/memberships/${user.uid}`);
-  const machineRef = doc(collection(db, `organizations/${organizationRef.id}/machines`));
 
   await setDoc(organizationRef, {
     name: trimmedDraft.businessName,
+    operatorName: trimmedDraft.operatorName,
+    businessAddress: trimmedDraft.businessAddress,
+    ownerEmail: trimmedDraft.ownerEmail,
     ownerUserId: user.uid,
     createdBy: user.uid,
     createdAt: serverTimestamp(),
     subscriptionStatus: 'trialing',
     trialStartedAt: serverTimestamp(),
-    onboardingStatus: 'in-progress',
+    onboardingStatus: 'completed',
   });
 
   await setDoc(membershipRef, {
@@ -102,21 +101,11 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     createdBy: user.uid,
   });
 
-  await setDoc(machineRef, {
-    machineNumber: trimmedDraft.machineNumber,
-    type: trimmedDraft.machineType,
-    make: trimmedDraft.machineMake,
-    modelNumber: trimmedDraft.machineModelNumber,
-    model: machineModel || trimmedDraft.machineModelNumber || trimmedDraft.machineMake,
-    status: 'running',
-    statusLabel: 'Running',
-    createdAt: serverTimestamp(),
-    createdBy: user.uid,
-  });
-
   await setDoc(
     doc(db, 'users', user.uid),
     {
+      displayName: trimmedDraft.operatorName,
+      email: trimmedDraft.ownerEmail,
       defaultOrganizationId: organizationRef.id,
       onboardingDraft: trimmedDraft,
       onboardingCompletedAt: serverTimestamp(),
@@ -126,6 +115,5 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
 
   return {
     organizationId: organizationRef.id,
-    machineId: machineRef.id,
   };
 }

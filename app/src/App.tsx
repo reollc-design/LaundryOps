@@ -374,11 +374,9 @@ export function App() {
   const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
   const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>({
     businessName: '',
-    machineNumber: '',
-    machineType: 'Washer',
-    machineMake: '',
-    machineModelNumber: '',
-    manualName: '',
+    operatorName: '',
+    businessAddress: '',
+    ownerEmail: '',
   });
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
@@ -442,10 +440,24 @@ export function App() {
       return;
     }
 
+    if (!authSession.user && activeScreen === 'owner-onboarding') {
+      setActiveScreen('create-account');
+      return;
+    }
+
     if (!authSession.user && protectedScreens.includes(activeScreen)) {
       setActiveScreen('sign-in');
     }
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
+  useEffect(() => {
+    if (authSession.loading || userProfile.loading || !authSession.configured || !authSession.user) {
+      return;
+    }
+
+    if (!defaultOrganizationId && protectedScreens.includes(activeScreen)) {
+      setActiveScreen('owner-onboarding');
+    }
+  }, [activeScreen, authSession.configured, authSession.loading, authSession.user, defaultOrganizationId, userProfile.loading]);
   useEffect(() => {
     if (selectedWorkOrderId && !workOrderQueueData.some((order) => order.id === selectedWorkOrderId)) {
       setSelectedWorkOrderId(null);
@@ -489,10 +501,12 @@ export function App() {
       return getAuthErrorMessage(error);
     }
   };
-  const handleOwnerCreate = async (displayName: string, email: string, password: string): Promise<string | null> => {
+  const handleOwnerCreate = async (draft: OwnerOnboardingDraft, password: string): Promise<string | null> => {
     try {
-      await createOwnerAccount(displayName, email, password);
-      setActiveScreen('owner-onboarding');
+      await createOwnerAccount(draft.operatorName, draft.ownerEmail, password);
+      await completeOwnerOnboarding(draft);
+      setOnboardingDraft(draft);
+      setActiveScreen('home');
       return null;
     } catch (error) {
       return getAuthErrorMessage(error);
@@ -763,7 +777,7 @@ export function App() {
               <BackendSessionBanner authSession={authSession} />
               {activeScreen === 'welcome' && (
                 <WelcomeScreen
-                  onStartTrial={() => setActiveScreen('owner-onboarding')}
+                  onStartTrial={() => setActiveScreen('create-account')}
                   onSignIn={() => setActiveScreen('sign-in')}
                   onCreateAccount={() => setActiveScreen('create-account')}
                 />
@@ -820,6 +834,9 @@ export function App() {
                     machineStatusBusyId={machineStatusBusyId}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
+                    signOutBusy={signOutBusy}
+                    signOutError={signOutError}
+                    onSignOut={handleSignOut}
                   />
                 )}
                 {activeScreen === 'machines' && (
@@ -1130,24 +1147,33 @@ function CreateAccountAccessScreen({
   onSignIn,
 }: {
   onBack: () => void;
-  onStartTrial: (displayName: string, email: string, password: string) => Promise<string | null>;
+  onStartTrial: (draft: OwnerOnboardingDraft, password: string) => Promise<string | null>;
   onSignIn: () => void;
 }) {
-  const [ownerName, setOwnerName] = useState('');
+  const [businessName, setBusinessName] = useState('');
+  const [operatorName, setOperatorName] = useState('');
+  const [businessAddress, setBusinessAddress] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const submitCreateAccount = async () => {
-    if (!ownerName.trim() || !email.trim() || !password) {
-      setAuthError('Owner name, email, and password are required.');
+    const draft: OwnerOnboardingDraft = {
+      businessName: businessName.trim(),
+      operatorName: operatorName.trim(),
+      businessAddress: businessAddress.trim(),
+      ownerEmail: email.trim(),
+    };
+
+    if (!draft.businessName || !draft.operatorName || !draft.businessAddress || !draft.ownerEmail || !password) {
+      setAuthError('Business name, operator name, address, email, and password are required.');
       return;
     }
 
     setAuthError(null);
     setIsSubmitting(true);
-    const error = await onStartTrial(ownerName.trim(), email.trim(), password);
+    const error = await onStartTrial(draft, password);
     setIsSubmitting(false);
 
     if (error) {
@@ -1166,10 +1192,12 @@ function CreateAccountAccessScreen({
         <div className="access-copy">
           <span>Owner setup</span>
           <h1>Start with Pro trial.</h1>
-          <p>Create the owner login first. The next step adds the company and first machine.</p>
+          <p>Create the company account that owns machines, work orders, manuals, billing, and reports.</p>
         </div>
         <div className="access-fields">
-          <AuthField icon={UserRound} label="Owner Name" value={ownerName} onChange={setOwnerName} />
+          <AuthField icon={Building2} label="Business Name" value={businessName} onChange={setBusinessName} />
+          <AuthField icon={UserRound} label="Operator Name" value={operatorName} onChange={setOperatorName} />
+          <AuthField icon={ClipboardCheck} label="Address" value={businessAddress} onChange={setBusinessAddress} />
           <AuthField icon={Mail} label="Email" value={email} type="email" onChange={setEmail} />
           <AuthField icon={KeyRound} label="Password" value={password} type="password" placeholder="Create password" onChange={setPassword} />
         </div>
@@ -1274,22 +1302,35 @@ function OwnerOnboardingScreen({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const currentStep = onboardingSteps[activeStep];
   const isLastStep = activeStep === onboardingSteps.length - 1;
-  const isOptionalStep = currentStep.id === 'manual';
+  const ownerEmailValue = draft.ownerEmail || ownerEmail;
+
+  useEffect(() => {
+    if (!draft.ownerEmail && ownerEmail && ownerEmail !== 'Owner email not available') {
+      onDraftChange({
+        ...draft,
+        ownerEmail,
+      });
+    }
+  }, [draft, onDraftChange, ownerEmail]);
+
   const advance = async () => {
     if (isLastStep) {
       if (
         !draft.businessName.trim() ||
-        !draft.machineNumber.trim() ||
-        !draft.machineMake.trim() ||
-        !draft.machineModelNumber.trim()
+        !draft.operatorName.trim() ||
+        !draft.businessAddress.trim() ||
+        !ownerEmailValue.trim()
       ) {
-        setSubmitError('Business, machine ID, make, and model number are required before finishing setup.');
+        setSubmitError('Business name, operator name, address, and email are required before finishing setup.');
         return;
       }
 
       setSubmitError(null);
       setIsSubmitting(true);
-      const error = await onFinish(draft);
+      const error = await onFinish({
+        ...draft,
+        ownerEmail: ownerEmailValue,
+      });
       setIsSubmitting(false);
       if (error) {
         setSubmitError(error);
@@ -1342,14 +1383,14 @@ function OwnerOnboardingScreen({
       <section className="setup-form-card">
         <OnboardingStepIcon step={currentStep} />
         <div className="setup-form-copy">
-          <span>{isOptionalStep ? 'Optional Setup' : 'Required Setup'}</span>
+          <span>Required Setup</span>
           <h2>{currentStep.title}</h2>
           <p>{getOnboardingStepCopy(currentStep.id)}</p>
         </div>
         <OnboardingStepFields
           stepId={currentStep.id}
           draft={draft}
-          ownerEmail={ownerEmail}
+          ownerEmail={ownerEmailValue}
           onDraftChange={onDraftChange}
         />
       </section>
@@ -1361,13 +1402,8 @@ function OwnerOnboardingScreen({
       )}
 
       <div className="setup-actions">
-        {isOptionalStep && (
-          <button className="secondary-action" type="button" onClick={() => void advance()} disabled={isSubmitting}>
-            Skip for Now
-          </button>
-        )}
         <button className="primary-action" type="button" onClick={() => void advance()} disabled={isSubmitting}>
-          {isSubmitting ? 'Saving Setup...' : isLastStep ? 'Finish Setup' : isOptionalStep ? 'Add & Continue' : 'Continue'}
+          {isSubmitting ? 'Saving Setup...' : isLastStep ? 'Finish Setup' : 'Continue'}
         </button>
       </div>
     </div>
@@ -1432,32 +1468,14 @@ function OnboardingStepFields({
     return (
       <div className="setup-field-grid">
         <SetupField label="Business Name" value={draft.businessName} onChange={(value) => patchDraft({ businessName: value })} />
-        <SetupField label="Owner Email" value={ownerEmail} readOnly />
+        <SetupField label="Operator Name" value={draft.operatorName} onChange={(value) => patchDraft({ operatorName: value })} />
+        <SetupField label="Address" value={draft.businessAddress} onChange={(value) => patchDraft({ businessAddress: value })} />
+        <SetupField label="Email Address" value={ownerEmail} onChange={(value) => patchDraft({ ownerEmail: value })} />
       </div>
     );
   }
 
-  if (stepId === 'machine') {
-    return (
-      <div className="setup-field-grid two-column">
-        <SetupField label="Machine ID" value={draft.machineNumber} onChange={(value) => patchDraft({ machineNumber: value })} />
-        <SetupSelectField
-          label="Type"
-          value={draft.machineType}
-          options={['Washer', 'Dryer', 'Other']}
-          onChange={(value) => patchDraft({ machineType: value })}
-        />
-        <SetupField label="Machine Make" value={draft.machineMake} onChange={(value) => patchDraft({ machineMake: value })} wide />
-        <SetupField label="Model Number" value={draft.machineModelNumber} onChange={(value) => patchDraft({ machineModelNumber: value })} wide />
-      </div>
-    );
-  }
-
-  return (
-    <div className="setup-field-grid">
-      <SetupField label="Manual" value={draft.manualName} onChange={(value) => patchDraft({ manualName: value })} />
-    </div>
-  );
+  return null;
 }
 
 function SetupField({
@@ -1513,9 +1531,7 @@ function SetupSelectField({
 
 function getOnboardingStepCopy(stepId: string) {
   const copy: Record<string, string> = {
-    account: 'Create the customer account that owns billing, users, machines, manuals, and reports.',
-    machine: 'Add one real machine now with machine ID, type, make, and model number. The full directory can be imported later.',
-    manual: 'Upload the first manual so Repair Assist can answer from factual service material instead of generic guidance.',
+    account: 'Create the company account that owns billing, users, machines, manuals, and reports.',
   };
 
   return copy[stepId];
@@ -1637,6 +1653,9 @@ function HomeScreen({
   machineStatusBusyId,
   machineStatusError,
   orgConnected,
+  signOutBusy,
+  signOutError,
+  onSignOut,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onOpenMachines: (filter: MachineFilter | null) => void;
@@ -1650,6 +1669,9 @@ function HomeScreen({
   machineStatusBusyId: string | null;
   machineStatusError: string | null;
   orgConnected: boolean;
+  signOutBusy: boolean;
+  signOutError: string | null;
+  onSignOut: () => Promise<void>;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const normalizedQuery = machineQuery.trim().toLowerCase();
@@ -1738,6 +1760,22 @@ function HomeScreen({
           <QuickAction icon={ClipboardList} label="New Work Order" tone="primary" onClick={onCreateWorkOrder} />
           <QuickAction icon={Sparkles} label="Ask AI" tone="ai" onClick={() => setActiveScreen('ai-assist')} />
         </div>
+      </section>
+
+      <section className="content-section">
+        <div className="section-heading">
+          <h2>Account</h2>
+          <button type="button" onClick={() => setActiveScreen('account')}>Details <ChevronRight size={14} /></button>
+        </div>
+        {signOutError && (
+          <div className="auth-message">
+            <strong>Sign-out failed</strong>
+            <span>{signOutError}</span>
+          </div>
+        )}
+        <button className="secondary-action home-sign-out" type="button" onClick={() => void onSignOut()} disabled={signOutBusy}>
+          {signOutBusy ? 'Signing Out...' : 'Sign Out'}
+        </button>
       </section>
     </div>
   );
