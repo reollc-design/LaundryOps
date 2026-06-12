@@ -1954,7 +1954,13 @@ function MachinesScreen({
 
   return (
     <div className="screen-stack">
-      <MachineStatusOverview counts={counts} />
+      <MachineStatusOverview
+        counts={counts}
+        onSelectStatus={(filter) => {
+          setActiveFilter(filter);
+          setMachineQuery('');
+        }}
+      />
 
       <section className="content-section machine-search-section">
         <div className="section-heading">
