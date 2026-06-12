@@ -1990,7 +1990,7 @@ function MachinesScreen({
         {orgConnected && orgMachinesLoading && <p className="search-hint">Refreshing machine directory from your company data...</p>}
         {orgConnected && orgMachinesError && <p className="empty-state">Could not load live machines: {orgMachinesError}</p>}
         <div className="machine-list directory-machine-list">
-          {filteredMachines.slice(0, 24).map((machine) => (
+          {filteredMachines.map((machine) => (
             <UrgentMachineRow
               key={machine.id}
               machine={machine}
@@ -2009,7 +2009,6 @@ function MachinesScreen({
           ))}
         </div>
         {filteredMachines.length === 0 && <p className="empty-state">{machineQuery.trim() ? 'No machines match that search.' : 'No machines found yet.'}</p>}
-        {filteredMachines.length > 24 && <p className="search-hint">Showing first 24. Search to narrow the list.</p>}
         {machineStatusError && <p className="empty-state">{machineStatusError}</p>}
       </section>
 
