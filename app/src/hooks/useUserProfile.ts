@@ -12,6 +12,7 @@ export interface UserProfileData {
 
 export interface UserProfileState {
   loading: boolean;
+  loaded: boolean;
   profile: UserProfileData | null;
   error: string | null;
 }
@@ -20,6 +21,7 @@ export function useUserProfile(user: User | null): UserProfileState {
   const client = useMemo(() => getFirebaseClient(), []);
   const [state, setState] = useState<UserProfileState>({
     loading: false,
+    loaded: false,
     profile: null,
     error: null,
   });
@@ -28,6 +30,7 @@ export function useUserProfile(user: User | null): UserProfileState {
     if (!user) {
       setState({
         loading: false,
+        loaded: false,
         profile: null,
         error: null,
       });
@@ -37,6 +40,7 @@ export function useUserProfile(user: User | null): UserProfileState {
     if (!client.db) {
       setState({
         loading: false,
+        loaded: true,
         profile: null,
         error: 'Firestore client is not configured.',
       });
@@ -56,6 +60,7 @@ export function useUserProfile(user: User | null): UserProfileState {
         const data = snapshot.data();
         setState({
           loading: false,
+          loaded: true,
           profile: snapshot.exists()
             ? {
                 displayName: typeof data?.displayName === 'string' ? data.displayName : null,
@@ -70,6 +75,7 @@ export function useUserProfile(user: User | null): UserProfileState {
       (error) => {
         setState({
           loading: false,
+          loaded: true,
           profile: null,
           error: error.message,
         });

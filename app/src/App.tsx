@@ -167,6 +167,13 @@ const protectedScreens: ScreenKey[] = [
   'reports',
 ];
 
+const accountSetupScreens: ScreenKey[] = [
+  'welcome',
+  'sign-in',
+  'create-account',
+  'owner-onboarding',
+];
+
 function getAuthErrorMessage(error: unknown): string {
   if (typeof error !== 'object' || error === null) {
     return 'Authentication failed. Try again.';
@@ -448,11 +455,7 @@ export function App() {
     const computedUrgent = machineCatalogData.filter((machine) => machine.status !== 'running').slice(0, 6);
     return computedUrgent.length > 0 ? computedUrgent : orgMachines.machines.slice(0, 6);
   }, [machineCatalogData, orgConnected, orgMachines.machines]);
-  const isSetupFlow =
-    activeScreen === 'welcome' ||
-    activeScreen === 'sign-in' ||
-    activeScreen === 'create-account' ||
-    activeScreen === 'owner-onboarding';
+  const isSetupFlow = accountSetupScreens.includes(activeScreen);
   const showBack =
     activeScreen === 'machine-detail' ||
     activeScreen === 'manuals' ||
@@ -477,14 +480,27 @@ export function App() {
     }
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
   useEffect(() => {
-    if (authSession.loading || userProfile.loading || !authSession.configured || !authSession.user) {
+    if (authSession.loading || userProfile.loading || !userProfile.loaded || !authSession.configured || !authSession.user) {
+      return;
+    }
+
+    if (defaultOrganizationId && accountSetupScreens.includes(activeScreen)) {
+      setActiveScreen('home');
       return;
     }
 
     if (!defaultOrganizationId && protectedScreens.includes(activeScreen)) {
       setActiveScreen('owner-onboarding');
     }
-  }, [activeScreen, authSession.configured, authSession.loading, authSession.user, defaultOrganizationId, userProfile.loading]);
+  }, [
+    activeScreen,
+    authSession.configured,
+    authSession.loading,
+    authSession.user,
+    defaultOrganizationId,
+    userProfile.loaded,
+    userProfile.loading,
+  ]);
   useEffect(() => {
     if (selectedWorkOrderId && !workOrderQueueData.some((order) => order.id === selectedWorkOrderId)) {
       setSelectedWorkOrderId(null);
