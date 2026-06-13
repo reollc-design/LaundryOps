@@ -3,6 +3,8 @@ import { collection, doc, serverTimestamp, setDoc, type Firestore } from 'fireba
 import { ref, uploadBytes, type FirebaseStorage } from 'firebase/storage';
 import { getFirebaseClient } from './client';
 
+const MAX_MANUAL_UPLOAD_BYTES = 25 * 1024 * 1024;
+
 interface ManualEndpointResponse {
   ok?: boolean;
   error?: {
@@ -11,6 +13,8 @@ interface ManualEndpointResponse {
   };
   answer?: string;
   grounded?: boolean;
+  model?: string;
+  sourceMode?: string;
   citations?: Array<{
     chunkId: string;
     preview: string;
@@ -39,11 +43,15 @@ export interface ManualRepairAssistInput {
   machineModel: string;
   symptoms: string;
   errorCode?: string;
+  machineId?: string;
+  machineNumber?: string;
 }
 
 export interface ManualRepairAssistResult {
   answer: string;
   grounded: boolean;
+  model: string | null;
+  sourceMode: string | null;
   manual: {
     id: string;
     title: string;
@@ -132,6 +140,9 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
   if (!looksLikePdf) {
     throw new Error('Upload a PDF manual file.');
   }
+  if (input.file.size > MAX_MANUAL_UPLOAD_BYTES) {
+    throw new Error('PDF is too large. Please upload a manual under 25 MB.');
+  }
 
   const { auth, db, storage } = requireFirebaseServices();
   const user = auth.currentUser;
@@ -140,10 +151,8 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
   }
 
   const manualRef = doc(collection(db, `organizations/${organizationId}/manuals`));
-  const storagePath = `orgs/${organizationId}/manuals/${manualRef.id}/${fileName}`;
+  const storagePath = `orgs/${organizationId}/manuals/${user.uid}/${manualRef.id}/${fileName}`;
   const fileRef = ref(storage, storagePath);
-
-  await uploadBytes(fileRef, input.file, { contentType: 'application/pdf' });
 
   await setDoc(manualRef, {
     title: fileName,
@@ -161,6 +170,22 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
     updatedAt: serverTimestamp(),
     updatedBy: user.uid,
   });
+
+  try {
+    await uploadBytes(fileRef, input.file, { contentType: 'application/pdf' });
+  } catch (error) {
+    await setDoc(
+      manualRef,
+      {
+        status: 'missing',
+        indexError: error instanceof Error ? error.message : 'Manual upload failed.',
+        updatedAt: serverTimestamp(),
+        updatedBy: user.uid,
+      },
+      { merge: true },
+    );
+    throw error;
+  }
 
   await callManualEndpoint('indexOrganizationManual', {
     organizationId,
@@ -194,11 +219,15 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
     machineModel,
     symptoms,
     errorCode: errorCode || null,
+    machineId: input.machineId?.trim() || null,
+    machineNumber: input.machineNumber?.trim() || null,
   });
 
   return {
     answer: data.answer ?? 'No response was returned.',
     grounded: Boolean(data.grounded),
+    model: data.model ?? null,
+    sourceMode: data.sourceMode ?? null,
     manual: data.manual ?? null,
     citations: Array.isArray(data.citations) ? data.citations : [],
   };

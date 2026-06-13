@@ -10,14 +10,37 @@ service cloud.firestore {
       return /databases/$(database)/documents/organizations/$(orgId)/memberships/$(request.auth.uid);
     }
 
+    function organizationPath(orgId) {
+      return /databases/$(database)/documents/organizations/$(orgId);
+    }
+
+    function isOrganizationOwner(orgId) {
+      return signedIn()
+        && exists(organizationPath(orgId))
+        && get(organizationPath(orgId)).data.ownerUserId == request.auth.uid;
+    }
+
     function isMember(orgId) {
       return signedIn()
-        && exists(memberPath(orgId))
-        && get(memberPath(orgId)).data.status == 'active';
+        && (
+          (
+            exists(memberPath(orgId))
+            && get(memberPath(orgId)).data.status == 'active'
+          )
+          || isOrganizationOwner(orgId)
+        );
     }
 
     function hasRole(orgId, roles) {
-      return isMember(orgId) && get(memberPath(orgId)).data.role in roles;
+      return signedIn()
+        && (
+          (
+            exists(memberPath(orgId))
+            && get(memberPath(orgId)).data.status == 'active'
+            && get(memberPath(orgId)).data.role in roles
+          )
+          || (isOrganizationOwner(orgId) && 'owner' in roles)
+        );
     }
 
     function isOwnerOrAdmin(orgId) {
@@ -75,6 +98,7 @@ service cloud.firestore {
           'subscriptionStatus',
           'providerCustomerId',
           'providerSubscriptionId',
+          'ownerUserId',
           'trialStartedAt',
           'trialEndsAt',
           'createdAt',

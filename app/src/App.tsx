@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BarChart3,
@@ -607,11 +607,11 @@ export function App() {
   };
   const openAssistScreen = (machine: UrgentMachine | null = null): void => {
     if (machine) {
-      const machineModel = [machine.make, machine.modelNumber].filter(Boolean).join(' • ') || machine.type || machine.machineNumber;
+      const cleanMachineModel = [machine.make, machine.modelNumber].filter(Boolean).join(' ') || machine.type || machine.machineNumber;
       setAssistPreset({
         machineId: machine.id,
         machineNumber: machine.machineNumber,
-        machineModel,
+        machineModel: cleanMachineModel,
       });
     } else {
       setAssistPreset(null);
@@ -3406,14 +3406,34 @@ function RepairAssistScreen({
   const [symptoms, setSymptoms] = useState('');
   const [errorCode, setErrorCode] = useState('');
   const [manualGroundingEnabled, setManualGroundingEnabled] = useState(true);
+  const [assistPresetDetached, setAssistPresetDetached] = useState(false);
   const [assistBusy, setAssistBusy] = useState(false);
   const [assistError, setAssistError] = useState<string | null>(null);
   const [assistAnswer, setAssistAnswer] = useState<string | null>(null);
   const [assistManualTitle, setAssistManualTitle] = useState<string | null>(null);
   const [assistGrounded, setAssistGrounded] = useState(false);
+  const [assistModel, setAssistModel] = useState<string | null>(null);
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
+  const assistRequestIdRef = useRef(0);
+  const activeAssistPreset = assistPresetDetached ? null : assistPreset;
+
+  const clearAssistResult = (invalidateRequest = true): void => {
+    if (invalidateRequest) {
+      assistRequestIdRef.current += 1;
+      setAssistBusy(false);
+    }
+    setAssistError(null);
+    setAssistAnswer(null);
+    setAssistManualTitle(null);
+    setAssistGrounded(false);
+    setAssistModel(null);
+    setAssistCitations([]);
+  };
 
   useEffect(() => {
+    clearAssistResult();
+    setAssistPresetDetached(false);
+
     if (assistPreset) {
       setMachineModel(assistPreset.machineModel);
       setSymptoms('');
@@ -3427,12 +3447,15 @@ function RepairAssistScreen({
   }, [assistPreset?.machineId, assistPreset?.machineModel, assistPreset]);
 
   const runRepairAssist = async (): Promise<void> => {
-    setAssistError(null);
+    const requestId = assistRequestIdRef.current + 1;
+    assistRequestIdRef.current = requestId;
+    clearAssistResult(false);
 
     if (!manualGroundingEnabled) {
       setAssistAnswer('Manual grounding is turned off. Enable it to get manual-backed repair guidance.');
       setAssistGrounded(false);
       setAssistManualTitle(null);
+      setAssistModel(null);
       setAssistCitations([]);
       return;
     }
@@ -3449,15 +3472,26 @@ function RepairAssistScreen({
         machineModel,
         symptoms,
         errorCode,
+        machineId: activeAssistPreset?.machineId,
+        machineNumber: activeAssistPreset?.machineNumber,
       });
+      if (requestId !== assistRequestIdRef.current) {
+        return;
+      }
       setAssistAnswer(result.answer);
       setAssistGrounded(result.grounded);
       setAssistManualTitle(result.manual?.title ?? null);
+      setAssistModel(result.model);
       setAssistCitations(result.citations);
     } catch (error) {
+      if (requestId !== assistRequestIdRef.current) {
+        return;
+      }
       setAssistError(getErrorMessage(error, 'Could not generate manual-grounded guidance.'));
     } finally {
-      setAssistBusy(false);
+      if (requestId === assistRequestIdRef.current) {
+        setAssistBusy(false);
+      }
     }
   };
 
@@ -3466,17 +3500,19 @@ function RepairAssistScreen({
       <section className="assist-machine-card">
         <MachineThumb />
         <div>
-          <strong>{assistPreset?.machineNumber ?? 'Machine not selected'}</strong>
-          <span>{assistPreset?.machineModel ?? 'Choose a machine to prefill Repair Assist'}</span>
-          <small>{assistPreset ? 'Machine context loaded from the card action' : 'Enter a machine model to generate guidance'}</small>
+          <strong>{activeAssistPreset?.machineNumber ?? 'Machine not selected'}</strong>
+          <span>{activeAssistPreset?.machineModel ?? 'Choose a machine to prefill Repair Assist'}</span>
+          <small>{activeAssistPreset ? 'Machine context loaded from the card action' : 'Enter a machine model to generate guidance'}</small>
         </div>
         <button
           type="button"
           onClick={() => {
             onClearAssistPreset();
+            setAssistPresetDetached(false);
             setMachineModel('');
             setSymptoms('');
             setErrorCode('');
+            clearAssistResult();
           }}
         >
           Change
@@ -3486,15 +3522,35 @@ function RepairAssistScreen({
       <section className="assist-form">
         <label>
           <span>Machine model</span>
-          <input value={machineModel} onChange={(event) => setMachineModel(event.target.value)} />
+          <input
+            value={machineModel}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              setMachineModel(nextValue);
+              setAssistPresetDetached(Boolean(assistPreset && nextValue.trim() !== assistPreset.machineModel.trim()));
+              clearAssistResult();
+            }}
+          />
         </label>
         <label>
           <span>Symptoms</span>
-          <input value={symptoms} onChange={(event) => setSymptoms(event.target.value)} />
+          <input
+            value={symptoms}
+            onChange={(event) => {
+              setSymptoms(event.target.value);
+              clearAssistResult();
+            }}
+          />
         </label>
         <label>
           <span>Error Code</span>
-          <input value={errorCode} onChange={(event) => setErrorCode(event.target.value)} />
+          <input
+            value={errorCode}
+            onChange={(event) => {
+              setErrorCode(event.target.value);
+              clearAssistResult();
+            }}
+          />
         </label>
         <div className="assist-photos">
           <PhotoTile variant="pump" large />
@@ -3502,8 +3558,8 @@ function RepairAssistScreen({
         </div>
         <div className="manual-toggle">
           <div>
-            <strong>Use uploaded manual</strong>
-            <span>{assistManualTitle ? `${assistManualTitle} found` : 'Manual source will appear after generation'}</span>
+            <strong>Use uploaded manual as source of truth</strong>
+            <span>{assistManualTitle ? `${assistManualTitle} selected` : 'Manual source will appear after generation'}</span>
           </div>
           <button
             className={manualGroundingEnabled ? 'toggle-on' : 'toggle-off'}
@@ -3511,11 +3567,14 @@ function RepairAssistScreen({
             role="switch"
             aria-checked={manualGroundingEnabled}
             aria-label="Manual grounding on"
-            onClick={() => setManualGroundingEnabled((value) => !value)}
+            onClick={() => {
+              setManualGroundingEnabled((value) => !value);
+              clearAssistResult();
+            }}
           />
         </div>
         <button className="secondary-action full-width-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
-          {assistBusy ? 'Generating...' : 'Generate Manual Answer'}
+          {assistBusy ? 'Generating...' : 'Generate Repair Guidance'}
         </button>
         {!orgConnected && <p className="search-hint">Complete onboarding first to run live Repair Assist.</p>}
         {assistError && (
@@ -3531,8 +3590,8 @@ function RepairAssistScreen({
           <BookOpen size={16} />
           <span>
             {assistManualTitle
-              ? `Manual-grounded answer / ${assistManualTitle}`
-              : 'Run Generate Manual Answer to pull guidance from indexed manuals'}
+              ? `Manual source of truth / ${assistManualTitle}`
+              : 'Run Generate Repair Guidance to pull from indexed manuals'}
           </span>
         </div>
         <div className="result-grid">
@@ -3563,7 +3622,7 @@ function RepairAssistScreen({
               <>
                 <ResultSection title="Likely cause">Run the live assistant to generate manual-grounded diagnosis.</ResultSection>
                 <ResultSection title="Inspect first">Upload manuals and keep machine model names consistent for best grounding.</ResultSection>
-                <ResultSection title="Next steps">Use Generate Manual Answer, then save the result into a work order.</ResultSection>
+                <ResultSection title="Next steps">Use Generate Repair Guidance, then save the result into a work order.</ResultSection>
               </>
             )}
           </div>
@@ -3579,7 +3638,7 @@ function RepairAssistScreen({
             </div>
             <span>Source</span>
             <b>{assistManualTitle ?? 'Manual not selected yet'}</b>
-            <small>{assistGrounded ? 'OpenAI + manual chunks' : 'Manual fallback mode'}</small>
+            <small>{assistGrounded ? `${assistModel ?? 'GPT-5.5'} explaining uploaded manual` : 'Manual required'}</small>
           </aside>
         </div>
       </section>

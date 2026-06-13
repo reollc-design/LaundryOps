@@ -13,9 +13,9 @@ In app `.env` for web builds, set:
 
 `VITE_BILLING_API_BASE_URL` can remain for billing. Both may point to the same Functions host.
 
-## 2) Enable OpenAI responses (optional for first rollout)
+## 2) Enable OpenAI responses for live Repair Assist
 
-Manual indexing works without OpenAI.
+Manual indexing works without OpenAI, but live Repair Assist requires OpenAI before beta testing.
 
 To enable model-generated answers, provide:
 
@@ -23,9 +23,9 @@ To enable model-generated answers, provide:
 
 Optional model override:
 
-- `OPENAI_MANUAL_MODEL=gpt-4.1-mini`
+- `OPENAI_MANUAL_MODEL=gpt-5.5`
 
-If `OPENAI_API_KEY` is missing, Repair Assist returns manual-based fallback guidance.
+If `OPENAI_API_KEY` is missing, Repair Assist cannot generate guidance. Set the Firebase secret before deploying the live assistant.
 
 ## 3) Deploy manual + AI functions
 
@@ -40,7 +40,9 @@ Manual upload uses:
 
 - Storage path: `orgs/{orgId}/manuals/{manualId}/{fileName}`
 - Firestore doc: `organizations/{orgId}/manuals/{manualId}`
-- Chunk docs: `organizations/{orgId}/manuals/{manualId}/chunks/{chunkId}`
+- Active chunk docs: `organizations/{orgId}/manuals/{manualId}/{activeChunkCollection}/{chunkId}`
+
+The indexer writes each new manual extraction to a fresh chunk collection first, then updates `activeChunkCollection` only after all chunks are written. Existing indexed manuals stay marked `indexed` while a replacement version is processing, so Repair Assist can keep using the last good manual if a re-index fails.
 
 ## 5) Live verification flow
 
@@ -48,5 +50,5 @@ Manual upload uses:
 2. Open `Manual Library`.
 3. Enter machine model and upload PDF.
 4. Confirm status changes to `Indexed`.
-5. Open `AI Assist`, enter symptoms + error code, run `Generate Manual Answer`.
+5. Open `AI Assist`, enter symptoms + error code, run `Generate Repair Guidance`.
 6. Confirm grounded answer and chunk citations return.

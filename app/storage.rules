@@ -10,22 +10,60 @@ service firebase.storage {
       return /databases/(default)/documents/organizations/$(orgId)/memberships/$(request.auth.uid);
     }
 
+    function manualPath(orgId, manualId) {
+      return /databases/(default)/documents/organizations/$(orgId)/manuals/$(manualId);
+    }
+
+    function organizationPath(orgId) {
+      return /databases/(default)/documents/organizations/$(orgId);
+    }
+
+    function isOrganizationOwner(orgId) {
+      return signedIn()
+        && firestore.exists(organizationPath(orgId))
+        && firestore.get(organizationPath(orgId)).data.ownerUserId == request.auth.uid;
+    }
+
     function isMember(orgId) {
       return signedIn()
-        && firestore.exists(memberPath(orgId))
-        && firestore.get(memberPath(orgId)).data.status == 'active';
+        && (
+          (
+            firestore.exists(memberPath(orgId))
+            && firestore.get(memberPath(orgId)).data.status == 'active'
+          )
+          || isOrganizationOwner(orgId)
+        );
     }
 
     function hasRole(orgId, roles) {
-      return isMember(orgId) && firestore.get(memberPath(orgId)).data.role in roles;
+      return signedIn()
+        && (
+          (
+            firestore.exists(memberPath(orgId))
+            && firestore.get(memberPath(orgId)).data.status == 'active'
+            && firestore.get(memberPath(orgId)).data.role in roles
+          )
+          || (isOrganizationOwner(orgId) && 'owner' in roles)
+        );
+    }
+
+    function hasManualRecordForUploader(orgId, manualId, userId) {
+      return signedIn()
+        && request.auth.uid == userId
+        && firestore.exists(manualPath(orgId, manualId))
+        && firestore.get(manualPath(orgId, manualId)).data.createdBy == request.auth.uid
+        && firestore.get(manualPath(orgId, manualId)).data.status == 'processing';
     }
 
     function isOperationalRole(orgId) {
       return hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
     }
 
-    function isPdf() {
-      return request.resource.contentType == 'application/pdf';
+    function isPdf(fileName) {
+      return request.resource.contentType == 'application/pdf'
+        || request.resource.contentType.matches('application/pdf.*')
+        || fileName.matches('.*\\.pdf')
+        || fileName.matches('.*\\.PDF');
     }
 
     function isImage() {
@@ -36,11 +74,12 @@ service firebase.storage {
       return request.resource.size < 25 * 1024 * 1024;
     }
 
-    match /orgs/{orgId}/manuals/{manualId}/{fileName=**} {
+    match /orgs/{orgId}/manuals/{userId}/{manualId}/{fileName} {
       allow read: if isMember(orgId);
       allow write: if hasRole(orgId, ['owner', 'admin', 'manager'])
+        && hasManualRecordForUploader(orgId, manualId, userId)
         && isReasonableUpload()
-        && isPdf();
+        && isPdf(fileName);
     }
 
     match /orgs/{orgId}/machines/{machineId}/photos/{fileName=**} {
@@ -54,7 +93,7 @@ service firebase.storage {
       allow read: if isMember(orgId);
       allow write: if isOperationalRole(orgId)
         && isReasonableUpload()
-        && (isImage() || isPdf());
+        && (isImage() || isPdf(fileName));
     }
 
     match /orgs/{orgId}/exports/{exportId}/{fileName=**} {

@@ -1,6 +1,6 @@
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, Timestamp, getFirestore } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp, getFirestore, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import type { Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
@@ -14,16 +14,30 @@ setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
 const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
+const openAiApiKey = defineSecret('OPENAI_API_KEY');
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
 const DEFAULT_TRIAL_DAYS = 14;
 const DEFAULT_MONTHLY_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
 const DEFAULT_ANNUAL_PRICE_ID = 'price_1TaMprJkHhybNz7FHvsmgQdh';
 const DEFAULT_APP_URL = 'https://laundryops-maintenance-app.web.app';
-const DEFAULT_MANUAL_MODEL = 'gpt-4.1-mini';
+const DEFAULT_MANUAL_MODEL = 'gpt-5.5';
 const MAX_MANUAL_CHUNK_LENGTH = 1400;
+const MAX_REPAIR_ASSIST_CHUNKS = 8;
+const FIRESTORE_BATCH_WRITE_LIMIT = 450;
+const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
+const MANUAL_CHUNK_VERSION_PREFIX = 'chunks_v';
 type BillingPlanKey = 'monthly' | 'annual';
 type ManualStatus = 'indexed' | 'processing' | 'missing';
+
+interface MachineContext {
+  id: string;
+  machineNumber: string;
+  type: string;
+  make?: string;
+  modelNumber?: string;
+  model: string;
+}
 
 function ensureFirebaseAdmin(): void {
   if (getApps().length === 0) {
@@ -106,11 +120,17 @@ async function requireVerifiedCaller(request: Request): Promise<{ uid: string; e
 async function assertOwnerOrAdmin(organizationId: string, uid: string): Promise<void> {
   ensureFirebaseAdmin();
   const db = getFirestore();
+  const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
-  const membershipSnap = await membershipRef.get();
+  const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
+  const orgData = orgSnap.data();
+  if (orgData?.ownerUserId === uid) {
+    return;
+  }
   if (!membershipSnap.exists) {
     throw new Error('Organization access not found.');
   }
+
   const membershipData = membershipSnap.data();
   const role = membershipData?.role;
   const status = membershipData?.status;
@@ -122,11 +142,17 @@ async function assertOwnerOrAdmin(organizationId: string, uid: string): Promise<
 async function assertManualManager(organizationId: string, uid: string): Promise<void> {
   ensureFirebaseAdmin();
   const db = getFirestore();
+  const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
-  const membershipSnap = await membershipRef.get();
+  const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
+  const orgData = orgSnap.data();
+  if (orgData?.ownerUserId === uid) {
+    return;
+  }
   if (!membershipSnap.exists) {
     throw new Error('Organization access not found.');
   }
+
   const membershipData = membershipSnap.data();
   const role = membershipData?.role;
   const status = membershipData?.status;
@@ -139,11 +165,17 @@ async function assertManualManager(organizationId: string, uid: string): Promise
 async function assertOrganizationMember(organizationId: string, uid: string): Promise<void> {
   ensureFirebaseAdmin();
   const db = getFirestore();
+  const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
-  const membershipSnap = await membershipRef.get();
+  const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
+  const orgData = orgSnap.data();
+  if (orgData?.ownerUserId === uid) {
+    return;
+  }
   if (!membershipSnap.exists) {
     throw new Error('Organization access not found.');
   }
+
   const membershipData = membershipSnap.data();
   if (membershipData?.status !== 'active') {
     throw new Error('An active organization membership is required.');
@@ -155,6 +187,186 @@ function normalizeMachineModelKey(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+}
+
+function compactKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
+}
+
+function machineModelFromParts(parts: { make?: string; modelNumber?: string; model?: string; type?: string; machineNumber?: string }): string {
+  const makeModel = [parts.make, parts.modelNumber].filter(Boolean).join(' ').trim();
+  return makeModel || parts.model?.trim() || parts.type?.trim() || parts.machineNumber?.trim() || 'Machine';
+}
+
+function isSpecificMachineModel(value: string): boolean {
+  const normalized = normalizeMachineModelKey(value);
+  if (normalized === 'machine' || normalized === 'washer' || normalized === 'dryer') {
+    return false;
+  }
+  return compactKey(value).length >= 5 && /\d/.test(value);
+}
+
+function machineContextFromDoc(id: string, data: Record<string, unknown>): MachineContext {
+  const machineNumber = optionalString(data.machineNumber) ?? optionalString(data.label) ?? id.toUpperCase();
+  const type = optionalString(data.type) ?? optionalString(data.category) ?? 'Machine';
+  const make = optionalString(data.make);
+  const modelNumber = optionalString(data.modelNumber);
+  const model = machineModelFromParts({
+    make,
+    modelNumber,
+    model: optionalString(data.model),
+    type,
+    machineNumber,
+  });
+
+  return {
+    id,
+    machineNumber,
+    type,
+    make,
+    modelNumber,
+    model,
+  };
+}
+
+function machineMatchesText(machine: MachineContext, text: string, explicitMachineNumber?: string): boolean {
+  const machineNumber = machine.machineNumber.trim();
+  if (!machineNumber) {
+    return false;
+  }
+
+  const compactMachineNumber = compactKey(machineNumber);
+  const compactExplicit = explicitMachineNumber ? compactKey(explicitMachineNumber) : '';
+  if (compactExplicit && compactExplicit === compactMachineNumber) {
+    return true;
+  }
+
+  const type = machine.type.toLowerCase().trim();
+  const typeInitial = type[0] ?? '';
+  const compactTokens = text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map(compactKey)
+    .filter((token) => token.length > 0);
+  const aliases = uniqueStrings([
+    `${type}${compactMachineNumber}`,
+    typeInitial ? `${typeInitial}${compactMachineNumber}` : '',
+  ]).filter((alias) => alias.length >= 2);
+
+  if (compactMachineNumber.length >= 2 && compactTokens.includes(compactMachineNumber)) {
+    return true;
+  }
+
+  if (aliases.some((alias) => compactTokens.includes(alias))) {
+    return true;
+  }
+
+  const escapedMachineNumber = machineNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const typePattern = type ? `|${type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` : '';
+  return new RegExp(`\\b(?:machine|washer|dryer|unit${typePattern})\\s*#?\\s*${escapedMachineNumber}\\b`, 'i').test(text);
+}
+
+async function resolveMachineContext(params: {
+  db: Firestore;
+  organizationId: string;
+  machineId?: string;
+  machineNumber?: string;
+  machineModel: string;
+  symptoms: string;
+  errorCode: string | null;
+}): Promise<MachineContext | null> {
+  if (params.machineId) {
+    const machineSnap = await params.db.doc(`organizations/${params.organizationId}/machines/${params.machineId}`).get();
+    if (machineSnap.exists) {
+      return machineContextFromDoc(machineSnap.id, machineSnap.data() ?? {});
+    }
+  }
+
+  const lookupText = [
+    params.machineNumber ?? '',
+    params.machineModel,
+    params.symptoms,
+    params.errorCode ?? '',
+  ].join(' ');
+  const machinesSnap = await params.db.collection(`organizations/${params.organizationId}/machines`).limit(500).get();
+  const machines = machinesSnap.docs.map((docSnap) => machineContextFromDoc(docSnap.id, docSnap.data()));
+  return machines.find((machine) => machineMatchesText(machine, lookupText, params.machineNumber)) ?? null;
+}
+
+async function findIndexedManualForModel(params: {
+  db: Firestore;
+  organizationId: string;
+  machineModel: string;
+  machine?: MachineContext | null;
+}) {
+  const modelValues = uniqueStrings([
+    params.machineModel,
+    params.machine?.model ?? '',
+    machineModelFromParts({
+      make: params.machine?.make,
+      modelNumber: params.machine?.modelNumber,
+      model: params.machine?.model,
+      type: params.machine?.type,
+      machineNumber: params.machine?.machineNumber,
+    }),
+    params.machine?.modelNumber ?? '',
+  ]);
+  const modelKeys = uniqueStrings(modelValues.map(normalizeMachineModelKey));
+
+  for (const modelKey of modelKeys) {
+    if (!modelKey) {
+      continue;
+    }
+    const exactSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
+      .where('machineModelKey', '==', modelKey)
+      .where('status', '==', 'indexed')
+      .limit(1)
+      .get();
+    if (!exactSnap.empty) {
+      return exactSnap.docs[0];
+    }
+  }
+
+  const indexedSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
+    .where('status', '==', 'indexed')
+    .limit(100)
+    .get();
+
+  const makeKey = compactKey(params.machine?.make ?? '');
+  const modelNumberKey = compactKey(params.machine?.modelNumber ?? '');
+  const strongModelKeys = uniqueStrings(modelKeys.map(compactKey).filter((value) => value.length >= 4));
+  const hasMakeAndModelNumber = makeKey.length >= 3 && modelNumberKey.length >= 4;
+  const candidates = indexedSnap.docs
+    .map((docSnap) => {
+      const data = docSnap.data();
+      const manualModel = optionalString(data.machineModel) ?? optionalString(data.title) ?? docSnap.id;
+      const manualKey = compactKey(`${manualModel} ${optionalString(data.machineModelKey) ?? ''}`);
+      const hasModelNumber = modelNumberKey.length >= 4 && manualKey.includes(modelNumberKey);
+      const hasMake = makeKey.length >= 3 && manualKey.includes(makeKey);
+      const hasStrongModel = strongModelKeys.some((modelKey) => manualKey.includes(modelKey) || modelKey.includes(manualKey));
+      let score = 0;
+      if (hasModelNumber) {
+        score += 10;
+      }
+      if (hasMake) {
+        score += 3;
+      }
+      if (hasStrongModel) {
+        score += 5;
+      }
+      const accepted = hasMakeAndModelNumber
+        ? hasMake && hasModelNumber
+        : hasModelNumber && hasStrongModel && modelNumberKey.length >= 5;
+      return { docSnap, score, accepted };
+    })
+    .filter((candidate) => candidate.accepted)
+    .sort((a, b) => b.score - a.score || a.docSnap.id.localeCompare(b.docSnap.id));
+
+  return candidates[0]?.docSnap ?? null;
 }
 
 function manualStatusFromValue(value: unknown): ManualStatus {
@@ -203,24 +415,147 @@ function chunkManualText(text: string, maxLength: number = MAX_MANUAL_CHUNK_LENG
   return chunks;
 }
 
+function newManualChunkCollectionName(): string {
+  return `${MANUAL_CHUNK_VERSION_PREFIX}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function activeManualChunkCollection(manualData: Record<string, unknown>): string {
+  return optionalString(manualData.activeChunkCollection) ?? LEGACY_MANUAL_CHUNK_COLLECTION;
+}
+
+async function writeManualChunksInBatches(params: {
+  db: Firestore;
+  manualRef: DocumentReference;
+  collectionName: string;
+  chunks: string[];
+  uid: string;
+}): Promise<void> {
+  let batch = params.db.batch();
+  let writes = 0;
+
+  for (const [index, chunk] of params.chunks.entries()) {
+    const chunkRef = params.manualRef.collection(params.collectionName).doc(`chunk-${(index + 1).toString().padStart(3, '0')}`);
+    batch.set(chunkRef, {
+      text: chunk,
+      position: index + 1,
+      createdAt: FieldValue.serverTimestamp(),
+      createdBy: params.uid,
+    });
+    writes += 1;
+
+    if (writes >= FIRESTORE_BATCH_WRITE_LIMIT) {
+      await batch.commit();
+      batch = params.db.batch();
+      writes = 0;
+    }
+  }
+
+  if (writes > 0) {
+    await batch.commit();
+  }
+}
+
+async function readManualChunks(params: {
+  manualRef: DocumentReference;
+  manualData: Record<string, unknown>;
+}): Promise<Array<{ chunkId: string; text: string }>> {
+  const collectionName = activeManualChunkCollection(params.manualData);
+  const readCollection = async (name: string): Promise<Array<{ chunkId: string; text: string }>> => {
+    const snapshot = await params.manualRef.collection(name).orderBy('position', 'asc').get();
+    return snapshot.docs
+      .map((docSnap) => ({
+        chunkId: docSnap.id,
+        text: optionalString(docSnap.data().text) ?? '',
+      }))
+      .filter((chunk) => chunk.text.length > 0);
+  };
+
+  const chunks = await readCollection(collectionName);
+  if (chunks.length > 0 || collectionName === LEGACY_MANUAL_CHUNK_COLLECTION) {
+    return chunks;
+  }
+
+  return readCollection(LEGACY_MANUAL_CHUNK_COLLECTION);
+}
+
 function queryTerms(value: string): string[] {
+  const stopWords = new Set(['and', 'the', 'for', 'with', 'has', 'had', 'code', 'error', 'machine', 'washer', 'dryer']);
   return Array.from(
     new Set(
       value
         .toLowerCase()
         .split(/[^a-z0-9]+/)
         .map((term) => term.trim())
-        .filter((term) => term.length >= 3),
+        .filter((term) => term.length >= 2 && !stopWords.has(term)),
     ),
   );
 }
 
-function scoreChunk(text: string, terms: string[]): number {
-  if (terms.length === 0) {
+function errorCodeAliases(errorCode: string | null, symptoms: string): string[] {
+  const sourceValues = [errorCode ?? ''];
+  const codePattern = /\b(?:error\s*code|code)\s*(?:is|:)?\s*([a-z0-9][a-z0-9\s:-]{0,12})/gi;
+  for (const match of symptoms.matchAll(codePattern)) {
+    sourceValues.push(match[1] ?? '');
+  }
+
+  const aliases: string[] = [];
+  for (const source of sourceValues) {
+    const cleaned = source
+      .toLowerCase()
+      .replace(/\b(on|and|with|for|in|at|while|when|during|showing|displaying)\b.*$/i, '')
+      .replace(/[.?!,;]+$/g, '')
+      .trim();
+    if (!cleaned) {
+      continue;
+    }
+
+    const parts = cleaned.split(/[^a-z0-9]+/).filter(Boolean);
+    const compact = parts.join('');
+    aliases.push(cleaned, compact);
+    if (parts.length > 1) {
+      aliases.push(parts.join(' '), parts.join('-'), parts.join(':'));
+    } else if (/^[a-z]{1,2}[0-9a-z]{1,5}$/.test(compact)) {
+      aliases.push(`${compact.slice(0, 1)} ${compact.slice(1)}`, `${compact.slice(0, 1)}-${compact.slice(1)}`);
+    }
+  }
+
+  return uniqueStrings(aliases).filter((alias) => compactKey(alias).length >= 2);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function codeAliasMatches(text: string, alias: string): boolean {
+  const parts = alias
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    return false;
+  }
+
+  const pattern = parts.length > 1
+    ? parts.map(escapeRegExp).join('[\\s:-]*')
+    : escapeRegExp(parts[0]);
+  return new RegExp(`\\b${pattern}\\b`, 'i').test(text);
+}
+
+function chunkHasCodeAlias(text: string, codeAliases: string[]): boolean {
+  return codeAliases.some((alias) => codeAliasMatches(text, alias));
+}
+
+function scoreChunk(text: string, terms: string[], codeAliases: string[]): number {
+  if (terms.length === 0 && codeAliases.length === 0) {
     return 0;
   }
   const lowered = text.toLowerCase();
   let score = 0;
+  for (const alias of codeAliases) {
+    if (codeAliasMatches(text, alias)) {
+      score += 30;
+    }
+  }
   for (const term of terms) {
     if (lowered.includes(term)) {
       score += 1;
@@ -242,7 +577,7 @@ function fallbackManualAnswer(params: {
     `Machine model: ${params.machineModel}.`,
     codeLine,
     `Symptoms: ${params.symptoms}.`,
-    'Manual-grounded guidance (fallback mode):',
+    'Manual source text selected. OpenAI did not return a usable answer, so here is the most relevant manual text:',
     snippet || 'No matching manual chunk was found. Upload and index a manual first.',
   ].filter(Boolean).join('\n');
 }
@@ -253,9 +588,9 @@ async function buildGroundedManualAnswer(params: {
   errorCode: string | null;
   topChunks: Array<{ chunkId: string; text: string }>;
 }): Promise<string> {
-  const apiKey = optionalString(process.env.OPENAI_API_KEY);
+  const apiKey = optionalString(openAiApiKey.value());
   if (!apiKey) {
-    return fallbackManualAnswer(params);
+    throw new Error('OpenAI API key is not configured for Repair Assist. Set Firebase secret OPENAI_API_KEY.');
   }
 
   const client = new OpenAI({ apiKey });
@@ -270,7 +605,14 @@ async function buildGroundedManualAnswer(params: {
     input: [
       {
         role: 'system',
-        content: 'You are a laundromat repair assistant. Use only the provided manual excerpts. If context is missing, say what is missing clearly.',
+        content: [
+          'You are a professional commercial laundry repair technician.',
+          'The uploaded technical manual excerpts are the source of truth.',
+          'First and foremost, base repair guidance explicitly on the provided manual excerpts.',
+          'If the excerpts do not contain the requested error code or repair procedure, say that clearly before adding any general repair knowledge.',
+          'Do not pretend a part number, voltage, resistance value, or procedure came from the manual unless it appears in the excerpts.',
+          'Use practical technician language and include safety warnings before electrical or panel-access steps.',
+        ].join(' '),
       },
       {
         role: 'user',
@@ -282,7 +624,14 @@ async function buildGroundedManualAnswer(params: {
           'Manual excerpts:',
           excerpts || 'No excerpts available.',
           '',
-          'Return: likely cause, first checks, step-by-step actions, and safety note.',
+          'Return the answer in this exact structure:',
+          '### 1. Likely Causes',
+          '### 2. Step-by-Step Repair Instructions',
+          '### 3. Required Parts',
+          '### 4. Difficulty Level',
+          '### 5. Safety Precautions',
+          '',
+          'Cite chunk IDs where useful, for example [chunk-003].',
         ].join('\n'),
       },
     ],
@@ -479,6 +828,7 @@ export const indexOrganizationManual = onRequest(
     }
 
     let manualRefPath: string | null = null;
+    let previousStatusForFailure: ManualStatus | null = null;
 
     try {
       const caller = await requireVerifiedCaller(request);
@@ -500,10 +850,12 @@ export const indexOrganizationManual = onRequest(
       const machineModel = requireString(manualData.machineModel, 'machineModel');
       const title = optionalString(manualData.title) ?? storagePath.split('/').slice(-1)[0] ?? 'Manual PDF';
       const previousStatus = manualStatusFromValue(manualData.status);
+      previousStatusForFailure = previousStatus;
 
       await manualRef.set(
         {
-          status: 'processing',
+          status: previousStatus === 'indexed' ? 'indexed' : 'processing',
+          indexingStatus: 'processing',
           indexError: null,
           updatedAt: FieldValue.serverTimestamp(),
           updatedBy: caller.uid,
@@ -536,22 +888,14 @@ export const indexOrganizationManual = onRequest(
         return normalizeMachineModelKey(model) === machineModelKey ? count + 1 : count;
       }, 0);
 
-      const existingChunksSnap = await manualRef.collection('chunks').get();
-      const cleanupBatch = db.batch();
-      existingChunksSnap.docs.forEach((docSnap) => cleanupBatch.delete(docSnap.ref));
-      await cleanupBatch.commit();
-
-      const writeBatch = db.batch();
-      chunks.forEach((chunk, index) => {
-        const chunkRef = manualRef.collection('chunks').doc(`chunk-${(index + 1).toString().padStart(3, '0')}`);
-        writeBatch.set(chunkRef, {
-          text: chunk,
-          position: index + 1,
-          createdAt: FieldValue.serverTimestamp(),
-          createdBy: caller.uid,
-        });
+      const chunkCollectionName = newManualChunkCollectionName();
+      await writeManualChunksInBatches({
+        db,
+        manualRef,
+        collectionName: chunkCollectionName,
+        chunks,
+        uid: caller.uid,
       });
-      await writeBatch.commit();
 
       await manualRef.set(
         {
@@ -559,6 +903,8 @@ export const indexOrganizationManual = onRequest(
           machineModel,
           machineModelKey,
           status: 'indexed',
+          indexingStatus: 'idle',
+          activeChunkCollection: chunkCollectionName,
           pageCount: Number.isFinite(parsed.total) ? parsed.total : null,
           chunkCount: chunks.length,
           linkedMachineCount,
@@ -582,8 +928,10 @@ export const indexOrganizationManual = onRequest(
         ensureFirebaseAdmin();
         await getFirestore().doc(manualRefPath).set(
           {
-            status: 'missing',
+            status: previousStatusForFailure === 'indexed' ? 'indexed' : 'missing',
+            indexingStatus: 'failed',
             indexError: message,
+            indexingFailedAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp(),
             updatedBy: 'manual-indexer',
           },
@@ -596,7 +944,7 @@ export const indexOrganizationManual = onRequest(
 );
 
 export const generateRepairAssist = onRequest(
-  { cors: true },
+  { cors: true, secrets: [openAiApiKey] },
   async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
@@ -606,61 +954,72 @@ export const generateRepairAssist = onRequest(
     try {
       const caller = await requireVerifiedCaller(request);
       const organizationId = requireString(request.body?.organizationId, 'organizationId');
-      const machineModel = requireString(request.body?.machineModel, 'machineModel');
+      const requestedMachineModel = requireString(request.body?.machineModel, 'machineModel');
       const symptoms = requireString(request.body?.symptoms, 'symptoms');
       const errorCode = optionalString(request.body?.errorCode) ?? null;
+      const machineId = optionalString(request.body?.machineId);
+      const machineNumber = optionalString(request.body?.machineNumber);
       await assertOrganizationMember(organizationId, caller.uid);
 
       ensureFirebaseAdmin();
       const db = getFirestore();
-      const machineModelKey = normalizeMachineModelKey(machineModel);
-      let manualsSnap = await db.collection(`organizations/${organizationId}/manuals`)
-        .where('machineModelKey', '==', machineModelKey)
-        .where('status', '==', 'indexed')
-        .limit(5)
-        .get();
+      const machine = await resolveMachineContext({
+        db,
+        organizationId,
+        machineId,
+        machineNumber,
+        machineModel: requestedMachineModel,
+        symptoms,
+        errorCode,
+      });
+      const machineModel = machine?.model ?? requestedMachineModel;
+      if (!isSpecificMachineModel(machineModel)) {
+        throw new Error('Machine make and model number are required before Repair Assist can select the correct manufacturer manual.');
+      }
+      const manualDoc = await findIndexedManualForModel({
+        db,
+        organizationId,
+        machineModel,
+        machine,
+      });
 
-      if (manualsSnap.empty) {
-        manualsSnap = await db.collection(`organizations/${organizationId}/manuals`)
-          .where('status', '==', 'indexed')
-          .limit(5)
-          .get();
+      if (!manualDoc) {
+        throw new Error(`No indexed manual matches ${machineModel}. Upload and index the manufacturer repair manual for this machine model first.`);
       }
 
-      if (manualsSnap.empty) {
-        throw new Error('No indexed manual found. Upload and index a manual first.');
-      }
-
-      const manualDoc = manualsSnap.docs[0];
       const manualData = manualDoc.data();
-      const chunkDocs = await manualDoc.ref.collection('chunks').limit(50).get();
-      if (chunkDocs.empty) {
-        throw new Error('Manual is indexed but has no stored chunks.');
-      }
-
-      const chunks = chunkDocs.docs
-        .map((docSnap) => ({
-          chunkId: docSnap.id,
-          text: optionalString(docSnap.data().text) ?? '',
-        }))
-        .filter((chunk) => chunk.text.length > 0);
-
+      const chunks = await readManualChunks({
+        manualRef: manualDoc.ref,
+        manualData,
+      });
       if (chunks.length === 0) {
-        throw new Error('Manual chunks are empty.');
+        throw new Error('Manual is indexed but has no readable stored chunks.');
       }
 
-      const terms = queryTerms(`${machineModel} ${symptoms} ${errorCode ?? ''}`);
+      const codeAliases = errorCodeAliases(errorCode, symptoms);
+      const terms = queryTerms(`${machineModel} ${symptoms} ${errorCode ?? ''} ${codeAliases.join(' ')}`);
       const ranked = chunks
         .map((chunk) => ({
           ...chunk,
-          score: scoreChunk(chunk.text, terms),
+          hasCodeAlias: chunkHasCodeAlias(chunk.text, codeAliases),
+          score: scoreChunk(chunk.text, terms, codeAliases),
         }))
         .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId));
 
-      const topChunks = (ranked.filter((chunk) => chunk.score > 0).slice(0, 4).length > 0
-        ? ranked.filter((chunk) => chunk.score > 0).slice(0, 4)
-        : ranked.slice(0, 4))
+      const scoredChunks = ranked.filter((chunk) => chunk.score > 0);
+      const codeMatchedChunks = codeAliases.length > 0 ? ranked.filter((chunk) => chunk.hasCodeAlias) : [];
+      if (codeAliases.length > 0 && codeMatchedChunks.length === 0) {
+        throw new Error(`The selected manual for ${machineModel} does not contain error code ${errorCode ?? codeAliases[0]}. Confirm the manual is the correct manufacturer repair manual, then try again.`);
+      }
+      const candidateChunks = codeAliases.length > 0 ? codeMatchedChunks : scoredChunks;
+      const topChunks = (candidateChunks.length > 0
+        ? candidateChunks.slice(0, MAX_REPAIR_ASSIST_CHUNKS)
+        : ranked.slice(0, MAX_REPAIR_ASSIST_CHUNKS))
         .map(({ chunkId, text }) => ({ chunkId, text }));
+
+      if (topChunks.length === 0) {
+        throw new Error(`The selected manual for ${machineModel} does not contain enough source text for this repair request.`);
+      }
 
       const answer = await buildGroundedManualAnswer({
         machineModel,
@@ -671,7 +1030,9 @@ export const generateRepairAssist = onRequest(
 
       response.status(200).json({
         ok: true,
-        grounded: Boolean(optionalString(process.env.OPENAI_API_KEY)),
+        grounded: true,
+        model: getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL),
+        sourceMode: 'manual-source-of-truth',
         answer,
         manual: {
           id: manualDoc.id,
