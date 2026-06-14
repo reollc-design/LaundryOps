@@ -12,19 +12,22 @@ function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
 }
 
 function statusLabel(status: WorkOrderStatus): string {
+  if (status === 'planned') {
+    return 'Planned';
+  }
   if (status === 'in-progress') {
     return 'In Progress';
-  }
-  if (status === 'waiting') {
-    return 'Waiting Parts';
   }
   if (status === 'completed') {
     return 'Completed';
   }
-  if (status === 'assigned') {
-    return 'Assigned';
+  if (status === 'waiting') {
+    return 'In Progress';
   }
-  return 'Open';
+  if (status === 'assigned') {
+    return 'Planned';
+  }
+  return 'Planned';
 }
 
 function createWorkOrderNumber(): string {
@@ -38,9 +41,17 @@ export interface CreateWorkOrderFromDraftInput {
   machineNumber: string;
   machineModel: string;
   title: string;
+  status: WorkOrderStatus;
   priority: 'High' | 'Standard' | 'Low';
   assigneeName: string;
-  dueLabel: string;
+  dueLabel?: string;
+  repairType?: string;
+  maintenanceType?: string;
+  symptoms?: string;
+  errorCode?: string;
+  otherCost?: number;
+  notes?: string;
+  aiDiagnosis?: string | null;
   partsCost: number;
   laborCost: number;
   totalCostLabel: string;
@@ -63,15 +74,22 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     machineNumber: input.machineNumber,
     machineModel: input.machineModel,
     title: input.title,
-    status: 'open',
-    statusLabel: 'Open',
+    status: input.status,
+    statusLabel: statusLabel(input.status),
     priority: input.priority,
     assigneeName: input.assigneeName,
-    dueLabel: input.dueLabel,
-    source: 'AI draft',
+    dueLabel: input.dueLabel ?? null,
+    repairType: input.repairType ?? null,
+    maintenanceType: input.maintenanceType ?? null,
+    symptoms: input.symptoms ?? null,
+    errorCode: input.errorCode ?? null,
+    notes: input.notes ?? null,
+    aiDiagnosis: input.aiDiagnosis ?? null,
+    source: 'Manual entry',
     partsCost: input.partsCost,
     laborCost: input.laborCost,
-    totalCost: input.partsCost + input.laborCost,
+    otherCost: input.otherCost ?? 0,
+    totalCost: input.partsCost + input.laborCost + (input.otherCost ?? 0),
     estimate: input.totalCostLabel,
     createdAt: serverTimestamp(),
     createdBy: user.uid,

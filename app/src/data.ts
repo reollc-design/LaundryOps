@@ -15,7 +15,7 @@ export type ScreenKey =
   | 'reports';
 export type MachineStatus = 'running' | 'needs-repair' | 'down' | 'waiting';
 export type ManualStatus = 'indexed' | 'processing' | 'missing';
-export type WorkOrderStatus = 'open' | 'assigned' | 'in-progress' | 'waiting' | 'completed';
+export type WorkOrderStatus = 'planned' | 'open' | 'assigned' | 'in-progress' | 'waiting' | 'completed';
 export type WorkOrderPriority = 'High' | 'Standard' | 'Low';
 
 export interface UrgentMachine {
@@ -45,7 +45,14 @@ export interface WorkOrderSummary {
   source: 'AI draft' | 'Manual entry' | 'Preventive';
   partsCost?: string;
   laborCost?: string;
+  otherCost?: string;
   estimate: string;
+  maintenanceType?: string;
+  repairType?: string;
+  symptoms?: string;
+  errorCode?: string;
+  notes?: string;
+  aiDiagnosis?: string;
 }
 
 export interface ReportMetric {
@@ -114,13 +121,13 @@ export const aiWorkOrderDraft = {
   errorCode: 'Not provided',
   diagnosis: 'Diagnosis appears here after AI Repair Assist runs with your manual data.',
   source: 'Manual source pending',
-  sourceDetail: 'Upload and index a manual to ground this work order.',
+  sourceDetail: 'Upload and index a manual to ground this maintenance record.',
   confidence: 'Medium',
   steps: [
     'Capture symptoms and any error code.',
     'Run AI Repair Assist with manual grounding enabled.',
     'Review recommended repair steps with the assigned technician.',
-    'Enter parts and labor before creating the work order.',
+    'Enter parts and labor before creating the maintenance record.',
   ],
   parts: [] as string[],
   estimate: '$0.00',
@@ -158,7 +165,7 @@ export const accountStats: AccountStat[] = [];
 export const trialFeatures: TrialFeature[] = [
   {
     id: 'work-orders',
-    title: 'Professional work orders',
+    title: 'Professional maintenance records',
     detail: 'Track repair status, assignee, parts, labor, and photos.',
   },
   {

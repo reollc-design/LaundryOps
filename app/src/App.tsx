@@ -66,7 +66,7 @@ import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
-type WorkOrderStatusFilter = 'all' | Exclude<WorkOrderStatus, 'in-progress'>;
+type WorkOrderStatusFilter = 'all' | 'planned' | 'in-progress' | 'completed';
 type WorkOrderPriorityFilter = 'all' | WorkOrderPriority;
 type BillingAction = 'checkout' | 'portal';
 type AssistPreset = {
@@ -103,7 +103,7 @@ const billingPlans: {
 const navItems: { key: TabKey; label: string; icon: typeof Home }[] = [
   { key: 'home', label: 'Home', icon: Home },
   { key: 'machines', label: 'Machines', icon: Camera },
-  { key: 'work-orders', label: 'Work Orders', icon: ClipboardList },
+  { key: 'work-orders', label: 'Maintenance Records', icon: ClipboardList },
   { key: 'ai-assist', label: 'AI Assist', icon: Sparkles },
   { key: 'reports', label: 'Reports', icon: BarChart3 },
 ];
@@ -118,9 +118,9 @@ const screenTitles: Record<ScreenKey, string> = {
   'machine-detail': 'Machine Detail',
   manuals: 'Manual Library',
   account: 'Account',
-  'create-work-order': 'New Work Order',
-  'work-orders': 'Work Orders',
-  'work-order-detail': 'Work Order Detail',
+  'create-work-order': 'New Maintenance Record',
+  'work-orders': 'Maintenance Records',
+  'work-order-detail': 'Maintenance Record',
   'ai-assist': 'Repair Assist',
   reports: 'Reports',
 };
@@ -134,10 +134,9 @@ const machineFilters: { key: MachineFilter; label: string }[] = [
 
 const workOrderStatusFilters: { key: WorkOrderStatusFilter; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'open', label: 'Open' },
-  { key: 'assigned', label: 'Assigned' },
-  { key: 'waiting', label: 'Waiting' },
-  { key: 'completed', label: 'Done' },
+  { key: 'planned', label: 'Planned' },
+  { key: 'in-progress', label: 'In Progress' },
+  { key: 'completed', label: 'Completed' },
 ];
 
 const workOrderPriorityFilters: { key: WorkOrderPriorityFilter; label: string }[] = [
@@ -285,7 +284,7 @@ function machineStatusSince(status: MachineOperationalStatus): string {
     return 'Out of service';
   }
   if (status === 'needs-repair') {
-    return 'Open work order';
+    return 'Open maintenance record';
   }
   return 'No open issues';
 }
@@ -353,10 +352,17 @@ function machineStatusCounts(machines: UrgentMachine[]): {
 }
 
 interface WorkOrderCostEntry {
-  priority: WorkOrderPriority;
-  assigneeName: string;
+  status: 'planned' | 'in-progress' | 'completed';
+  maintenanceType: string;
+  repairType: string;
+  technicianName: string;
+  symptoms: string;
+  errorCode: string;
   partsCost: number;
   laborCost: number;
+  otherCost: number;
+  notes: string;
+  aiDiagnosis: string;
 }
 
 function parseUsdAmount(value: string): number | null {
@@ -713,22 +719,29 @@ export function App() {
       preferredMachine?.make?.trim(),
       preferredMachine?.modelNumber?.trim(),
     ].filter(Boolean).join(' ') || preferredMachine?.type || aiWorkOrderDraft.machineModel;
-    const workOrderTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
-      ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, machineNumber)
-      : aiWorkOrderDraft.title;
+    const fallbackTitle = [machineModel, entry.symptoms].filter(Boolean).join(' / ');
+    const workOrderTitle = fallbackTitle.length > 0 ? fallbackTitle : aiWorkOrderDraft.title;
 
     setWorkOrderBusy(true);
     try {
-      const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost);
+      const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost) + Math.max(0, entry.otherCost);
       const result = await createWorkOrderFromDraft({
         organizationId: defaultOrganizationId,
         machineId: preferredMachine?.id ?? null,
         machineNumber,
         machineModel,
         title: workOrderTitle,
-        priority: entry.priority,
-        assigneeName: entry.assigneeName,
-        dueLabel: aiWorkOrderDraft.due,
+        status: entry.status,
+        priority: 'Standard',
+        assigneeName: entry.technicianName || aiWorkOrderDraft.assignee,
+        dueLabel: entry.maintenanceType,
+        maintenanceType: entry.maintenanceType,
+        repairType: entry.repairType,
+        symptoms: entry.symptoms,
+        errorCode: entry.errorCode,
+        otherCost: entry.otherCost,
+        notes: entry.notes,
+        aiDiagnosis: entry.aiDiagnosis,
         partsCost: entry.partsCost,
         laborCost: entry.laborCost,
         totalCostLabel: formatUsdAmount(totalCost),
@@ -737,7 +750,7 @@ export function App() {
       setSelectedWorkOrderId(result.workOrderId);
       setActiveScreen('work-order-detail');
     } catch (error) {
-      setWorkOrderError(getErrorMessage(error, 'Could not create work order. Try again.'));
+      setWorkOrderError(getErrorMessage(error, 'Could not create maintenance record. Try again.'));
     } finally {
       setWorkOrderBusy(false);
     }
@@ -764,18 +777,18 @@ export function App() {
         setCreatedFromDraft(false);
       }
     } catch (error) {
-      setWorkOrderError(getErrorMessage(error, 'Could not update work order status. Try again.'));
+      setWorkOrderError(getErrorMessage(error, 'Could not update maintenance record status. Try again.'));
     } finally {
       setWorkOrderBusy(false);
     }
   };
   const handleDeleteWorkOrder = async (workOrderId: string): Promise<void> => {
     if (!orgConnected || !defaultOrganizationId) {
-      setWorkOrderDeleteError('Complete onboarding first before deleting work orders.');
+      setWorkOrderDeleteError('Complete onboarding first before deleting maintenance records.');
       return;
     }
 
-    if (!window.confirm('Delete this work order permanently?')) {
+    if (!window.confirm('Delete this maintenance record permanently?')) {
       return;
     }
 
@@ -791,7 +804,7 @@ export function App() {
         setActiveScreen('work-orders');
       }
     } catch (error) {
-      setWorkOrderDeleteError(getErrorMessage(error, 'Could not delete work order. Try again.'));
+      setWorkOrderDeleteError(getErrorMessage(error, 'Could not delete maintenance record. Try again.'));
     } finally {
       setWorkOrderDeleteBusyId((current) => (current === workOrderId ? null : current));
     }
@@ -940,6 +953,8 @@ export function App() {
                     busy={workOrderBusy}
                     error={workOrderError}
                     machine={createWorkOrderMachine}
+                    orgConnected={orgConnected}
+                    organizationId={defaultOrganizationId}
                   />
                 )}
                 {activeScreen === 'work-orders' && (
@@ -1058,7 +1073,7 @@ function WelcomeScreen({
         <div>
           <span>14-Day Free Trial</span>
           <h1>More uptime. More revenue.</h1>
-          <p>Track machines, work orders, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
+          <p>Track machines, maintenance records, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
         </div>
         <div className="welcome-machine">
           <MachineIllustration />
@@ -1236,7 +1251,7 @@ function CreateAccountAccessScreen({
         <div className="access-copy">
           <span>Owner setup</span>
           <h1>Start with Pro trial.</h1>
-          <p>Create the company account that owns machines, work orders, manuals, billing, and reports.</p>
+          <p>Create the company account that owns machines, maintenance records, manuals, billing, and reports.</p>
         </div>
         <div className="access-fields">
           <AuthField icon={Building2} label="Business Name" value={businessName} onChange={setBusinessName} />
@@ -1255,7 +1270,7 @@ function CreateAccountAccessScreen({
           <ShieldCheck size={18} />
           <div>
             <strong>14 days included before billing.</strong>
-            <span>The trial includes work orders, reports, manual uploads, and OpenAI Repair Assist.</span>
+            <span>The trial includes maintenance records, reports, manual uploads, and OpenAI Repair Assist.</span>
           </div>
         </section>
         <button className="primary-action" type="button" onClick={submitCreateAccount} disabled={isSubmitting}>
@@ -1633,10 +1648,10 @@ function AppHeader({
           </button>
         )}
         {activeScreen === 'machines' && <span className="header-subtitle">{machineCount} machines</span>}
-        {activeScreen === 'work-orders' && <span className="header-subtitle">{workOrderCount} work orders</span>}
+        {activeScreen === 'work-orders' && <span className="header-subtitle">{workOrderCount} maintenance records</span>}
         {activeScreen === 'manuals' && <span className="header-subtitle">Grounded repair answers</span>}
         {activeScreen === 'account' && <span className="header-subtitle">Business, subscription</span>}
-        {activeScreen === 'create-work-order' && <span className="header-subtitle">AI draft review</span>}
+        {activeScreen === 'create-work-order' && <span className="header-subtitle">Record setup</span>}
       </div>
       {isAssist ? (
         <span className="ai-pill">AI</span>
@@ -1801,7 +1816,7 @@ function HomeScreen({
         </div>
         <div className="quick-grid">
           <QuickAction icon={BookOpen} label="Manual Library" tone="teal" onClick={() => setActiveScreen('manuals')} />
-          <QuickAction icon={ClipboardList} label="New Work Order" tone="primary" onClick={onCreateWorkOrder} />
+          <QuickAction icon={ClipboardList} label="New Maintenance Record" tone="primary" onClick={onCreateWorkOrder} />
           <QuickAction icon={Sparkles} label="Ask AI" tone="ai" onClick={() => setActiveScreen('ai-assist')} />
         </div>
       </section>
@@ -2304,7 +2319,7 @@ function UrgentMachineRow({
           )}
           {onCreateWorkOrder && (
             <button className="row-action-button row-action-primary" type="button" onClick={onCreateWorkOrder} disabled={busy}>
-              <ClipboardList size={14} /> Work Order
+              <ClipboardList size={14} /> Record
             </button>
           )}
           {onEdit && (
@@ -2396,7 +2411,7 @@ function MachineDetailScreen({
       </section>
 
       <button className="primary-action" type="button" onClick={onCreateWorkOrder}>
-        <Plus size={20} /> Create Work Order
+        <Plus size={20} /> Create Maintenance Record
       </button>
 
       <div className="shortcut-grid">
@@ -2665,7 +2680,7 @@ function AccountScreen({
         <div>
           <span>Company Account</span>
           <strong>LaundryOps Company</strong>
-          <p>One company account manages your machines, work orders, manuals, and reports.</p>
+          <p>One company account manages your machines, maintenance records, manuals, and reports.</p>
         </div>
       </section>
 
@@ -2729,7 +2744,7 @@ function AccountScreen({
         <div>
           <span>14-Day Free Trial</span>
           <strong>Pro trial active</strong>
-          <p>Trial includes work orders, reports, manual uploads, and OpenAI Repair Assist.</p>
+          <p>Trial includes maintenance records, reports, manual uploads, and OpenAI Repair Assist.</p>
         </div>
         <div className="trial-days">
           <strong>14</strong>
@@ -2867,58 +2882,107 @@ function CreateWorkOrderScreen({
   busy,
   error,
   machine,
+  orgConnected,
+  organizationId,
 }: {
   onSave: (entry: WorkOrderCostEntry) => Promise<void>;
   busy: boolean;
   error: string | null;
   machine: UrgentMachine | null;
+  orgConnected: boolean;
+  organizationId: string | null;
 }) {
-  const [priority, setPriority] = useState(aiWorkOrderDraft.priority);
-  const [assignee, setAssignee] = useState(aiWorkOrderDraft.assignee);
+  const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
+  const [repairType, setRepairType] = useState('');
+  const [status, setStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
+  const [technicianName, setTechnicianName] = useState(aiWorkOrderDraft.assignee);
+  const [symptoms, setSymptoms] = useState('');
+  const [errorCode, setErrorCode] = useState('');
   const [partsCostInput, setPartsCostInput] = useState('');
   const [laborCostInput, setLaborCostInput] = useState('');
-  const [costInputError, setCostInputError] = useState<string | null>(null);
-  const priorityOptions = ['High', 'Standard', 'Low'];
-  const assigneeOptions = ['Mike R.', 'Tom J.', 'Unassigned'];
+  const [otherCostInput, setOtherCostInput] = useState('');
+  const [notesInput, setNotesInput] = useState('');
+  const [techNoteError, setTechNoteError] = useState<string | null>(null);
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [assistantError, setAssistantError] = useState<string | null>(null);
+  const [assistantAnswer, setAssistantAnswer] = useState<string | null>(null);
+  const [assistantManualTitle, setAssistantManualTitle] = useState<string | null>(null);
+  const [assistantGrounded, setAssistantGrounded] = useState(false);
+  const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
   const draftMachineNumber = machine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
   const draftMachineModel = machine?.make && machine?.modelNumber
     ? `${machine.make} ${machine.modelNumber}`.trim()
     : machine?.make ?? machine?.modelNumber ?? machine?.type ?? aiWorkOrderDraft.machineModel;
-  const draftTitle = aiWorkOrderDraft.title.includes(aiWorkOrderDraft.machineNumber)
-    ? aiWorkOrderDraft.title.replace(aiWorkOrderDraft.machineNumber, draftMachineNumber)
-    : aiWorkOrderDraft.title;
+  const hasMachineContext = Boolean(machine?.id && machine?.machineNumber && draftMachineModel && machine?.machineNumber !== 'Machine');
+  const canRunAssist = orgConnected && !!organizationId && !!symptoms.trim() && !!errorCode.trim() && hasMachineContext;
   const parsedPartsCost = parseUsdAmount(partsCostInput);
   const parsedLaborCost = parseUsdAmount(laborCostInput);
-  const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0);
+  const parsedOtherCost = parseUsdAmount(otherCostInput);
+  const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
 
   const submitCreateWorkOrder = async (): Promise<void> => {
     const partsCost = parseUsdAmount(partsCostInput);
     const laborCost = parseUsdAmount(laborCostInput);
-    if (partsCost === null || laborCost === null) {
-      setCostInputError('Enter valid parts and labor costs before creating the work order.');
+    const otherCost = parseUsdAmount(otherCostInput);
+    const hasInvalidCostInput = [partsCostInput, laborCostInput, otherCostInput].some((value) => value.trim() !== '' && parseUsdAmount(value) === null);
+    if (hasInvalidCostInput) {
+      setTechNoteError('Enter valid numbers for parts, labor, and other cost fields.');
+      return;
+    }
+    const finalPartsCost = partsCost ?? 0;
+    const finalLaborCost = laborCost ?? 0;
+    const finalOtherCost = otherCost ?? 0;
+
+    setTechNoteError(null);
+    setAssistantError(null);
+    await onSave({
+      status,
+      maintenanceType,
+      repairType: repairType.trim() || 'General Repair',
+      technicianName,
+      symptoms,
+      errorCode,
+      partsCost: finalPartsCost,
+      laborCost: finalLaborCost,
+      otherCost: finalOtherCost,
+      notes: notesInput,
+      aiDiagnosis: assistantAnswer ?? '',
+    });
+  };
+
+  const runAiDiagnosis = async (): Promise<void> => {
+    if (!canRunAssist) {
+      setAssistantError('Add symptoms, error code, and keep a machine selected before running AI diagnose.');
+      return;
+    }
+    if (!orgConnected || !organizationId) {
+      setAssistantError('Complete onboarding first before using AI diagnostics.');
       return;
     }
 
-    setCostInputError(null);
-    await onSave({
-      priority: priority as WorkOrderPriority,
-      assigneeName: assignee,
-      partsCost,
-      laborCost,
-    });
+    setAssistantError(null);
+    setAssistantLoading(true);
+    try {
+      const result = await generateManualRepairAssist({
+        organizationId,
+        machineModel: draftMachineModel,
+        symptoms,
+        errorCode,
+        machineId: machine?.id,
+        machineNumber: machine?.machineNumber,
+      });
+      setAssistantAnswer(result.answer);
+      setAssistantGrounded(result.grounded);
+      setAssistantManualTitle(result.manual?.title ?? null);
+    } catch (diagError) {
+      setAssistantError(getErrorMessage(diagError, 'Could not generate AI diagnosis.'));
+    } finally {
+      setAssistantLoading(false);
+    }
   };
 
   return (
     <div className="screen-stack">
-      <section className="draft-banner">
-        <span className="draft-banner-icon"><ClipboardCheck size={22} /></span>
-        <div className="draft-banner-copy">
-          <strong>Draft created from Repair Assist</strong>
-          <span>Review AI notes, manual source, assignee, then enter parts and labor costs before opening the work order.</span>
-        </div>
-        <StatusBadge status={priority === 'High' ? 'down' : 'primary'}>{priority}</StatusBadge>
-      </section>
-
       <section className="draft-machine-card">
         <MachineThumb />
         <div>
@@ -2931,86 +2995,115 @@ function CreateWorkOrderScreen({
 
       <section className="review-card">
         <div className="review-heading">
-          <h2>Work Order Setup</h2>
-          <span>Due {aiWorkOrderDraft.due}</span>
+          <h2>Maintenance Record</h2>
+          <span>Track issue details, labor parts, and status.</span>
         </div>
         <label className="review-field">
-          <span>Title</span>
-          <input value={draftTitle} readOnly />
+          <span>Issue / Symptoms</span>
+          <div className="symptoms-ai-row">
+            <textarea
+              value={symptoms}
+              placeholder="Describe what the machine is doing"
+              rows={3}
+              onChange={(event) => {
+                setSymptoms(event.target.value);
+                setAssistantError(null);
+              }}
+            />
+            <button
+              className="row-action-button row-action-ai"
+              type="button"
+              onClick={() => void runAiDiagnosis()}
+              disabled={assistantLoading || !canRunAssist}
+            >
+              <Sparkles size={14} /> {assistantLoading ? 'Diagnosing...' : 'AI Diagnose'}
+            </button>
+          </div>
         </label>
-        <div className="review-control-group">
-          <span>Priority</span>
-          <div className="selectable-strip">
-            {priorityOptions.map((option) => (
-              <button
-                className={priority === option ? 'is-selected' : ''}
-                key={option}
-                type="button"
-                aria-pressed={priority === option}
-                onClick={() => setPriority(option)}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
+        <div className="review-field-grid">
+          <label className="review-field">
+            <span>Issue Type</span>
+            <input
+              value={repairType}
+              placeholder="Example: door strike, leaks, no spin"
+              onChange={(event) => setRepairType(event.target.value)}
+            />
+          </label>
+          <label className="review-field">
+            <span>Maintenance Category</span>
+            <input
+              value={maintenanceType}
+              placeholder="Example: Standard Repair, Preventive, Inspection"
+              onChange={(event) => setMaintenanceType(event.target.value)}
+            />
+          </label>
         </div>
-        <div className="review-control-group">
-          <span>Assign To</span>
-          <div className="selectable-strip">
-            {assigneeOptions.map((option) => (
-              <button
-                className={assignee === option ? 'is-selected' : ''}
-                key={option}
-                type="button"
-                aria-pressed={assignee === option}
-                onClick={() => setAssignee(option)}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="draft-summary-card">
-        <div className="review-heading">
-          <h2>AI Repair Notes</h2>
-          <span>{aiWorkOrderDraft.confidence} confidence</span>
-        </div>
-        <InfoBlock label="Symptoms" value={aiWorkOrderDraft.symptoms} />
-        <InfoBlock label="Error Code" value={aiWorkOrderDraft.errorCode} />
-        <InfoBlock label="Diagnosis" value={aiWorkOrderDraft.diagnosis} />
-      </section>
-
-      <section className="content-section task-card">
-        <div className="section-heading">
-          <h2>Technician Checklist</h2>
-          <span>{aiWorkOrderDraft.steps.length} steps</span>
-        </div>
-        <div className="task-list">
-          {aiWorkOrderDraft.steps.map((step, index) => (
-            <div className="task-row" key={step}>
-              <span>{index + 1}</span>
-              <strong>{step}</strong>
-            </div>
-          ))}
+        <label className="review-field">
+          <span>Error Code (if shown)</span>
+          <input
+            value={errorCode}
+            placeholder="Example: E DL"
+            onChange={(event) => setErrorCode(event.target.value)}
+          />
+        </label>
+        <div className="review-field-grid">
+          <label className="review-field">
+            <span>Technician</span>
+            <input
+              value={technicianName}
+              onChange={(event) => setTechnicianName(event.target.value)}
+              placeholder="Technician handling this record"
+            />
+          </label>
+          <label className="review-field">
+            <span>Record Status</span>
+            <select value={status} onChange={(event) => setStatus(event.target.value as 'planned' | 'in-progress' | 'completed')}>
+              {statusOptions.map((statusOption) => (
+                <option key={statusOption} value={statusOption}>
+                  {statusOption === 'in-progress' ? 'In Progress' : statusOption === 'completed' ? 'Completed' : 'Planned'}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </section>
 
       <section className="source-card">
-        <div className="source-card-icon"><FileText size={20} /></div>
+        <div className="source-card-icon"><Sparkles size={20} /></div>
         <div>
-          <strong>Manual source attached</strong>
-          <span>{aiWorkOrderDraft.source}</span>
-          <small>{aiWorkOrderDraft.sourceDetail}</small>
+          <strong>AI Repair Assist</strong>
+          <span>{assistantManualTitle || 'Manual-backed guidance (if available)'}</span>
+          <small>{assistantGrounded ? 'Manual-backed answer ready' : 'Click AI Diagnose after entering symptoms + error code'}</small>
         </div>
-        <StatusBadge status="running">Grounded</StatusBadge>
       </section>
 
+      {assistantAnswer && (
+        <section className="task-card">
+          <div className="section-heading">
+            <h2>Diagnosis Result</h2>
+          </div>
+          <div className="task-list">
+            {assistantAnswer.split('\n').map((line, index) => (
+              <div className="task-row" key={`${line}-${index}`}>
+                <span>{index + 1}</span>
+                <strong>{line}</strong>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {assistantError && (
+        <div className="auth-message">
+          <strong>AI Diagnose</strong>
+          <span>{assistantError}</span>
+        </div>
+      )}
+
       <section className="cost-card">
-        <h2>Technician Cost Entry</h2>
+        <h2>Technician Entry</h2>
         <label className="review-field">
-          <span>Parts Cost (USD)</span>
+          <span>Parts Cost</span>
           <input
             value={partsCostInput}
             inputMode="decimal"
@@ -3019,7 +3112,7 @@ function CreateWorkOrderScreen({
           />
         </label>
         <label className="review-field">
-          <span>Labor Cost (USD)</span>
+          <span>Labor Cost</span>
           <input
             value={laborCostInput}
             inputMode="decimal"
@@ -3027,10 +3120,28 @@ function CreateWorkOrderScreen({
             onChange={(event) => setLaborCostInput(event.target.value)}
           />
         </label>
-        {costInputError && (
+        <label className="review-field">
+          <span>Other Cost</span>
+          <input
+            value={otherCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => setOtherCostInput(event.target.value)}
+          />
+        </label>
+        <label className="review-field">
+          <span>Tech Notes</span>
+          <textarea
+            value={notesInput}
+            rows={3}
+            placeholder="Work notes, observations, part numbers, follow-up items"
+            onChange={(event) => setNotesInput(event.target.value)}
+          />
+        </label>
+        {techNoteError && (
           <div className="auth-message">
             <strong>Cost input required</strong>
-            <span>{costInputError}</span>
+            <span>{techNoteError}</span>
           </div>
         )}
         <div className="cost-total">
@@ -3041,13 +3152,13 @@ function CreateWorkOrderScreen({
 
       {error && (
         <div className="auth-message">
-          <strong>Could not create work order</strong>
+          <strong>Could not create maintenance record</strong>
           <span>{error}</span>
         </div>
       )}
 
       <button className="primary-action sticky-action" type="button" onClick={() => void submitCreateWorkOrder()} disabled={busy}>
-        <ClipboardCheck size={19} /> {busy ? 'Creating...' : 'Create Work Order'}
+        <ClipboardCheck size={19} /> {busy ? 'Saving...' : 'Save Maintenance Record'}
       </button>
     </div>
   );
@@ -3082,37 +3193,36 @@ function WorkOrdersScreen({
   const [priorityFilter, setPriorityFilter] = useState<WorkOrderPriorityFilter>('all');
   const filteredOrders = useMemo(() => {
     return workOrderQueueData.filter((order) => {
-      const matchesStatus =
-        statusFilter === 'all' ||
-        order.status === statusFilter ||
-        (statusFilter === 'assigned' && order.status === 'in-progress');
+      const matchesStatus = statusFilter === 'all' || order.status === statusFilter;
       const matchesPriority = priorityFilter === 'all' || order.priority === priorityFilter;
       return matchesStatus && matchesPriority;
     });
   }, [priorityFilter, statusFilter, workOrderQueueData]);
-  const openCount = workOrderQueueData.filter((order) => order.status !== 'completed').length;
-  const highCount = workOrderQueueData.filter((order) => order.priority === 'High' && order.status !== 'completed').length;
-  const waitingCount = workOrderQueueData.filter((order) => order.status === 'waiting').length;
+  const totalCount = workOrderQueueData.length;
+  const inProgressCount = workOrderQueueData.filter((order) => order.status === 'in-progress').length;
+  const completedCount = workOrderQueueData.filter((order) => order.status === 'completed').length;
+  const plannedCount = workOrderQueueData.filter((order) => order.status === 'planned').length;
 
   return (
     <div className="screen-stack">
       <section className="work-order-summary">
-        <WorkQueueStat label="Open" value={String(openCount)} />
-        <WorkQueueStat label="High" value={String(highCount)} tone="down" />
-        <WorkQueueStat label="Waiting Parts" value={String(waitingCount)} tone="waiting" />
+        <WorkQueueStat label="Total" value={String(totalCount)} />
+        <WorkQueueStat label="Planned" value={String(plannedCount)} tone="down" />
+        <WorkQueueStat label="In Progress" value={String(inProgressCount)} tone="down" />
+        <WorkQueueStat label="Completed" value={String(completedCount)} />
       </section>
 
       <section className="content-section work-filter-card">
         <div className="section-heading">
-          <h2>Work Order Queue</h2>
-          <button type="button" onClick={onCreateWorkOrder}><Plus size={14} /> New</button>
+          <h2>Maintenance Records</h2>
+          <button type="button" onClick={onCreateWorkOrder}><Plus size={14} /> New Record</button>
         </div>
         <div className="work-filter-block">
           <div className="filter-label">
             <Filter size={14} />
-            <span>Status</span>
+            <span>Record Status</span>
           </div>
-          <div className="work-status-filter" aria-label="Work order status filters">
+          <div className="work-status-filter" aria-label="Maintenance record status filters">
             {workOrderStatusFilters.map((filter) => (
               <button
                 className={statusFilter === filter.key ? 'is-selected' : ''}
@@ -3131,7 +3241,7 @@ function WorkOrdersScreen({
             <Filter size={14} />
             <span>Priority</span>
           </div>
-          <div className="work-priority-filter" aria-label="Work order priority filters">
+          <div className="work-priority-filter" aria-label="Maintenance record priority filters">
             {workOrderPriorityFilters.map((filter) => (
               <button
                 className={priorityFilter === filter.key ? 'is-selected' : ''}
@@ -3148,8 +3258,8 @@ function WorkOrdersScreen({
       </section>
 
       <section className="work-order-list" aria-live="polite">
-        {orgConnected && orgWorkOrdersLoading && <p className="search-hint">Refreshing work orders from your company data...</p>}
-        {orgConnected && orgWorkOrdersError && <p className="empty-state">Could not load live work orders: {orgWorkOrdersError}</p>}
+        {orgConnected && orgWorkOrdersLoading && <p className="search-hint">Refreshing maintenance records from your company data...</p>}
+        {orgConnected && orgWorkOrdersError && <p className="empty-state">Could not load live maintenance records: {orgWorkOrdersError}</p>}
         <div className="list-count-line">
           <strong>{filteredOrders.length} shown</strong>
           <span>{statusFilter === 'all' ? 'All statuses' : workOrderStatusFilters.find((filter) => filter.key === statusFilter)?.label}</span>
@@ -3168,7 +3278,7 @@ function WorkOrdersScreen({
             onDelete={() => void onDeleteWorkOrder(order.id)}
           />
         ))}
-        {filteredOrders.length === 0 && <p className="empty-state">No work orders match those filters.</p>}
+        {filteredOrders.length === 0 && <p className="empty-state">No maintenance records match your filters.</p>}
         {workOrderDeleteError && <p className="empty-state">{workOrderDeleteError}</p>}
       </section>
     </div>
@@ -3229,7 +3339,7 @@ function WorkOrderQueueRow({
           </button>
         )}
         <button className="row-action-button row-action-primary" type="button" onClick={onClick} disabled={busy}>
-          <Pencil size={14} /> Edit
+          <Pencil size={14} /> Open
         </button>
         {onDelete && (
           <button className="row-action-button row-action-delete" type="button" onClick={onDelete} disabled={busy}>
@@ -3274,32 +3384,41 @@ function WorkOrderDetailScreen({
   orgConnected: boolean;
   onUpdateStatus: (status: WorkOrderStatus) => Promise<void>;
 }) {
-  const steps = useMemo(() => ['Open', 'Assigned', 'In Progress', 'Waiting', 'Completed'], []);
-  const currentStatus = order?.status ?? 'open';
-  const activeIndex = currentStatus === 'completed'
-    ? 4
-    : currentStatus === 'waiting'
-      ? 3
-      : currentStatus === 'in-progress'
-        ? 2
-        : currentStatus === 'assigned'
-          ? 1
-          : 0;
-  const statusButtonLabel = currentStatus === 'waiting'
-    ? 'Mark Completed'
-    : currentStatus === 'completed'
+  const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
+  const [selectedStatus, setSelectedStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
+  const statusButtonLabel = selectedStatus === 'in-progress'
+    ? 'Save In Progress'
+    : selectedStatus === 'completed'
+      ? 'Save Completed'
+      : 'Save Planned';
+  const statusLabelText = order?.status === 'in-progress'
+    ? 'In Progress'
+    : order?.status === 'completed'
       ? 'Completed'
-      : 'Mark Waiting on Parts';
-  const nextStatus: WorkOrderStatus = currentStatus === 'waiting' ? 'completed' : 'waiting';
+      : 'Planned';
+
+  useEffect(() => {
+    if (!order) {
+      setSelectedStatus('planned');
+      return;
+    }
+
+    if (order.status === 'in-progress' || order.status === 'completed' || order.status === 'planned') {
+      setSelectedStatus(order.status);
+      return;
+    }
+
+    setSelectedStatus('planned');
+  }, [order?.id, order?.status]);
 
   if (!order) {
     return (
       <div className="screen-stack">
         <section className="content-section">
-          <h2>No Work Order Selected</h2>
-          <p className="empty-state">Open a work order from the queue to view details.</p>
+          <h2>No Maintenance Record Selected</h2>
+          <p className="empty-state">Open a maintenance record from the list to view details.</p>
           <button className="secondary-action" type="button" onClick={() => setActiveScreen('work-orders')}>
-            Back to Work Orders
+            Back to Maintenance Records
           </button>
         </section>
       </div>
@@ -3312,8 +3431,8 @@ function WorkOrderDetailScreen({
         <section className="created-banner">
           <Check size={17} />
           <div>
-            <strong>Work order created from AI draft</strong>
-            <span>Manual source and technician checklist were attached.</span>
+            <strong>Maintenance record created</strong>
+            <span>Technician record details were saved.</span>
           </div>
         </section>
       )}
@@ -3326,37 +3445,65 @@ function WorkOrderDetailScreen({
         <StatusBadge status={priorityToBadgeStatus(order.priority)}>{order.priority}</StatusBadge>
       </section>
 
-      <div className="stepper">
-        {steps.map((step, index) => {
-          const active = index <= activeIndex;
-          const current = index === activeIndex;
-          return (
-            <div className={`step ${active ? 'done' : ''} ${current ? 'current' : ''}`} key={step}>
-              <span>{active ? (current ? <Wrench size={14} /> : <Check size={14} />) : <Circle size={13} />}</span>
-              <b>{step}</b>
-            </div>
-          );
-        })}
-      </div>
-
       <section className="assignment-card">
         <div className="assignee">
           <div className="avatar"><UserRound size={18} /></div>
-          <div>
-            <span>Assigned To</span>
-            <strong>{order.assignee}</strong>
-            <small>Technician</small>
-          </div>
+        <div>
+          <span>Technician</span>
+          <strong>{order.assignee}</strong>
+          <small>Technician assigned to this maintenance record</small>
         </div>
+      </div>
         <div className="status-box">
           <span>Status</span>
-          <strong>{order.statusLabel}</strong>
+          <strong>{statusLabelText}</strong>
           <small>{order.due}</small>
         </div>
       </section>
 
-      <InfoBlock label="Symptoms" value={order.title} />
-      <InfoBlock label="Machine Model" value={order.machineModel} />
+      <section className="review-card">
+        <div className="review-heading">
+          <h2>Maintenance Record Details</h2>
+          <span>Review details and update the status.</span>
+        </div>
+        <InfoBlock label="Maintenance Category" value={order.maintenanceType ?? 'Standard Repair'} />
+        <InfoBlock label="Issue Type" value={order.repairType ?? 'General Repair'} />
+        <InfoBlock label="Symptoms / Issues" value={order.symptoms ?? order.title} />
+        <InfoBlock label="Error Code" value={order.errorCode ?? 'None provided'} />
+        <InfoBlock label="Machine Model" value={order.machineModel} />
+        <label className="review-field">
+          <span>Record Status</span>
+          <select
+            value={selectedStatus}
+            onChange={(event) => setSelectedStatus(event.target.value as 'planned' | 'in-progress' | 'completed')}
+            disabled={busy || !orgConnected}
+          >
+            {statusOptions.map((statusValue) => (
+              <option key={statusValue} value={statusValue}>
+                {statusValue === 'planned' ? 'Planned' : statusValue === 'in-progress' ? 'In Progress' : 'Completed'}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      <section className="content-section compact">
+        <h2>Technician Notes</h2>
+        <p className="empty-state">{order.notes ?? 'No technician notes yet.'}</p>
+      </section>
+
+      <section className="content-section compact">
+        <h2>AI Diagnosis</h2>
+        {order.aiDiagnosis ? (
+          <div className="ai-diagnosis-detail">
+            {order.aiDiagnosis.split('\n').filter(Boolean).map((line, index) => (
+              <p key={`${line}-${index}`}>{line}</p>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">No AI guidance attached.</p>
+        )}
+      </section>
 
       <section className="content-section compact">
         <h2>Photos</h2>
@@ -3374,15 +3521,25 @@ function WorkOrderDetailScreen({
           <span>Labor Cost</span>
           <strong>{order.laborCost ?? '$0.00'}</strong>
         </div>
+        <div className="cost-row">
+          <span>Other Cost</span>
+          <strong>{order.otherCost ?? '$0.00'}</strong>
+        </div>
         <div className="cost-total">
           <span>Total Cost</span>
           <strong>{order.estimate}</strong>
         </div>
       </section>
 
+      {!orgConnected && (
+        <div className="search-hint">
+          <p>Connect onboarding first to save status updates.</p>
+        </div>
+      )}
+
       {error && (
         <div className="auth-message">
-          <strong>Could not update work order</strong>
+          <strong>Could not update maintenance record</strong>
           <span>{error}</span>
         </div>
       )}
@@ -3390,10 +3547,10 @@ function WorkOrderDetailScreen({
       <button
         className="primary-action sticky-action"
         type="button"
-        disabled={busy || currentStatus === 'completed'}
+        disabled={busy || selectedStatus === order.status || !orgConnected}
         onClick={() => {
           if (orgConnected) {
-            void onUpdateStatus(nextStatus);
+            void onUpdateStatus(selectedStatus);
             return;
           }
           setActiveScreen('work-orders');
@@ -3638,7 +3795,7 @@ function RepairAssistScreen({
               <>
                 <ResultSection title="Likely cause">Run the live assistant to generate manual-grounded diagnosis.</ResultSection>
                 <ResultSection title="Inspect first">Upload manuals and keep machine model names consistent for best grounding.</ResultSection>
-                <ResultSection title="Next steps">Use Generate Repair Guidance, then save the result into a work order.</ResultSection>
+                <ResultSection title="Next steps">Use Generate Repair Guidance, then save the result into a maintenance record.</ResultSection>
               </>
             )}
           </div>
@@ -3663,7 +3820,7 @@ function RepairAssistScreen({
         <button className="secondary-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
           Refresh Guidance
         </button>
-        <button className="ai-action" type="button" onClick={onCreateWorkOrder}>Save as Work Order</button>
+        <button className="ai-action" type="button" onClick={onCreateWorkOrder}>Save as Maintenance Record</button>
       </div>
     </div>
   );
@@ -3706,7 +3863,7 @@ function ReportsScreen() {
         <div>
           <span>Owner Summary</span>
           <strong>{hasReportData ? 'Live maintenance data loaded.' : 'No report data yet.'}</strong>
-          <p>{hasReportData ? 'Review trends across downtime, costs, repeat failures, and manual coverage.' : 'Create machines and work orders to start generating report insights.'}</p>
+          <p>{hasReportData ? 'Review trends across downtime, costs, repeat failures, and manual coverage.' : 'Create machines and maintenance records to start generating report insights.'}</p>
         </div>
         <div className="report-score">
           <span>Health</span>

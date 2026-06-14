@@ -1734,7 +1734,7 @@ button:focus-visible {
 
 .work-order-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1803,7 +1803,7 @@ button:focus-visible {
 }
 
 .work-status-filter {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .work-priority-filter {
@@ -1890,6 +1890,10 @@ button:focus-visible {
 }
 
 .wo-open::before {
+  background: var(--primary);
+}
+
+.wo-planned::before {
   background: var(--primary);
 }
 
@@ -1986,6 +1990,11 @@ button:focus-visible {
 }
 
 .work-status-open {
+  background: #e8f1ff;
+  color: var(--primary);
+}
+
+.work-status-planned {
   background: #e8f1ff;
   color: var(--primary);
 }
@@ -2356,6 +2365,63 @@ button:focus-visible {
   color: var(--text);
   font-size: 13px;
   font-weight: 750;
+}
+
+.review-field textarea {
+  width: 100%;
+  min-height: 94px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.35;
+  resize: vertical;
+}
+
+.review-field select {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.review-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.symptoms-ai-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 9px;
+}
+
+.symptoms-ai-row .row-action-button {
+  width: fit-content;
+  min-height: 34px;
+  padding: 0 11px;
+}
+
+.ai-diagnosis-detail {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-diagnosis-detail p {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 700;
 }
 
 .review-control-group {
@@ -4016,6 +4082,10 @@ button:focus-visible {
   .work-priority-filter,
   .work-row-footer {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-field-grid {
+    grid-template-columns: 1fr;
   }
 
   .manual-row-meta {

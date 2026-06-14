@@ -43,23 +43,29 @@ function formatUsd(value: number): string {
 
 function normalizeWorkOrderStatus(rawStatus: string | null): WorkOrderStatus {
   if (!rawStatus) {
-    return 'open';
+    return 'planned';
   }
 
   const normalized = rawStatus.trim().toLowerCase();
-  if (normalized === 'open' || normalized === 'assigned' || normalized === 'in-progress' || normalized === 'waiting' || normalized === 'completed') {
+  if (
+    normalized === 'planned' ||
+    normalized === 'open' ||
+    normalized === 'assigned' ||
+    normalized === 'in-progress' ||
+    normalized === 'completed'
+  ) {
+    if (normalized === 'open' || normalized === 'assigned') {
+      return 'planned';
+    }
     return normalized;
   }
-  if (normalized.includes('progress') || normalized === 'active') {
+  if (normalized === 'waiting' || normalized.includes('progress') || normalized === 'active') {
     return 'in-progress';
-  }
-  if (normalized.includes('wait') || normalized.includes('part')) {
-    return 'waiting';
   }
   if (normalized.includes('complete') || normalized.includes('closed') || normalized.includes('done')) {
     return 'completed';
   }
-  return 'open';
+  return 'planned';
 }
 
 function statusLabel(status: WorkOrderStatus): string {
@@ -69,13 +75,10 @@ function statusLabel(status: WorkOrderStatus): string {
   if (status === 'completed') {
     return 'Completed';
   }
-  if (status === 'waiting') {
-    return 'Waiting Parts';
+  if (status === 'planned') {
+    return 'Planned';
   }
-  if (status === 'assigned') {
-    return 'Assigned';
-  }
-  return 'Open';
+  return 'Planned';
 }
 
 function normalizePriority(rawPriority: string | null): 'High' | 'Standard' | 'Low' {
@@ -158,9 +161,10 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             'Model not set';
           const partsCostValue = asNumber(data.partsCost) ?? 0;
           const laborCostValue = asNumber(data.laborCost) ?? 0;
+          const otherCostValue = asNumber(data.otherCost) ?? 0;
           const partsCost = formatUsd(partsCostValue);
           const laborCost = formatUsd(laborCostValue);
-          const totalCost = formatUsd(partsCostValue + laborCostValue);
+          const totalCost = formatUsd(partsCostValue + laborCostValue + otherCostValue);
 
           return {
             id,
@@ -177,6 +181,13 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             source: (asString(data.source) === 'AI draft' || asString(data.source) === 'Preventive') ? (asString(data.source) as 'AI draft' | 'Preventive') : 'Manual entry',
             partsCost,
             laborCost,
+            otherCost: formatUsd(otherCostValue),
+            maintenanceType: asString(data.maintenanceType) ?? undefined,
+            repairType: asString(data.repairType) ?? asString(data.title) ?? undefined,
+            symptoms: asString(data.symptoms) ?? asString(data.title) ?? undefined,
+            errorCode: asString(data.errorCode) ?? undefined,
+            notes: asString(data.notes) ?? undefined,
+            aiDiagnosis: asString(data.aiDiagnosis) ?? undefined,
             estimate: asString(data.estimate) ?? totalCost,
           } satisfies WorkOrderSummary;
         })
