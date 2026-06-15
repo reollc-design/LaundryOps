@@ -460,6 +460,16 @@ function workOrderSummarySignature(order: WorkOrderSummary): string {
   });
 }
 
+function parseCurrencyString(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const normalized = value.replace(/[^0-9.-]/g, '');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenKey>(() => getInitialScreen());
   const [workOrderReturnScreen, setWorkOrderReturnScreen] = useState<ScreenKey>('machine-detail');
@@ -1087,7 +1097,13 @@ export function App() {
                     organizationId={defaultOrganizationId}
                   />
                 )}
-                {activeScreen === 'reports' && <ReportsScreen />}
+                {activeScreen === 'reports' && (
+                  <ReportsScreen
+                    orgConnected={orgConnected}
+                    workOrders={workOrderQueueData}
+                    machines={machineCatalogData}
+                  />
+                )}
               </div>
               <BottomNav activeScreen={activeScreen} setActiveScreen={setActiveScreen} />
             </>
@@ -4342,16 +4358,129 @@ function RepairAssistScreen({
   );
 }
 
-function ReportsScreen() {
+function ReportsScreen({
+  orgConnected,
+  workOrders,
+  machines,
+}: {
+  orgConnected: boolean;
+  workOrders: WorkOrderSummary[];
+  machines: UrgentMachine[];
+}) {
   const [activePeriod, setActivePeriod] = useState(reportPeriods[1]);
-  const maxDowntime = downtimeTrend.length > 0 ? Math.max(...downtimeTrend.map((point) => point.hours)) : 1;
+  const liveTotalCost = useMemo(
+    () => workOrders.reduce((total, order) => total + parseCurrencyString(order.partsCost) + parseCurrencyString(order.laborCost) + parseCurrencyString(order.otherCost), 0),
+    [workOrders],
+  );
+  const liveCompletedCount = useMemo(
+    () => workOrders.filter((order) => order.status === 'completed').length,
+    [workOrders],
+  );
+  const liveInProgressCount = useMemo(
+    () => workOrders.filter((order) => order.status === 'in-progress').length,
+    [workOrders],
+  );
+  const liveMetrics = useMemo<ReportMetric[]>(() => {
+    if (!orgConnected || workOrders.length === 0) {
+      return [];
+    }
+
+    return [
+      {
+        id: 'live-records',
+        label: 'Maintenance Records',
+        value: String(workOrders.length),
+        change: `${liveCompletedCount} completed`,
+        tone: 'primary',
+      },
+      {
+        id: 'live-spend',
+        label: 'Repair Spend',
+        value: formatUsdAmount(liveTotalCost),
+        change: 'Live maintenance totals',
+        tone: 'down',
+      },
+      {
+        id: 'live-active',
+        label: 'Open Work',
+        value: String(liveInProgressCount),
+        change: 'In progress now',
+        tone: 'waiting',
+      },
+    ];
+  }, [liveCompletedCount, liveInProgressCount, liveTotalCost, orgConnected, workOrders.length]);
+  const liveSpendRows = useMemo<ReportRow[]>(() => {
+    if (!orgConnected || workOrders.length === 0) {
+      return [];
+    }
+
+    return [...workOrders]
+      .map((order): ReportRow => {
+        const total = parseCurrencyString(order.partsCost) + parseCurrencyString(order.laborCost) + parseCurrencyString(order.otherCost);
+        return {
+          id: order.id,
+          label: `${order.machineNumber} ${order.repairType ?? order.title}`,
+          value: formatUsdAmount(total),
+          detail: `${order.statusLabel} / ${order.assignee}`,
+          tone: (total > 0 ? 'down' : 'primary') as ReportRow['tone'],
+        } satisfies ReportRow;
+      })
+      .sort((a, b) => parseCurrencyString(b.value) - parseCurrencyString(a.value))
+      .slice(0, 8);
+  }, [orgConnected, workOrders]);
+  const liveRepeatRows = useMemo<ReportRow[]>(() => {
+    if (!orgConnected || workOrders.length === 0) {
+      return [];
+    }
+
+    const counts = new Map<string, { count: number; label: string; detail: string }>();
+    workOrders.forEach((order) => {
+      const key = order.machineId ?? order.machineNumber;
+      const current = counts.get(key) ?? { count: 0, label: order.machineNumber, detail: order.machineModel };
+      current.count += 1;
+      counts.set(key, current);
+    });
+
+    return [...counts.entries()]
+      .filter(([, entry]) => entry.count > 1)
+      .map(([id, entry]): ReportRow => ({
+        id,
+        label: entry.label,
+        value: `${entry.count} records`,
+        detail: entry.detail,
+        tone: 'waiting',
+      }))
+      .slice(0, 8);
+  }, [orgConnected, workOrders]);
+  const liveTechnicianRows = useMemo<ReportRow[]>(() => {
+    if (!orgConnected || workOrders.length === 0) {
+      return [];
+    }
+
+    const counts = new Map<string, number>();
+    workOrders.forEach((order) => {
+      const key = order.assignee || 'Unassigned';
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+
+    return [...counts.entries()]
+      .map(([name, count]) => ({
+        id: name,
+        label: name,
+        value: `${count} records`,
+        detail: 'Assigned maintenance records',
+        tone: 'primary' as const,
+      }))
+      .sort((a, b) => Number.parseInt(b.value, 10) - Number.parseInt(a.value, 10))
+      .slice(0, 8);
+  }, [orgConnected, workOrders]);
   const hasReportData =
-    reportMetrics.length > 0 ||
-    downtimeTrend.length > 0 ||
-    spendBreakdownRows.length > 0 ||
-    repeatFailureRows.length > 0 ||
-    technicianLoadRows.length > 0 ||
-    manualCoverageRows.length > 0;
+    liveMetrics.length > 0 ||
+    liveSpendRows.length > 0 ||
+    liveRepeatRows.length > 0 ||
+    liveTechnicianRows.length > 0 ||
+    workOrders.length > 0;
+  const maxDowntime = downtimeTrend.length > 0 ? Math.max(...downtimeTrend.map((point) => point.hours)) : 1;
 
   return (
     <div className="screen-stack">
@@ -4389,10 +4518,10 @@ function ReportsScreen() {
       </section>
 
       <section className="report-metric-grid">
-        {reportMetrics.map((metric) => (
+        {liveMetrics.map((metric) => (
           <ReportMetricTile key={metric.id} metric={metric} />
         ))}
-        {reportMetrics.length === 0 && <p className="empty-state">No report metrics yet.</p>}
+        {liveMetrics.length === 0 && <p className="empty-state">No report metrics yet.</p>}
       </section>
 
       <section className="content-section report-chart-card">
@@ -4425,9 +4554,9 @@ function ReportsScreen() {
       <section className="content-section report-list-card">
         <div className="section-heading">
           <h2>Repair Spend</h2>
-          <span>{spendBreakdownRows.length > 0 ? 'Parts + labor' : 'No entries yet'}</span>
+          <span>{liveSpendRows.length > 0 ? 'Parts + labor' : 'No entries yet'}</span>
         </div>
-        <ReportRows rows={spendBreakdownRows} />
+        <ReportRows rows={liveSpendRows} />
       </section>
 
       <section className="content-section report-list-card">
@@ -4435,15 +4564,15 @@ function ReportsScreen() {
           <h2>Repeat-Failure Machines</h2>
           <span>Needs owner review</span>
         </div>
-        <ReportRows rows={repeatFailureRows} />
+        <ReportRows rows={liveRepeatRows} />
       </section>
 
       <section className="content-section report-list-card">
         <div className="section-heading">
-          <h2>Technician Load</h2>
+          <h2>Technician Workload</h2>
           <span>Open work</span>
         </div>
-        <ReportRows rows={technicianLoadRows} />
+        <ReportRows rows={liveTechnicianRows} />
       </section>
 
       <section className="content-section report-list-card">
