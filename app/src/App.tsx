@@ -235,9 +235,27 @@ function findMachines(query: string, machines: UrgentMachine[]) {
     const typeInitial = type[0] ?? '';
     const compactMachineId = machineId.replace(/[^a-z0-9]+/g, '');
     const compactNumericId = numericId.replace(/[^a-z0-9]+/g, '');
+    const searchableTokens = [
+      machineId,
+      compactMachineId,
+      numericId,
+      compactNumericId,
+      type,
+      machine.make ?? '',
+      machine.modelNumber ?? '',
+      machine.statusLabel,
+      machine.status,
+    ]
+      .join(' ')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
 
     if (singleLetterQuery.length > 0) {
-      return compactMachineId.startsWith(singleLetterQuery);
+      return (
+        compactMachineId.startsWith(singleLetterQuery)
+        || searchableTokens.some((token) => token === singleLetterQuery)
+      );
     }
 
     const letteredAliases = compactNumericId
@@ -352,6 +370,7 @@ function machineStatusCounts(machines: UrgentMachine[]): {
 }
 
 interface WorkOrderCostEntry {
+  machineId?: string | null;
   status: 'planned' | 'in-progress' | 'completed';
   maintenanceType: string;
   repairType: string;
@@ -453,6 +472,12 @@ export function App() {
     }
     return workOrderQueueData[0] ?? null;
   }, [selectedWorkOrderId, workOrderQueueData]);
+  const selectedWorkOrderMachine = useMemo(() => {
+    if (!selectedWorkOrder?.machineId) {
+      return null;
+    }
+    return machineCatalogData.find((machine) => machine.id === selectedWorkOrder.machineId) ?? null;
+  }, [machineCatalogData, selectedWorkOrder?.machineId]);
   const urgentMachineData = useMemo(() => {
     if (!orgConnected) {
       return urgentMachines;
@@ -696,25 +721,21 @@ export function App() {
   };
   const handleCreateWorkOrderFromDraft = async (entry: WorkOrderCostEntry): Promise<void> => {
     setWorkOrderError(null);
-    const draftMachineNumber = createWorkOrderMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
-
+    const candidateMachineId = entry.machineId ?? createWorkOrderMachineId;
+    const preferredMachine = candidateMachineId
+      ? orgMachines.machines.find((machine) => machine.id === candidateMachineId)
+      : null;
     if (!orgConnected || !defaultOrganizationId) {
-      setCreatedFromDraft(true);
-      setSelectedWorkOrderId(
-        workOrderQueueData.find((order) => order.machineNumber === draftMachineNumber)?.id ?? workOrderQueueData[0]?.id ?? null,
-      );
-      setActiveScreen('work-order-detail');
+      setWorkOrderError('Complete onboarding first before saving maintenance records.');
       return;
     }
 
-    const preferredMachine = (
-      createWorkOrderMachineId
-        ? orgMachines.machines.find((machine) => machine.id === createWorkOrderMachineId)
-        : null
-    )
-      ?? orgMachines.machines.find((machine) => machine.machineNumber === aiWorkOrderDraft.machineNumber)
-      ?? orgMachines.machines[0];
-    const machineNumber = preferredMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
+    if (!preferredMachine?.id) {
+      setWorkOrderError('Select a machine before creating this maintenance record.');
+      return;
+    }
+
+    const machineNumber = preferredMachine.machineNumber;
     const machineModel = [
       preferredMachine?.make?.trim(),
       preferredMachine?.modelNumber?.trim(),
@@ -917,8 +938,6 @@ export function App() {
                   <MachineDetailScreen
                     setActiveScreen={setActiveScreen}
                     machine={selectedMachine}
-                    busy={machineStatusBusyId === selectedMachine?.id}
-                    onSetMachineStatus={handleSetMachineStatus}
                     onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
                   />
@@ -953,8 +972,10 @@ export function App() {
                     busy={workOrderBusy}
                     error={workOrderError}
                     machine={createWorkOrderMachine}
+                    availableMachines={machineCatalogData}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
+                    onSetMachineStatus={handleSetMachineStatus}
                   />
                 )}
                 {activeScreen === 'work-orders' && (
@@ -977,17 +998,22 @@ export function App() {
                     setActiveScreen={setActiveScreen}
                     createdFromDraft={createdFromDraft}
                     order={selectedWorkOrder}
+                    machine={selectedWorkOrderMachine}
                     busy={workOrderBusy}
                     error={workOrderError}
+                    machineStatusBusy={selectedWorkOrderMachine ? machineStatusBusyId === selectedWorkOrderMachine.id : false}
+                    machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                     onUpdateStatus={handleUpdateSelectedWorkOrderStatus}
+                    onSetMachineStatus={handleSetMachineStatus}
                   />
                 )}
                 {activeScreen === 'ai-assist' && (
                   <RepairAssistScreen
                     assistPreset={assistPreset}
                     onClearAssistPreset={() => setAssistPreset(null)}
-                    onCreateWorkOrder={() => openCreateWorkOrder('ai-assist')}
+                    onCreateWorkOrder={(machineId) => openCreateWorkOrder('ai-assist', machineId)}
+                    defaultMachineId={assistPreset?.machineId ?? null}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
                   />
@@ -1632,7 +1658,7 @@ function AppHeader({
   return (
     <header className="app-header">
       {showBack ? (
-        <button className="icon-button header-icon" onClick={onBack} aria-label="Go back">
+        <button className="icon-button header-icon" type="button" onClick={onBack} aria-label="Go back">
           <ArrowLeft size={22} />
         </button>
       ) : (
@@ -1656,11 +1682,11 @@ function AppHeader({
       {isAssist ? (
         <span className="ai-pill">AI</span>
       ) : showBack ? (
-        <button className="icon-button header-icon" aria-label="More options">
+        <button className="icon-button header-icon" type="button" onClick={onAccountClick} aria-label="More options">
           <MoreVertical size={21} />
         </button>
       ) : (
-        <button className="icon-button header-icon" aria-label="Notifications">
+        <button className="icon-button header-icon" type="button" onClick={onAccountClick} aria-label="Notifications">
           <Bell size={21} />
         </button>
       )}
@@ -2341,15 +2367,11 @@ function UrgentMachineRow({
 function MachineDetailScreen({
   setActiveScreen,
   machine,
-  busy,
-  onSetMachineStatus,
   onCreateWorkOrder,
   onOpenAiAssist,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   machine: UrgentMachine | null;
-  busy: boolean;
-  onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
   onCreateWorkOrder: () => void;
   onOpenAiAssist: () => void;
 }) {
@@ -2364,6 +2386,7 @@ function MachineDetailScreen({
     : machineStatus === 'needs-repair'
       ? 'Needs repair attention'
       : 'No active issue';
+  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
 
   return (
     <div className="screen-stack detail-stack">
@@ -2380,30 +2403,6 @@ function MachineDetailScreen({
         <MachineIllustration />
       </section>
 
-      {machine && (
-        <section className="content-section compact">
-          <h2>Status</h2>
-          <div className="machine-status-toggle detail-status-toggle" role="group" aria-label={`Status for ${machine.machineNumber}`}>
-            {([
-              ['running', 'Op'],
-              ['needs-repair', 'Repair'],
-              ['down', 'Down'],
-            ] as Array<[MachineOperationalStatus, string]>).map(([statusKey, label]) => (
-              <button
-                key={statusKey}
-                type="button"
-                className={`status-chip ${machineStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
-                onClick={() => void onSetMachineStatus(machine.id, statusKey)}
-                disabled={busy}
-                aria-pressed={machineStatus === statusKey}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
-
       <section className="issue-card">
         <span>Current Issue</span>
         <strong>{issueLabel}</strong>
@@ -2417,8 +2416,15 @@ function MachineDetailScreen({
       <div className="shortcut-grid">
         <Shortcut icon={Sparkles} label="Ask AI" onClick={onOpenAiAssist} tone="ai" />
         <Shortcut icon={BookOpen} label="Search Manual" onClick={() => setActiveScreen('manuals')} />
-        <Shortcut icon={Camera} label="Add Photo" />
+        <Shortcut icon={Camera} label="Add Photo" onClick={() => setPhotoMessage('Photo attachments are queued for the beta attachment workflow.')} />
       </div>
+
+      {photoMessage && (
+        <div className="auth-message">
+          <strong>Add Photo</strong>
+          <span>{photoMessage}</span>
+        </div>
+      )}
 
       <div className="stat-grid">
         <SmallStat label="Lifetime Repair Cost" value="Not set" tone="teal" />
@@ -2478,6 +2484,7 @@ function ManualLibraryScreen({
   const manualData = orgConnected ? orgManualsData : fallbackManualRows;
   const indexedCount = manualData.filter((manual) => manual.status === 'indexed').length;
   const missingCount = manualData.filter((manual) => manual.status === 'missing').length;
+  const uploadReady = Boolean(orgConnected && organizationId && machineModel.trim() && selectedFile);
 
   const handleUpload = async (): Promise<void> => {
     setUploadError(null);
@@ -2573,6 +2580,12 @@ function ManualLibraryScreen({
         >
           {uploadBusy ? 'Processing Manual...' : 'Upload & Index Manual'}
         </button>
+        {!uploadReady && !uploadError && (
+          <div className="auth-message">
+            <strong>Manual upload required fields</strong>
+            <span>Enter a machine model and choose a PDF manual before uploading.</span>
+          </div>
+        )}
         {!orgConnected && (
           <p className="search-hint">Complete onboarding first to connect manual uploads to your organization account.</p>
         )}
@@ -2884,6 +2897,8 @@ function CreateWorkOrderScreen({
   machine,
   orgConnected,
   organizationId,
+  availableMachines = [],
+  onSetMachineStatus,
 }: {
   onSave: (entry: WorkOrderCostEntry) => Promise<void>;
   busy: boolean;
@@ -2891,6 +2906,8 @@ function CreateWorkOrderScreen({
   machine: UrgentMachine | null;
   orgConnected: boolean;
   organizationId: string | null;
+  availableMachines?: UrgentMachine[];
+  onSetMachineStatus?: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
   const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
   const [repairType, setRepairType] = useState('');
@@ -2898,27 +2915,61 @@ function CreateWorkOrderScreen({
   const [technicianName, setTechnicianName] = useState(aiWorkOrderDraft.assignee);
   const [symptoms, setSymptoms] = useState('');
   const [errorCode, setErrorCode] = useState('');
+  const [machineStatus, setMachineStatus] = useState<MachineOperationalStatus>('running');
   const [partsCostInput, setPartsCostInput] = useState('');
   const [laborCostInput, setLaborCostInput] = useState('');
   const [otherCostInput, setOtherCostInput] = useState('');
   const [notesInput, setNotesInput] = useState('');
   const [techNoteError, setTechNoteError] = useState<string | null>(null);
+  const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
   const [assistantLoading, setAssistantLoading] = useState(false);
   const [assistantError, setAssistantError] = useState<string | null>(null);
   const [assistantAnswer, setAssistantAnswer] = useState<string | null>(null);
   const [assistantManualTitle, setAssistantManualTitle] = useState<string | null>(null);
   const [assistantGrounded, setAssistantGrounded] = useState(false);
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(machine?.id ?? null);
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
-  const draftMachineNumber = machine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
-  const draftMachineModel = machine?.make && machine?.modelNumber
-    ? `${machine.make} ${machine.modelNumber}`.trim()
-    : machine?.make ?? machine?.modelNumber ?? machine?.type ?? aiWorkOrderDraft.machineModel;
-  const hasMachineContext = Boolean(machine?.id && machine?.machineNumber && draftMachineModel && machine?.machineNumber !== 'Machine');
-  const canRunAssist = orgConnected && !!organizationId && !!symptoms.trim() && !!errorCode.trim() && hasMachineContext;
+  const selectedMachine = useMemo(() => {
+    if (selectedMachineId) {
+      const selected = availableMachines.find((entry) => entry.id === selectedMachineId);
+      if (selected) {
+        return selected;
+      }
+    }
+
+    return machine ?? null;
+  }, [availableMachines, machine, selectedMachineId]);
+  const draftMachineNumber = selectedMachine?.machineNumber ?? aiWorkOrderDraft.machineNumber;
+  const draftMachineModel = selectedMachine?.make && selectedMachine?.modelNumber
+    ? `${selectedMachine.make} ${selectedMachine.modelNumber}`.trim()
+    : selectedMachine?.make ?? selectedMachine?.modelNumber ?? selectedMachine?.type ?? aiWorkOrderDraft.machineModel;
+  const hasMachineContext = Boolean(selectedMachine?.id);
   const parsedPartsCost = parseUsdAmount(partsCostInput);
   const parsedLaborCost = parseUsdAmount(laborCostInput);
   const parsedOtherCost = parseUsdAmount(otherCostInput);
   const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
+
+  useEffect(() => {
+    if (machine?.id && machine?.status) {
+      setSelectedMachineId(machine.id);
+    }
+    if (selectedMachine?.status) {
+      setMachineStatus(toOperationalStatus(selectedMachine.status));
+      return;
+    }
+    setMachineStatus('running');
+  }, [machine?.id, machine?.status, selectedMachine?.id, selectedMachine?.status]);
+
+  useEffect(() => {
+    if (machine || selectedMachineId) {
+      return;
+    }
+
+    const firstMachine = availableMachines[0];
+    if (firstMachine) {
+      setSelectedMachineId(firstMachine.id);
+    }
+  }, [availableMachines, machine, selectedMachineId]);
 
   const submitCreateWorkOrder = async (): Promise<void> => {
     const partsCost = parseUsdAmount(partsCostInput);
@@ -2932,10 +2983,31 @@ function CreateWorkOrderScreen({
     const finalPartsCost = partsCost ?? 0;
     const finalLaborCost = laborCost ?? 0;
     const finalOtherCost = otherCost ?? 0;
+    if (!orgConnected || !organizationId) {
+      setTechNoteError('Complete onboarding first before saving maintenance records.');
+      return;
+    }
+    if (!selectedMachine?.id || !hasMachineContext) {
+      setTechNoteError('Choose a machine before saving this maintenance record.');
+      return;
+    }
+    const hasTechnicianEntry =
+      symptoms.trim().length > 0
+      || repairType.trim().length > 0
+      || errorCode.trim().length > 0
+      || notesInput.trim().length > 0
+      || finalPartsCost > 0
+      || finalLaborCost > 0
+      || finalOtherCost > 0;
+    if (!hasTechnicianEntry) {
+      setTechNoteError('Add symptoms, issue type, notes, an error code, or a cost before saving.');
+      return;
+    }
 
     setTechNoteError(null);
     setAssistantError(null);
     await onSave({
+      machineId: selectedMachine.id,
       status,
       maintenanceType,
       repairType: repairType.trim() || 'General Repair',
@@ -2951,15 +3023,21 @@ function CreateWorkOrderScreen({
   };
 
   const runAiDiagnosis = async (): Promise<void> => {
-    if (!canRunAssist) {
-      setAssistantError('Add symptoms, error code, and keep a machine selected before running AI diagnose.');
+    if (assistantLoading) {
+      return;
+    }
+    if (!hasMachineContext) {
+      setAssistantError('Keep this maintenance record tied to a machine before running AI Diagnose.');
+      return;
+    }
+    if (!symptoms.trim() || !errorCode.trim()) {
+      setAssistantError('Add symptoms and error code, then click AI Diagnose.');
       return;
     }
     if (!orgConnected || !organizationId) {
       setAssistantError('Complete onboarding first before using AI diagnostics.');
       return;
     }
-
     setAssistantError(null);
     setAssistantLoading(true);
     try {
@@ -2968,8 +3046,8 @@ function CreateWorkOrderScreen({
         machineModel: draftMachineModel,
         symptoms,
         errorCode,
-        machineId: machine?.id,
-        machineNumber: machine?.machineNumber,
+        machineId: selectedMachine?.id,
+        machineNumber: selectedMachine?.machineNumber,
       });
       setAssistantAnswer(result.answer);
       setAssistantGrounded(result.grounded);
@@ -2978,6 +3056,26 @@ function CreateWorkOrderScreen({
       setAssistantError(getErrorMessage(diagError, 'Could not generate AI diagnosis.'));
     } finally {
       setAssistantLoading(false);
+    }
+  };
+
+  const handleMachineStatusChange = async (nextStatus: MachineOperationalStatus): Promise<void> => {
+    const previousStatus = machineStatus;
+    if (!selectedMachine?.id) {
+      setMachineStatusError('Open this form from a machine to update machine status.');
+      return;
+    }
+    if (nextStatus === machineStatus || !onSetMachineStatus || !selectedMachine?.id) {
+      return;
+    }
+
+    setMachineStatusError(null);
+    setMachineStatus(nextStatus);
+    try {
+      await onSetMachineStatus(selectedMachine.id, nextStatus);
+    } catch {
+      setMachineStatus(previousStatus);
+      setMachineStatusError('Could not update machine status. Please try again.');
     }
   };
 
@@ -2992,6 +3090,38 @@ function CreateWorkOrderScreen({
         </div>
         <CalendarClock size={20} />
       </section>
+
+      {availableMachines.length > 0 && (
+        <section className="content-section compact">
+          <label className="review-field">
+            <span>Machine</span>
+            <select
+              value={selectedMachineId ?? ''}
+              onChange={(event) => {
+                setSelectedMachineId(event.target.value || null);
+                setMachineStatusError(null);
+              }}
+            >
+              <option value="" disabled>
+                Select machine
+              </option>
+              {availableMachines.map((machineOption) => (
+                <option key={machineOption.id} value={machineOption.id}>
+                  {machineOption.machineNumber} - {machineOption.make ?? ''} {machineOption.modelNumber ?? machineOption.type}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+      )}
+      {!machine && availableMachines.length === 0 && (
+        <section className="content-section compact">
+          <div className="auth-message">
+            <strong>No machine selected</strong>
+            <span>Open this form from a machine card or add a machine first.</span>
+          </div>
+        </section>
+      )}
 
       <section className="review-card">
         <div className="review-heading">
@@ -3014,12 +3144,42 @@ function CreateWorkOrderScreen({
               className="row-action-button row-action-ai"
               type="button"
               onClick={() => void runAiDiagnosis()}
-              disabled={assistantLoading || !canRunAssist}
+              disabled={assistantLoading}
             >
               <Sparkles size={14} /> {assistantLoading ? 'Diagnosing...' : 'AI Diagnose'}
             </button>
           </div>
         </label>
+      <section className="content-section compact">
+        <h2>Machine Status</h2>
+        <div className="machine-status-toggle detail-status-toggle" role="group" aria-label={`Machine status for ${draftMachineNumber}`}>
+          {(
+            [
+              ['running', 'Operational'],
+              ['needs-repair', 'Needs Repair'],
+              ['down', 'Down'],
+            ] as Array<[MachineOperationalStatus, string]>
+          ).map(([statusKey, statusLabel]) => (
+            <button
+              key={statusKey}
+              type="button"
+              className={`status-chip ${machineStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
+              onClick={() => void handleMachineStatusChange(statusKey)}
+              disabled={busy || !onSetMachineStatus}
+              aria-pressed={machineStatus === statusKey}
+            >
+              {statusLabel}
+            </button>
+          ))}
+        </div>
+        {machineStatusError && (
+          <div className="auth-message">
+            <strong>Machine status update</strong>
+            <span>{machineStatusError}</span>
+          </div>
+        )}
+        {!selectedMachine?.id && <p className="empty-state">Choose a machine first to update machine status.</p>}
+      </section>
         <div className="review-field-grid">
           <label className="review-field">
             <span>Issue Type</span>
@@ -3031,11 +3191,14 @@ function CreateWorkOrderScreen({
           </label>
           <label className="review-field">
             <span>Maintenance Category</span>
-            <input
+            <select
               value={maintenanceType}
-              placeholder="Example: Standard Repair, Preventive, Inspection"
               onChange={(event) => setMaintenanceType(event.target.value)}
-            />
+            >
+              <option value="Standard Repair">Standard Repair</option>
+              <option value="Preventive">Preventive</option>
+              <option value="Routine Maint">Routine Maint</option>
+            </select>
           </label>
         </div>
         <label className="review-field">
@@ -3073,7 +3236,7 @@ function CreateWorkOrderScreen({
         <div>
           <strong>AI Repair Assist</strong>
           <span>{assistantManualTitle || 'Manual-backed guidance (if available)'}</span>
-          <small>{assistantGrounded ? 'Manual-backed answer ready' : 'Click AI Diagnose after entering symptoms + error code'}</small>
+          <small>{assistantGrounded ? 'Manual-backed answer ready' : hasMachineContext ? 'Enter symptoms + error code, then click AI Diagnose' : 'Select machine first to use AI Diagnose'}</small>
         </div>
       </section>
 
@@ -3140,7 +3303,7 @@ function CreateWorkOrderScreen({
         </label>
         {techNoteError && (
           <div className="auth-message">
-            <strong>Cost input required</strong>
+            <strong>Maintenance record required</strong>
             <span>{techNoteError}</span>
           </div>
         )}
@@ -3371,18 +3534,26 @@ function WorkOrderDetailScreen({
   setActiveScreen,
   createdFromDraft,
   order,
+  machine,
   busy,
   error,
+  machineStatusBusy,
+  machineStatusError,
   orgConnected,
   onUpdateStatus,
+  onSetMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   createdFromDraft: boolean;
   order: WorkOrderSummary | null;
+  machine: UrgentMachine | null;
   busy: boolean;
   error: string | null;
+  machineStatusBusy: boolean;
+  machineStatusError: string | null;
   orgConnected: boolean;
   onUpdateStatus: (status: WorkOrderStatus) => Promise<void>;
+  onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
   const [selectedStatus, setSelectedStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
@@ -3396,6 +3567,8 @@ function WorkOrderDetailScreen({
     : order?.status === 'completed'
       ? 'Completed'
       : 'Planned';
+  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+  const machineOperationalStatus = machine ? toOperationalStatus(machine.status) : null;
 
   useEffect(() => {
     if (!order) {
@@ -3461,6 +3634,38 @@ function WorkOrderDetailScreen({
         </div>
       </section>
 
+      {machine && machineOperationalStatus && (
+        <section className="content-section compact">
+          <h2>Machine Status</h2>
+          <div className="machine-status-toggle detail-status-toggle" role="group" aria-label={`Machine status for ${machine.machineNumber}`}>
+            {(
+              [
+                ['running', 'Operational'],
+                ['needs-repair', 'Needs Repair'],
+                ['down', 'Down'],
+              ] as Array<[MachineOperationalStatus, string]>
+            ).map(([statusKey, statusLabel]) => (
+              <button
+                key={statusKey}
+                type="button"
+                className={`status-chip ${machineOperationalStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
+                onClick={() => void onSetMachineStatus(machine.id, statusKey)}
+                disabled={busy || machineStatusBusy}
+                aria-pressed={machineOperationalStatus === statusKey}
+              >
+                {statusLabel}
+              </button>
+            ))}
+          </div>
+          {machineStatusError && (
+            <div className="auth-message">
+              <strong>Machine status update</strong>
+              <span>{machineStatusError}</span>
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="review-card">
         <div className="review-heading">
           <h2>Maintenance Record Details</h2>
@@ -3508,7 +3713,19 @@ function WorkOrderDetailScreen({
       <section className="content-section compact">
         <h2>Photos</h2>
         <p className="empty-state">No photos attached yet.</p>
-        <button className="secondary-action full-width-action" type="button"><Plus size={18} /> Add Photo</button>
+        <button
+          className="secondary-action full-width-action"
+          type="button"
+          onClick={() => setPhotoMessage('Photo attachments are queued for the beta attachment workflow.')}
+        >
+          <Plus size={18} /> Add Photo
+        </button>
+        {photoMessage && (
+          <div className="auth-message">
+            <strong>Add Photo</strong>
+            <span>{photoMessage}</span>
+          </div>
+        )}
       </section>
 
       <section className="cost-card">
@@ -3566,12 +3783,14 @@ function RepairAssistScreen({
   assistPreset,
   onClearAssistPreset,
   onCreateWorkOrder,
+  defaultMachineId,
   orgConnected,
   organizationId,
 }: {
   assistPreset: AssistPreset | null;
   onClearAssistPreset: () => void;
-  onCreateWorkOrder: () => void;
+  onCreateWorkOrder: (machineId?: string | null) => void;
+  defaultMachineId: string | null;
   orgConnected: boolean;
   organizationId: string | null;
 }) {
@@ -3587,6 +3806,7 @@ function RepairAssistScreen({
   const [assistGrounded, setAssistGrounded] = useState(false);
   const [assistModel, setAssistModel] = useState<string | null>(null);
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
+  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const assistRequestIdRef = useRef(0);
   const activeAssistPreset = assistPresetDetached ? null : assistPreset;
 
@@ -3601,6 +3821,7 @@ function RepairAssistScreen({
     setAssistGrounded(false);
     setAssistModel(null);
     setAssistCitations([]);
+    setPhotoMessage(null);
   };
 
   useEffect(() => {
@@ -3727,19 +3948,33 @@ function RepairAssistScreen({
         </label>
         <div className="assist-photos">
           <PhotoTile variant="pump" large />
-          <button className="attach-photo" type="button"><Plus size={22} /> Add Photo</button>
+          <button className="attach-photo" type="button" onClick={() => setPhotoMessage('Photo analysis is queued for the beta attachment workflow.')}>
+            <Plus size={22} /> Add Photo
+          </button>
         </div>
+        {photoMessage && (
+          <div className="auth-message">
+            <strong>Add Photo</strong>
+            <span>{photoMessage}</span>
+          </div>
+        )}
         <div className="manual-toggle">
           <div>
             <strong>Use uploaded manual as source of truth</strong>
-            <span>{assistManualTitle ? `${assistManualTitle} selected` : 'Manual source will appear after generation'}</span>
+            <span>
+              {manualGroundingEnabled
+                ? assistManualTitle
+                  ? `${assistManualTitle} selected`
+                  : 'Manual grounding is on'
+                : 'Manual grounding is off'}
+            </span>
           </div>
           <button
             className={manualGroundingEnabled ? 'toggle-on' : 'toggle-off'}
             type="button"
             role="switch"
             aria-checked={manualGroundingEnabled}
-            aria-label="Manual grounding on"
+            aria-label={manualGroundingEnabled ? 'Manual grounding on' : 'Manual grounding off'}
             onClick={() => {
               setManualGroundingEnabled((value) => !value);
               clearAssistResult();
@@ -3820,7 +4055,9 @@ function RepairAssistScreen({
         <button className="secondary-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
           Refresh Guidance
         </button>
-        <button className="ai-action" type="button" onClick={onCreateWorkOrder}>Save as Maintenance Record</button>
+        <button className="ai-action" type="button" onClick={() => onCreateWorkOrder(defaultMachineId)}>
+          Save as Maintenance Record
+        </button>
       </div>
     </div>
   );

@@ -67,6 +67,23 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
   if (!user) {
     throw new Error('No authenticated user. Sign in before creating work orders.');
   }
+  const hasMachine = Boolean(input.organizationId.trim() && input.machineId && input.machineNumber.trim() && input.machineModel.trim());
+  const hasTechnicianEntry = Boolean(
+    input.symptoms?.trim()
+    || input.repairType?.trim()
+    || input.errorCode?.trim()
+    || input.notes?.trim()
+    || input.aiDiagnosis?.trim()
+    || input.partsCost > 0
+    || input.laborCost > 0
+    || (input.otherCost ?? 0) > 0,
+  );
+  if (!hasMachine) {
+    throw new Error('Choose a machine before saving this maintenance record.');
+  }
+  if (!hasTechnicianEntry) {
+    throw new Error('Add symptoms, issue type, notes, an error code, or a cost before saving.');
+  }
 
   const workOrderRef = await addDoc(collection(db, `organizations/${input.organizationId}/workOrders`), {
     number: createWorkOrderNumber(),
