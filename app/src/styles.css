@@ -2100,6 +2100,31 @@ button:focus-visible {
   border-right: 1px solid var(--divider);
 }
 
+.status-box {
+  border-right: 1px solid var(--divider);
+}
+
+.status-box:last-child {
+  border-right: 0;
+}
+
+.machine-status-box {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border-top: 1px solid var(--divider);
+  border-right: 0;
+}
+
+.inline-status-toggle {
+  margin-top: 8px;
+}
+
+.inline-status-toggle .status-chip {
+  min-height: 30px;
+  padding: 0 5px;
+  font-size: 11px;
+}
+
 .avatar {
   width: 34px;
   height: 34px;

@@ -3632,38 +3632,40 @@ function WorkOrderDetailScreen({
           <strong>{statusLabelText}</strong>
           <small>{order.due}</small>
         </div>
+        <div className="status-box machine-status-box">
+          <span>Machine Status</span>
+          {machine && machineOperationalStatus ? (
+            <div className="machine-status-toggle detail-status-toggle inline-status-toggle" role="group" aria-label={`Machine status for ${machine.machineNumber}`}>
+              {(
+                [
+                  ['running', 'Operational'],
+                  ['needs-repair', 'Needs Repair'],
+                  ['down', 'Down'],
+                ] as Array<[MachineOperationalStatus, string]>
+              ).map(([statusKey, statusLabel]) => (
+                <button
+                  key={statusKey}
+                  type="button"
+                  className={`status-chip ${machineOperationalStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
+                  onClick={() => void onSetMachineStatus(machine.id, statusKey)}
+                  disabled={busy || machineStatusBusy || !orgConnected}
+                  aria-pressed={machineOperationalStatus === statusKey}
+                >
+                  {statusLabel}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <small>Machine not linked</small>
+          )}
+        </div>
       </section>
 
-      {machine && machineOperationalStatus && (
-        <section className="content-section compact">
-          <h2>Machine Status</h2>
-          <div className="machine-status-toggle detail-status-toggle" role="group" aria-label={`Machine status for ${machine.machineNumber}`}>
-            {(
-              [
-                ['running', 'Operational'],
-                ['needs-repair', 'Needs Repair'],
-                ['down', 'Down'],
-              ] as Array<[MachineOperationalStatus, string]>
-            ).map(([statusKey, statusLabel]) => (
-              <button
-                key={statusKey}
-                type="button"
-                className={`status-chip ${machineOperationalStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
-                onClick={() => void onSetMachineStatus(machine.id, statusKey)}
-                disabled={busy || machineStatusBusy}
-                aria-pressed={machineOperationalStatus === statusKey}
-              >
-                {statusLabel}
-              </button>
-            ))}
-          </div>
-          {machineStatusError && (
-            <div className="auth-message">
-              <strong>Machine status update</strong>
-              <span>{machineStatusError}</span>
-            </div>
-          )}
-        </section>
+      {machineStatusError && (
+        <div className="auth-message">
+          <strong>Machine status update</strong>
+          <span>{machineStatusError}</span>
+        </div>
       )}
 
       <section className="review-card">

@@ -10,6 +10,7 @@ Use this as the running cleanup list before beta and before app-store packaging.
 - Decide whether GitHub Actions should deploy Storage rules along with Hosting and Firestore rules.
 - Keep targeted Functions deploys for LaundryOps backend changes; do not broad-deploy unrelated functions from this project.
 - Update Firebase rules tests and manual AI setup docs to match the current manual upload Storage path.
+- Before creating any new Google Cloud/Firebase project that uses Developer Connect Git repository connections, explicitly enable the Secret Manager API (`secretmanager.googleapis.com`). Starting September 21, 2026, Developer Connect will no longer auto-enable it. Existing LaundryOps projects should not need action from this notice.
 - Review Firebase Authentication users before launch. `Authentication > Users` contains login identities only, not companies or machine records.
 - Separate Firebase Auth users into three buckets before cleanup: keep, obvious test/delete, and inspect before deleting.
 - Remember that deleting a Firebase Auth user does not automatically delete that user's Firestore organization, machines, work orders, manuals, or billing-linked data.
