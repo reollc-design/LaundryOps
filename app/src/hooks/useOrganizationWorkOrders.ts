@@ -184,7 +184,7 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             otherCost: formatUsd(otherCostValue),
             maintenanceType: asString(data.maintenanceType) ?? undefined,
             repairType: asString(data.repairType) ?? asString(data.title) ?? undefined,
-            symptoms: asString(data.symptoms) ?? asString(data.title) ?? undefined,
+            symptoms: asString(data.symptoms) ?? undefined,
             errorCode: asString(data.errorCode) ?? undefined,
             notes: asString(data.notes) ?? undefined,
             aiDiagnosis: asString(data.aiDiagnosis) ?? undefined,

@@ -1,5 +1,5 @@
 import type { Auth } from 'firebase/auth';
-import { addDoc, collection, doc, deleteDoc, serverTimestamp, updateDoc, type Firestore } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, deleteField, doc, serverTimestamp, updateDoc, type Firestore } from 'firebase/firestore';
 import type { WorkOrderStatus } from '../data';
 import { getFirebaseClient } from './client';
 
@@ -136,7 +136,57 @@ export async function updateWorkOrderStatus(input: UpdateWorkOrderStatusInput): 
     statusLabel: statusLabel(input.status),
     updatedAt: serverTimestamp(),
     updatedBy: user.uid,
-    ...(input.status === 'completed' ? { completedAt: serverTimestamp() } : {}),
+    completedAt: input.status === 'completed' ? serverTimestamp() : deleteField(),
+  });
+}
+
+export interface UpdateWorkOrderDetailsInput {
+  organizationId: string;
+  workOrderId: string;
+  title: string;
+  status: WorkOrderStatus;
+  assigneeName: string;
+  dueLabel?: string;
+  repairType?: string;
+  maintenanceType?: string;
+  symptoms?: string;
+  errorCode?: string;
+  notes?: string;
+  aiDiagnosis?: string | null;
+  partsCost: number;
+  laborCost: number;
+  otherCost: number;
+  totalCostLabel: string;
+}
+
+export async function updateWorkOrderDetails(input: UpdateWorkOrderDetailsInput): Promise<void> {
+  const { auth, db } = requireFirebaseAuth();
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('No authenticated user. Sign in before updating work orders.');
+  }
+
+  const workOrderRef = doc(db, `organizations/${input.organizationId}/workOrders/${input.workOrderId}`);
+  await updateDoc(workOrderRef, {
+    title: input.title,
+    status: input.status,
+    statusLabel: statusLabel(input.status),
+    assigneeName: input.assigneeName,
+    dueLabel: input.dueLabel ?? null,
+    repairType: input.repairType ?? null,
+    maintenanceType: input.maintenanceType ?? null,
+    symptoms: input.symptoms ?? null,
+    errorCode: input.errorCode ?? null,
+    notes: input.notes ?? null,
+    aiDiagnosis: input.aiDiagnosis ?? null,
+    partsCost: input.partsCost,
+    laborCost: input.laborCost,
+    otherCost: input.otherCost,
+    totalCost: input.partsCost + input.laborCost + input.otherCost,
+    estimate: input.totalCostLabel,
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
+    completedAt: input.status === 'completed' ? serverTimestamp() : deleteField(),
   });
 }
 

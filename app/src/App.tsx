@@ -58,7 +58,7 @@ import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCu
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
-import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderStatus } from './firebase/workOrders';
+import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
@@ -384,6 +384,20 @@ interface WorkOrderCostEntry {
   aiDiagnosis: string;
 }
 
+interface WorkOrderDetailsEntry {
+  status: 'planned' | 'in-progress' | 'completed';
+  maintenanceType: string;
+  repairType: string;
+  technicianName: string;
+  symptoms: string;
+  errorCode: string;
+  partsCost: number;
+  laborCost: number;
+  otherCost: number;
+  notes: string;
+  aiDiagnosis: string;
+}
+
 function parseUsdAmount(value: string): number | null {
   const sanitized = value.replace(/[^0-9.]/g, '').trim();
   if (!sanitized) {
@@ -409,6 +423,41 @@ function formatUsdAmount(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function editableWorkOrderSignature(entry: WorkOrderDetailsEntry): string {
+  return JSON.stringify({
+    status: entry.status,
+    maintenanceType: entry.maintenanceType.trim(),
+    repairType: entry.repairType.trim() || 'General Repair',
+    technicianName: entry.technicianName.trim() || 'Unassigned',
+    symptoms: entry.symptoms.trim(),
+    errorCode: entry.errorCode.trim(),
+    partsCost: formatUsdAmount(entry.partsCost),
+    laborCost: formatUsdAmount(entry.laborCost),
+    otherCost: formatUsdAmount(entry.otherCost),
+    notes: entry.notes.trim(),
+    aiDiagnosis: entry.aiDiagnosis.trim(),
+  });
+}
+
+function workOrderSummarySignature(order: WorkOrderSummary): string {
+  const status = order.status === 'in-progress' || order.status === 'completed' || order.status === 'planned'
+    ? order.status
+    : 'planned';
+  return JSON.stringify({
+    status,
+    maintenanceType: (order.maintenanceType ?? 'Standard Repair').trim(),
+    repairType: (order.repairType ?? 'General Repair').trim(),
+    technicianName: (order.assignee ?? 'Unassigned').trim() || 'Unassigned',
+    symptoms: (order.symptoms ?? '').trim(),
+    errorCode: (order.errorCode ?? '').trim(),
+    partsCost: order.partsCost ?? '$0.00',
+    laborCost: order.laborCost ?? '$0.00',
+    otherCost: order.otherCost ?? '$0.00',
+    notes: (order.notes ?? '').trim(),
+    aiDiagnosis: (order.aiDiagnosis ?? '').trim(),
+  });
 }
 
 export function App() {
@@ -776,29 +825,49 @@ export function App() {
       setWorkOrderBusy(false);
     }
   };
-  const handleUpdateSelectedWorkOrderStatus = async (status: WorkOrderStatus): Promise<void> => {
+  const handleUpdateSelectedWorkOrderDetails = async (entry: WorkOrderDetailsEntry): Promise<void> => {
     if (!selectedWorkOrder) {
       return;
     }
 
     if (!orgConnected || !defaultOrganizationId) {
-      setActiveScreen('work-orders');
+      setWorkOrderError('Complete onboarding first before saving maintenance records.');
       return;
     }
+
+    const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost) + Math.max(0, entry.otherCost);
+    const title = [entry.repairType.trim(), entry.symptoms.trim()]
+      .filter(Boolean)
+      .join(' / ') || selectedWorkOrder.title || 'Maintenance record';
 
     setWorkOrderError(null);
     setWorkOrderBusy(true);
     try {
-      await updateWorkOrderStatus({
+      await updateWorkOrderDetails({
         organizationId: defaultOrganizationId,
         workOrderId: selectedWorkOrder.id,
-        status,
+        title,
+        status: entry.status,
+        assigneeName: entry.technicianName.trim() || 'Unassigned',
+        dueLabel: entry.maintenanceType,
+        maintenanceType: entry.maintenanceType,
+        repairType: entry.repairType.trim() || 'General Repair',
+        symptoms: entry.symptoms.trim(),
+        errorCode: entry.errorCode.trim(),
+        notes: entry.notes.trim(),
+        aiDiagnosis: entry.aiDiagnosis.trim(),
+        partsCost: entry.partsCost,
+        laborCost: entry.laborCost,
+        otherCost: entry.otherCost,
+        totalCostLabel: formatUsdAmount(totalCost),
       });
-      if (status === 'completed') {
+      if (entry.status === 'completed') {
         setCreatedFromDraft(false);
       }
     } catch (error) {
-      setWorkOrderError(getErrorMessage(error, 'Could not update maintenance record status. Try again.'));
+      const message = getErrorMessage(error, 'Could not save maintenance record. Try again.');
+      setWorkOrderError(message);
+      throw new Error(message);
     } finally {
       setWorkOrderBusy(false);
     }
@@ -1004,7 +1073,7 @@ export function App() {
                     machineStatusBusy={selectedWorkOrderMachine ? machineStatusBusyId === selectedWorkOrderMachine.id : false}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
-                    onUpdateStatus={handleUpdateSelectedWorkOrderStatus}
+                    onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
                 )}
@@ -3540,7 +3609,7 @@ function WorkOrderDetailScreen({
   machineStatusBusy,
   machineStatusError,
   orgConnected,
-  onUpdateStatus,
+  onUpdateDetails,
   onSetMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
@@ -3552,37 +3621,134 @@ function WorkOrderDetailScreen({
   machineStatusBusy: boolean;
   machineStatusError: string | null;
   orgConnected: boolean;
-  onUpdateStatus: (status: WorkOrderStatus) => Promise<void>;
+  onUpdateDetails: (entry: WorkOrderDetailsEntry) => Promise<void>;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
   const [selectedStatus, setSelectedStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
-  const statusButtonLabel = selectedStatus === 'in-progress'
-    ? 'Save In Progress'
-    : selectedStatus === 'completed'
-      ? 'Save Completed'
-      : 'Save Planned';
   const statusLabelText = order?.status === 'in-progress'
     ? 'In Progress'
     : order?.status === 'completed'
       ? 'Completed'
       : 'Planned';
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+  const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
+  const [repairType, setRepairType] = useState('');
+  const [technicianName, setTechnicianName] = useState('');
+  const [symptoms, setSymptoms] = useState('');
+  const [errorCode, setErrorCode] = useState('');
+  const [partsCostInput, setPartsCostInput] = useState('');
+  const [laborCostInput, setLaborCostInput] = useState('');
+  const [otherCostInput, setOtherCostInput] = useState('');
+  const [notesInput, setNotesInput] = useState('');
+  const [aiDiagnosisInput, setAiDiagnosisInput] = useState('');
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [isDetailDirty, setIsDetailDirty] = useState(false);
+  const [loadedDetailOrderId, setLoadedDetailOrderId] = useState<string | null>(null);
+  const [pendingSavedSignature, setPendingSavedSignature] = useState<string | null>(null);
   const machineOperationalStatus = machine ? toOperationalStatus(machine.status) : null;
+  const parsedPartsCost = parseUsdAmount(partsCostInput);
+  const parsedLaborCost = parseUsdAmount(laborCostInput);
+  const parsedOtherCost = parseUsdAmount(otherCostInput);
+  const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
+  const detailInputsDisabled = busy || !orgConnected || pendingSavedSignature !== null;
 
   useEffect(() => {
     if (!order) {
       setSelectedStatus('planned');
+      setMaintenanceType('Standard Repair');
+      setRepairType('');
+      setTechnicianName('');
+      setSymptoms('');
+      setErrorCode('');
+      setPartsCostInput('');
+      setLaborCostInput('');
+      setOtherCostInput('');
+      setNotesInput('');
+      setAiDiagnosisInput('');
+      setIsDetailDirty(false);
+      setLoadedDetailOrderId(null);
+      setPendingSavedSignature(null);
+      return;
+    }
+
+    const orderSignature = workOrderSummarySignature(order);
+    const confirmedPendingSave = pendingSavedSignature === orderSignature;
+    if (loadedDetailOrderId === order.id && isDetailDirty && !confirmedPendingSave) {
       return;
     }
 
     if (order.status === 'in-progress' || order.status === 'completed' || order.status === 'planned') {
       setSelectedStatus(order.status);
+    } else {
+      setSelectedStatus('planned');
+    }
+    setMaintenanceType(order.maintenanceType ?? 'Standard Repair');
+    setRepairType(order.repairType ?? '');
+    setTechnicianName(order.assignee ?? '');
+    setSymptoms(order.symptoms ?? '');
+    setErrorCode(order.errorCode ?? '');
+    setPartsCostInput(order.partsCost ?? '');
+    setLaborCostInput(order.laborCost ?? '');
+    setOtherCostInput(order.otherCost ?? '');
+    setNotesInput(order.notes ?? '');
+    setAiDiagnosisInput(order.aiDiagnosis ?? '');
+    setDetailError(null);
+    setLoadedDetailOrderId(order.id);
+    setIsDetailDirty(false);
+    if (confirmedPendingSave) {
+      setPendingSavedSignature(null);
+    }
+  }, [
+    isDetailDirty,
+    loadedDetailOrderId,
+    order?.aiDiagnosis,
+    order?.assignee,
+    order?.errorCode,
+    order?.id,
+    order?.laborCost,
+    order?.maintenanceType,
+    order?.notes,
+    order?.otherCost,
+    order?.partsCost,
+    order?.repairType,
+    order?.status,
+    order?.symptoms,
+    pendingSavedSignature,
+  ]);
+
+  const submitUpdateDetails = async (): Promise<void> => {
+    const partsCost = parseUsdAmount(partsCostInput);
+    const laborCost = parseUsdAmount(laborCostInput);
+    const otherCost = parseUsdAmount(otherCostInput);
+    const hasInvalidCostInput = [partsCostInput, laborCostInput, otherCostInput].some((value) => value.trim() !== '' && parseUsdAmount(value) === null);
+    if (hasInvalidCostInput) {
+      setDetailError('Enter valid numbers for parts, labor, and other cost fields.');
       return;
     }
 
-    setSelectedStatus('planned');
-  }, [order?.id, order?.status]);
+    const savedEntry = {
+      status: selectedStatus,
+      maintenanceType,
+      repairType,
+      technicianName,
+      symptoms,
+      errorCode,
+      partsCost: partsCost ?? 0,
+      laborCost: laborCost ?? 0,
+      otherCost: otherCost ?? 0,
+      notes: notesInput,
+      aiDiagnosis: aiDiagnosisInput,
+    };
+
+    setDetailError(null);
+    try {
+      await onUpdateDetails(savedEntry);
+      setPendingSavedSignature(editableWorkOrderSignature(savedEntry));
+    } catch {
+      // The parent handler displays the Firestore error in the shared record banner.
+    }
+  };
 
   if (!order) {
     return (
@@ -3671,19 +3837,86 @@ function WorkOrderDetailScreen({
       <section className="review-card">
         <div className="review-heading">
           <h2>Maintenance Record Details</h2>
-          <span>Review details and update the status.</span>
+          <span>Edit repair details, costs, notes, and status.</span>
         </div>
-        <InfoBlock label="Maintenance Category" value={order.maintenanceType ?? 'Standard Repair'} />
-        <InfoBlock label="Issue Type" value={order.repairType ?? 'General Repair'} />
-        <InfoBlock label="Symptoms / Issues" value={order.symptoms ?? order.title} />
-        <InfoBlock label="Error Code" value={order.errorCode ?? 'None provided'} />
+        <div className="review-field-grid">
+          <label className="review-field">
+            <span>Maintenance Category</span>
+            <select
+              value={maintenanceType}
+              onChange={(event) => {
+                setMaintenanceType(event.target.value);
+                setIsDetailDirty(true);
+              }}
+              disabled={detailInputsDisabled}
+            >
+              <option value="Standard Repair">Standard Repair</option>
+              <option value="Preventive">Preventive</option>
+              <option value="Routine Maint">Routine Maint</option>
+            </select>
+          </label>
+          <label className="review-field">
+            <span>Issue Type</span>
+            <input
+              value={repairType}
+              placeholder="Example: door strike, leaks, no spin"
+              onChange={(event) => {
+                setRepairType(event.target.value);
+                setIsDetailDirty(true);
+              }}
+              disabled={detailInputsDisabled}
+            />
+          </label>
+        </div>
+        <label className="review-field">
+          <span>Symptoms / Issues</span>
+          <textarea
+            value={symptoms}
+            rows={3}
+            placeholder="Describe what the machine is doing"
+            onChange={(event) => {
+              setSymptoms(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
+        <div className="review-field-grid">
+          <label className="review-field">
+            <span>Error Code</span>
+            <input
+              value={errorCode}
+              placeholder="Example: E DL"
+              onChange={(event) => {
+                setErrorCode(event.target.value);
+                setIsDetailDirty(true);
+              }}
+              disabled={detailInputsDisabled}
+            />
+          </label>
+          <label className="review-field">
+            <span>Technician</span>
+            <input
+              value={technicianName}
+              placeholder="Technician handling this record"
+              onChange={(event) => {
+                setTechnicianName(event.target.value);
+                setIsDetailDirty(true);
+              }}
+              disabled={detailInputsDisabled}
+            />
+          </label>
+        </div>
         <InfoBlock label="Machine Model" value={order.machineModel} />
         <label className="review-field">
           <span>Record Status</span>
           <select
             value={selectedStatus}
-            onChange={(event) => setSelectedStatus(event.target.value as 'planned' | 'in-progress' | 'completed')}
-            disabled={busy || !orgConnected}
+            onChange={(event) => {
+              setSelectedStatus(event.target.value as 'planned' | 'in-progress' | 'completed');
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
           >
             {statusOptions.map((statusValue) => (
               <option key={statusValue} value={statusValue}>
@@ -3696,20 +3929,36 @@ function WorkOrderDetailScreen({
 
       <section className="content-section compact">
         <h2>Technician Notes</h2>
-        <p className="empty-state">{order.notes ?? 'No technician notes yet.'}</p>
+        <label className="review-field">
+          <span>Notes</span>
+          <textarea
+            value={notesInput}
+            rows={4}
+            placeholder="Work notes, observations, part numbers, follow-up items"
+            onChange={(event) => {
+              setNotesInput(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
       </section>
 
       <section className="content-section compact">
         <h2>AI Diagnosis</h2>
-        {order.aiDiagnosis ? (
-          <div className="ai-diagnosis-detail">
-            {order.aiDiagnosis.split('\n').filter(Boolean).map((line, index) => (
-              <p key={`${line}-${index}`}>{line}</p>
-            ))}
-          </div>
-        ) : (
-          <p className="empty-state">No AI guidance attached.</p>
-        )}
+        <label className="review-field">
+          <span>Diagnosis Result</span>
+          <textarea
+            value={aiDiagnosisInput}
+            rows={5}
+            placeholder="AI diagnosis can be saved here when used."
+            onChange={(event) => {
+              setAiDiagnosisInput(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
       </section>
 
       <section className="content-section compact">
@@ -3732,21 +3981,48 @@ function WorkOrderDetailScreen({
 
       <section className="cost-card">
         <h2>Parts & Cost</h2>
-        <div className="cost-row">
+        <label className="review-field">
           <span>Parts Cost</span>
-          <strong>{order.partsCost ?? '$0.00'}</strong>
-        </div>
-        <div className="cost-row">
+          <input
+            value={partsCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => {
+              setPartsCostInput(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
+        <label className="review-field">
           <span>Labor Cost</span>
-          <strong>{order.laborCost ?? '$0.00'}</strong>
-        </div>
-        <div className="cost-row">
+          <input
+            value={laborCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => {
+              setLaborCostInput(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
+        <label className="review-field">
           <span>Other Cost</span>
-          <strong>{order.otherCost ?? '$0.00'}</strong>
-        </div>
+          <input
+            value={otherCostInput}
+            inputMode="decimal"
+            placeholder="0.00"
+            onChange={(event) => {
+              setOtherCostInput(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+          />
+        </label>
         <div className="cost-total">
           <span>Total Cost</span>
-          <strong>{order.estimate}</strong>
+          <strong>{formatUsdAmount(totalCost)}</strong>
         </div>
       </section>
 
@@ -3758,24 +4034,25 @@ function WorkOrderDetailScreen({
 
       {error && (
         <div className="auth-message">
-          <strong>Could not update maintenance record</strong>
+          <strong>Could not save maintenance record</strong>
           <span>{error}</span>
+        </div>
+      )}
+
+      {detailError && (
+        <div className="auth-message">
+          <strong>Maintenance record details</strong>
+          <span>{detailError}</span>
         </div>
       )}
 
       <button
         className="primary-action sticky-action"
         type="button"
-        disabled={busy || selectedStatus === order.status || !orgConnected}
-        onClick={() => {
-          if (orgConnected) {
-            void onUpdateStatus(selectedStatus);
-            return;
-          }
-          setActiveScreen('work-orders');
-        }}
+        disabled={detailInputsDisabled}
+        onClick={() => void submitUpdateDetails()}
       >
-        <Hourglass size={19} /> {busy ? 'Saving...' : statusButtonLabel}
+        <ClipboardCheck size={19} /> {busy ? 'Saving...' : 'Save Maintenance Record'}
       </button>
     </div>
   );
