@@ -8,7 +8,13 @@
         "laundryops": [
           "laundryops-maintenance-app"
         ]
+      },
+      "storage": {
+        "laundryopsStorage": [
+          "laundromat-maintenance-app.firebasestorage.app"
+        ]
       }
     }
-  }
+  },
+  "etags": {}
 }

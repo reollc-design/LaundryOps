@@ -92,6 +92,12 @@ function normalizeMachineModelKey(value: string): string {
     .trim();
 }
 
+function compactMachineModelKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
 function sanitizeFilename(value: string): string {
   const cleaned = value
     .replace(/[^a-zA-Z0-9._-]/g, '-')
@@ -158,6 +164,7 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
     title: fileName,
     machineModel,
     machineModelKey: normalizeMachineModelKey(machineModel),
+    machineModelCompactKey: compactMachineModelKey(machineModel),
     status: 'processing',
     source: 'Uploaded from LaundryOps',
     storagePath,

@@ -148,6 +148,32 @@ const workOrderPriorityFilters: { key: WorkOrderPriorityFilter; label: string }[
 
 const reportPeriods = ['This Week', 'This Month', '90 Days'];
 
+function dateOnlyUtcEpoch(date: Date): number {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function getReportPeriodCutoff(period: string, now = Date.now()): number | null {
+  const current = new Date(now);
+
+  if (period === 'This Week') {
+    const weekStart = new Date(current);
+    weekStart.setDate(current.getDate() - 7);
+    return dateOnlyUtcEpoch(weekStart);
+  }
+
+  if (period === 'This Month') {
+    return Date.UTC(current.getFullYear(), current.getMonth(), 1);
+  }
+
+  if (period === '90 Days') {
+    const ninetyDayStart = new Date(current);
+    ninetyDayStart.setDate(current.getDate() - 90);
+    return dateOnlyUtcEpoch(ninetyDayStart);
+  }
+
+  return null;
+}
+
 function getInitialScreen(): ScreenKey {
   const requestedScreen = new URLSearchParams(window.location.search).get('screen');
   return requestedScreen && requestedScreen in screenTitles ? (requestedScreen as ScreenKey) : 'welcome';
@@ -370,6 +396,7 @@ function machineStatusCounts(machines: UrgentMachine[]): {
 }
 
 interface WorkOrderCostEntry {
+  maintenanceDate: string;
   machineId?: string | null;
   status: 'planned' | 'in-progress' | 'completed';
   maintenanceType: string;
@@ -385,6 +412,7 @@ interface WorkOrderCostEntry {
 }
 
 interface WorkOrderDetailsEntry {
+  maintenanceDate: string;
   status: 'planned' | 'in-progress' | 'completed';
   maintenanceType: string;
   repairType: string;
@@ -427,6 +455,7 @@ function formatUsdAmount(value: number): string {
 
 function editableWorkOrderSignature(entry: WorkOrderDetailsEntry): string {
   return JSON.stringify({
+    maintenanceDate: entry.maintenanceDate,
     status: entry.status,
     maintenanceType: entry.maintenanceType.trim(),
     repairType: entry.repairType.trim() || 'General Repair',
@@ -446,6 +475,7 @@ function workOrderSummarySignature(order: WorkOrderSummary): string {
     ? order.status
     : 'planned';
   return JSON.stringify({
+    maintenanceDate: order.maintenanceDate ?? '',
     status,
     maintenanceType: (order.maintenanceType ?? 'Standard Repair').trim(),
     repairType: (order.repairType ?? 'General Repair').trim(),
@@ -468,6 +498,17 @@ function parseCurrencyString(value: string | undefined): number {
   const normalized = value.replace(/[^0-9.-]/g, '');
   const parsed = Number.parseFloat(normalized);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toDateInputValue(value: string | undefined): string {
+  if (!value) {
+    return '';
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return '';
+  }
+  return new Date(parsed).toISOString().slice(0, 10);
 }
 
 export function App() {
@@ -751,15 +792,16 @@ export function App() {
       return;
     }
 
+    if (!orgConnected || !defaultOrganizationId) {
+      setMachineStatusError('Complete onboarding first before updating machine status.');
+      return;
+    }
+
     setMachineStatusError(null);
     setMachineStatusOverrides((previous) => ({
       ...previous,
       [machineId]: status,
     }));
-
-    if (!orgConnected || !defaultOrganizationId) {
-      return;
-    }
 
     setMachineStatusBusyId(machineId);
     try {
@@ -814,7 +856,8 @@ export function App() {
         status: entry.status,
         priority: 'Standard',
         assigneeName: entry.technicianName || aiWorkOrderDraft.assignee,
-        dueLabel: entry.maintenanceType,
+        maintenanceDate: entry.maintenanceDate,
+        dueLabel: entry.maintenanceDate,
         maintenanceType: entry.maintenanceType,
         repairType: entry.repairType,
         symptoms: entry.symptoms,
@@ -858,8 +901,9 @@ export function App() {
         workOrderId: selectedWorkOrder.id,
         title,
         status: entry.status,
+        maintenanceDate: entry.maintenanceDate,
         assigneeName: entry.technicianName.trim() || 'Unassigned',
-        dueLabel: entry.maintenanceType,
+        dueLabel: entry.maintenanceDate,
         maintenanceType: entry.maintenanceType,
         repairType: entry.repairType.trim() || 'General Repair',
         symptoms: entry.symptoms.trim(),
@@ -1019,6 +1063,7 @@ export function App() {
                     machine={selectedMachine}
                     onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
+                    onOpenMaintenanceRecords={() => setActiveScreen('work-orders')}
                   />
                 )}
                 {activeScreen === 'manuals' && (
@@ -1182,8 +1227,8 @@ function WelcomeScreen({
 
       <section className="welcome-hero">
         <div>
-          <span>14-Day Free Trial</span>
-          <h1>More uptime. More revenue.</h1>
+          <span className="trial-badge">14-Day Free Trial</span>
+          <h1>Keep LaundryOps running. <span>More uptime.</span></h1>
           <p>Track machines, maintenance records, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
         </div>
         <div className="welcome-machine">
@@ -2454,11 +2499,13 @@ function MachineDetailScreen({
   machine,
   onCreateWorkOrder,
   onOpenAiAssist,
+  onOpenMaintenanceRecords,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   machine: UrgentMachine | null;
   onCreateWorkOrder: () => void;
   onOpenAiAssist: () => void;
+  onOpenMaintenanceRecords: () => void;
 }) {
   const machineStatus = machine ? toOperationalStatus(machine.status) : 'running';
   const machineStatusText = machine ? machineStatusLabel(machineStatus) : 'Operational';
@@ -2520,7 +2567,9 @@ function MachineDetailScreen({
       <section className="content-section">
         <div className="section-heading">
           <h2>Maintenance History</h2>
-          <button type="button">See all <ChevronRight size={14} /></button>
+          <button type="button" onClick={onOpenMaintenanceRecords}>
+            See all <ChevronRight size={14} />
+          </button>
         </div>
         <div className="timeline-list">
           {machineHistory.map((event) => (
@@ -2997,6 +3046,7 @@ function CreateWorkOrderScreen({
   const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
   const [repairType, setRepairType] = useState('');
   const [status, setStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
+  const [maintenanceDate, setMaintenanceDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [technicianName, setTechnicianName] = useState(aiWorkOrderDraft.assignee);
   const [symptoms, setSymptoms] = useState('');
   const [errorCode, setErrorCode] = useState('');
@@ -3045,17 +3095,6 @@ function CreateWorkOrderScreen({
     setMachineStatus('running');
   }, [machine?.id, machine?.status, selectedMachine?.id, selectedMachine?.status]);
 
-  useEffect(() => {
-    if (machine || selectedMachineId) {
-      return;
-    }
-
-    const firstMachine = availableMachines[0];
-    if (firstMachine) {
-      setSelectedMachineId(firstMachine.id);
-    }
-  }, [availableMachines, machine, selectedMachineId]);
-
   const submitCreateWorkOrder = async (): Promise<void> => {
     const partsCost = parseUsdAmount(partsCostInput);
     const laborCost = parseUsdAmount(laborCostInput);
@@ -3076,6 +3115,10 @@ function CreateWorkOrderScreen({
       setTechNoteError('Choose a machine before saving this maintenance record.');
       return;
     }
+    if (!maintenanceDate.trim()) {
+      setTechNoteError('Set a maintenance date for this maintenance record.');
+      return;
+    }
     const hasTechnicianEntry =
       symptoms.trim().length > 0
       || repairType.trim().length > 0
@@ -3093,6 +3136,7 @@ function CreateWorkOrderScreen({
     setAssistantError(null);
     await onSave({
       machineId: selectedMachine.id,
+      maintenanceDate,
       status,
       maintenanceType,
       repairType: repairType.trim() || 'General Repair',
@@ -3199,6 +3243,20 @@ function CreateWorkOrderScreen({
           </label>
         </section>
       )}
+      <section className="content-section compact">
+        <label className="review-field">
+          <span>Maintenance Date</span>
+          <input
+            type="date"
+            value={maintenanceDate}
+            onChange={(event) => {
+              setMaintenanceDate(event.target.value);
+              setTechNoteError(null);
+            }}
+            required
+          />
+        </label>
+      </section>
       {!machine && availableMachines.length === 0 && (
         <section className="content-section compact">
           <div className="auth-message">
@@ -3648,6 +3706,7 @@ function WorkOrderDetailScreen({
       ? 'Completed'
       : 'Planned';
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+  const [maintenanceDate, setMaintenanceDate] = useState('');
   const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
   const [repairType, setRepairType] = useState('');
   const [technicianName, setTechnicianName] = useState('');
@@ -3672,6 +3731,7 @@ function WorkOrderDetailScreen({
   useEffect(() => {
     if (!order) {
       setSelectedStatus('planned');
+      setMaintenanceDate('');
       setMaintenanceType('Standard Repair');
       setRepairType('');
       setTechnicianName('');
@@ -3699,6 +3759,7 @@ function WorkOrderDetailScreen({
     } else {
       setSelectedStatus('planned');
     }
+    setMaintenanceDate(toDateInputValue(order.maintenanceDate));
     setMaintenanceType(order.maintenanceType ?? 'Standard Repair');
     setRepairType(order.repairType ?? '');
     setTechnicianName(order.assignee ?? '');
@@ -3728,6 +3789,7 @@ function WorkOrderDetailScreen({
     order?.otherCost,
     order?.partsCost,
     order?.repairType,
+    order?.maintenanceDate,
     order?.status,
     order?.symptoms,
     pendingSavedSignature,
@@ -3742,8 +3804,13 @@ function WorkOrderDetailScreen({
       setDetailError('Enter valid numbers for parts, labor, and other cost fields.');
       return;
     }
+    if (!maintenanceDate.trim()) {
+      setDetailError('Set a maintenance date for this maintenance record.');
+      return;
+    }
 
     const savedEntry = {
+      maintenanceDate,
       status: selectedStatus,
       maintenanceType,
       repairType,
@@ -3841,6 +3908,22 @@ function WorkOrderDetailScreen({
             <small>Machine not linked</small>
           )}
         </div>
+      </section>
+
+      <section className="content-section compact">
+        <label className="review-field">
+          <span>Maintenance Date</span>
+          <input
+            type="date"
+            value={maintenanceDate}
+            onChange={(event) => {
+              setMaintenanceDate(event.target.value);
+              setIsDetailDirty(true);
+            }}
+            disabled={detailInputsDisabled}
+            required
+          />
+        </label>
       </section>
 
       {machineStatusError && (
@@ -4350,7 +4433,17 @@ function RepairAssistScreen({
         <button className="secondary-action" type="button" onClick={() => void runRepairAssist()} disabled={assistBusy}>
           Refresh Guidance
         </button>
-        <button className="ai-action" type="button" onClick={() => onCreateWorkOrder(defaultMachineId)}>
+        <button
+          className="ai-action"
+          type="button"
+          onClick={() => {
+            if (!defaultMachineId) {
+              setAssistError('Open Repair Assist from a machine card, or type the machine model before saving as a maintenance record.');
+              return;
+            }
+            onCreateWorkOrder(defaultMachineId);
+          }}
+        >
           Save as Maintenance Record
         </button>
       </div>
@@ -4368,20 +4461,39 @@ function ReportsScreen({
   machines: UrgentMachine[];
 }) {
   const [activePeriod, setActivePeriod] = useState(reportPeriods[1]);
+  const activePeriodCutoff = useMemo(() => getReportPeriodCutoff(activePeriod), [activePeriod]);
+  const reportWorkOrders = useMemo(
+    () => workOrders.filter((order) => {
+      if (order.maintenanceDateEpoch == null) {
+        return false;
+      }
+      if (activePeriodCutoff === null) {
+        return true;
+      }
+      return order.maintenanceDateEpoch >= activePeriodCutoff;
+    }),
+    [activePeriodCutoff, workOrders],
+  );
   const liveTotalCost = useMemo(
-    () => workOrders.reduce((total, order) => total + parseCurrencyString(order.partsCost) + parseCurrencyString(order.laborCost) + parseCurrencyString(order.otherCost), 0),
-    [workOrders],
+    () => reportWorkOrders.reduce(
+      (total, order) => total
+        + parseCurrencyString(order.partsCost)
+        + parseCurrencyString(order.laborCost)
+        + parseCurrencyString(order.otherCost),
+      0,
+    ),
+    [reportWorkOrders],
   );
   const liveCompletedCount = useMemo(
-    () => workOrders.filter((order) => order.status === 'completed').length,
-    [workOrders],
+    () => reportWorkOrders.filter((order) => order.status === 'completed').length,
+    [reportWorkOrders],
   );
   const liveInProgressCount = useMemo(
-    () => workOrders.filter((order) => order.status === 'in-progress').length,
-    [workOrders],
+    () => reportWorkOrders.filter((order) => order.status === 'in-progress').length,
+    [reportWorkOrders],
   );
   const liveMetrics = useMemo<ReportMetric[]>(() => {
-    if (!orgConnected || workOrders.length === 0) {
+    if (!orgConnected || reportWorkOrders.length === 0) {
       return [];
     }
 
@@ -4389,7 +4501,7 @@ function ReportsScreen({
       {
         id: 'live-records',
         label: 'Maintenance Records',
-        value: String(workOrders.length),
+        value: String(reportWorkOrders.length),
         change: `${liveCompletedCount} completed`,
         tone: 'primary',
       },
@@ -4408,13 +4520,13 @@ function ReportsScreen({
         tone: 'waiting',
       },
     ];
-  }, [liveCompletedCount, liveInProgressCount, liveTotalCost, orgConnected, workOrders.length]);
+  }, [liveCompletedCount, liveInProgressCount, liveTotalCost, orgConnected, reportWorkOrders.length]);
   const liveSpendRows = useMemo<ReportRow[]>(() => {
-    if (!orgConnected || workOrders.length === 0) {
+    if (!orgConnected || reportWorkOrders.length === 0) {
       return [];
     }
 
-    return [...workOrders]
+    return [...reportWorkOrders]
       .map((order): ReportRow => {
         const total = parseCurrencyString(order.partsCost) + parseCurrencyString(order.laborCost) + parseCurrencyString(order.otherCost);
         return {
@@ -4427,14 +4539,14 @@ function ReportsScreen({
       })
       .sort((a, b) => parseCurrencyString(b.value) - parseCurrencyString(a.value))
       .slice(0, 8);
-  }, [orgConnected, workOrders]);
+  }, [orgConnected, reportWorkOrders]);
   const liveRepeatRows = useMemo<ReportRow[]>(() => {
-    if (!orgConnected || workOrders.length === 0) {
+    if (!orgConnected || reportWorkOrders.length === 0) {
       return [];
     }
 
     const counts = new Map<string, { count: number; label: string; detail: string }>();
-    workOrders.forEach((order) => {
+    reportWorkOrders.forEach((order) => {
       const key = order.machineId ?? order.machineNumber;
       const current = counts.get(key) ?? { count: 0, label: order.machineNumber, detail: order.machineModel };
       current.count += 1;
@@ -4451,14 +4563,14 @@ function ReportsScreen({
         tone: 'waiting',
       }))
       .slice(0, 8);
-  }, [orgConnected, workOrders]);
+  }, [orgConnected, reportWorkOrders]);
   const liveTechnicianRows = useMemo<ReportRow[]>(() => {
-    if (!orgConnected || workOrders.length === 0) {
+    if (!orgConnected || reportWorkOrders.length === 0) {
       return [];
     }
 
     const counts = new Map<string, number>();
-    workOrders.forEach((order) => {
+    reportWorkOrders.forEach((order) => {
       const key = order.assignee || 'Unassigned';
       counts.set(key, (counts.get(key) ?? 0) + 1);
     });
@@ -4473,13 +4585,13 @@ function ReportsScreen({
       }))
       .sort((a, b) => Number.parseInt(b.value, 10) - Number.parseInt(a.value, 10))
       .slice(0, 8);
-  }, [orgConnected, workOrders]);
+  }, [orgConnected, reportWorkOrders]);
   const hasReportData =
     liveMetrics.length > 0 ||
     liveSpendRows.length > 0 ||
     liveRepeatRows.length > 0 ||
     liveTechnicianRows.length > 0 ||
-    workOrders.length > 0;
+    reportWorkOrders.length > 0;
   const maxDowntime = downtimeTrend.length > 0 ? Math.max(...downtimeTrend.map((point) => point.hours)) : 1;
 
   return (

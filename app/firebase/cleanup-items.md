@@ -24,6 +24,7 @@ Use this as the running cleanup list before beta and before app-store packaging.
 - Add UI visibility for `indexingStatus` so an indexed manual can show when a replacement index is processing or failed.
 - Confirm OCR handling for scanned/image-based PDFs; current extraction depends on readable PDF text.
 - OCR support will be added before full release.
+- Keep beta manual Storage uploads role-gated. Current rule allows only owner/admin/manager users to upload a PDF under their own UID folder.
 - Revisit Storage PDF validation after beta. Current beta rule may allow `.pdf` filename extension in addition to content type; true validation happens when the backend parser indexes the uploaded file.
 
 ## Beta Readiness

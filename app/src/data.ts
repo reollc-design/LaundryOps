@@ -32,6 +32,9 @@ export interface UrgentMachine {
 
 export interface WorkOrderSummary {
   id: string;
+  createdAtEpoch?: number;
+  maintenanceDate?: string;
+  maintenanceDateEpoch?: number;
   number: string;
   machineId?: string | null;
   machineNumber: string;

@@ -316,6 +316,7 @@ async function findIndexedManualForModel(params: {
     params.machine?.modelNumber ?? '',
   ]);
   const modelKeys = uniqueStrings(modelValues.map(normalizeMachineModelKey));
+  const compactModelKeys = uniqueStrings(modelKeys.map(compactKey));
 
   for (const modelKey of modelKeys) {
     if (!modelKey) {
@@ -331,6 +332,20 @@ async function findIndexedManualForModel(params: {
     }
   }
 
+  for (const compactModelKey of compactModelKeys) {
+    if (!compactModelKey) {
+      continue;
+    }
+    const compactSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
+      .where('machineModelCompactKey', '==', compactModelKey)
+      .where('status', '==', 'indexed')
+      .limit(1)
+      .get();
+    if (!compactSnap.empty) {
+      return compactSnap.docs[0];
+    }
+  }
+
   const indexedSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
     .where('status', '==', 'indexed')
     .limit(100)
@@ -340,12 +355,13 @@ async function findIndexedManualForModel(params: {
   const modelNumberKey = compactKey(params.machine?.modelNumber ?? '');
   const strongModelKeys = uniqueStrings(modelKeys.map(compactKey).filter((value) => value.length >= 4));
   const hasMakeAndModelNumber = makeKey.length >= 3 && modelNumberKey.length >= 4;
+  const compactModelNumberKey = compactKey(params.machine?.modelNumber ?? '');
   const candidates = indexedSnap.docs
     .map((docSnap) => {
       const data = docSnap.data();
       const manualModel = optionalString(data.machineModel) ?? optionalString(data.title) ?? docSnap.id;
       const manualKey = compactKey(`${manualModel} ${optionalString(data.machineModelKey) ?? ''}`);
-      const hasModelNumber = modelNumberKey.length >= 4 && manualKey.includes(modelNumberKey);
+      const hasModelNumber = compactModelNumberKey.length >= 4 && manualKey.includes(compactModelNumberKey);
       const hasMake = makeKey.length >= 3 && manualKey.includes(makeKey);
       const hasStrongModel = strongModelKeys.some((modelKey) => manualKey.includes(modelKey) || modelKey.includes(manualKey));
       let score = 0;
@@ -358,9 +374,11 @@ async function findIndexedManualForModel(params: {
       if (hasStrongModel) {
         score += 5;
       }
+      const compactHasStrongModel = compactModelKeys.some((compactModelKey) => compactModelKey.length >= 5
+        && (manualKey.includes(compactModelKey) || compactModelKey.includes(manualKey)));
       const accepted = hasMakeAndModelNumber
         ? hasMake && hasModelNumber
-        : hasModelNumber && hasStrongModel && modelNumberKey.length >= 5;
+        : hasModelNumber && (hasStrongModel || compactHasStrongModel);
       return { docSnap, score, accepted };
     })
     .filter((candidate) => candidate.accepted)
@@ -882,6 +900,7 @@ export const indexOrganizationManual = onRequest(
       }
 
       const machineModelKey = normalizeMachineModelKey(machineModel);
+      const machineModelCompactKey = compactKey(machineModelKey);
       const machinesSnap = await db.collection(`organizations/${organizationId}/machines`).get();
       const linkedMachineCount = machinesSnap.docs.reduce((count, docSnap) => {
         const model = optionalString(docSnap.data().model) ?? '';
@@ -902,6 +921,7 @@ export const indexOrganizationManual = onRequest(
           title,
           machineModel,
           machineModelKey,
+          machineModelCompactKey,
           status: 'indexed',
           indexingStatus: 'idle',
           activeChunkCollection: chunkCollectionName,

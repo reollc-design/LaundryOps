@@ -30,6 +30,7 @@ async function seedBaseData() {
       name: 'Sun State Laundry',
       createdAt: '2026-05-18T00:00:00.000Z',
       createdBy: 'ownerA',
+      ownerUserId: 'ownerA',
       subscriptionStatus: 'trialing',
       trialStartedAt: '2026-05-18T00:00:00.000Z',
       trialEndsAt: '2026-06-01T00:00:00.000Z',
@@ -38,6 +39,7 @@ async function seedBaseData() {
       name: 'Other Laundry',
       createdAt: '2026-05-18T00:00:00.000Z',
       createdBy: 'ownerB',
+      ownerUserId: 'ownerB',
       subscriptionStatus: 'trialing',
     });
 
@@ -130,10 +132,16 @@ async function seedBaseData() {
     await db.doc('organizations/orgA/manuals/manualA1').set({
       title: 'Washer Manual',
       manufacturer: 'Sample',
+      createdBy: 'ownerA',
+      status: 'processing',
     });
     await db.doc('organizations/orgA/manuals/manualA1/chunks/chunkA1').set({
       section: 'Door lock',
       text: 'Check latch continuity.',
+    });
+    await db.doc('organizations/orgA/manuals/manualA1/chunks_vm6g7xk_ab12cd/chunkA1').set({
+      section: 'Door lock',
+      text: 'Check latch continuity in versioned chunks.',
     });
 
     await db.doc('organizations/orgA/aiDiagnoses/diagnosisA1').set({
@@ -243,7 +251,9 @@ describe('Firestore organization security', () => {
     const techA1 = dbFor('techA1');
 
     await assertSucceeds(techA1.doc('organizations/orgA/manuals/manualA1/chunks/chunkA1').get());
+    await assertSucceeds(techA1.doc('organizations/orgA/manuals/manualA1/chunks_vm6g7xk_ab12cd/chunkA1').get());
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1/chunks/chunkA2').set({ text: 'client write' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1/chunks_vm6g7xk_ab12cd/chunkA2').set({ text: 'client write' }));
     await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ workOrderId: 'workA1' }));
   });
 
@@ -301,15 +311,20 @@ describe('Firestore organization security', () => {
 });
 
 describe('Storage organization security', () => {
-  it('allows manual PDFs only for leadership roles', async () => {
+  it('allows only organization leaders to upload manual PDFs to their own user folder', async () => {
+    const signedOutStorage = testEnv.unauthenticatedContext().storage(BUCKET_URL);
     const ownerStorage = storageFor('ownerA');
+    const ownerBStorage = storageFor('ownerB');
     const techStorage = storageFor('techA1');
     const pdf = new Blob(['manual'], { type: 'application/pdf' });
     const image = new Blob(['photo'], { type: 'image/png' });
 
-    await assertSucceeds(ownerStorage.ref('orgs/orgA/manuals/manualA1/manual.pdf').put(pdf));
-    await assertFails(ownerStorage.ref('orgs/orgA/manuals/manualA1/manual.png').put(image));
-    await assertFails(techStorage.ref('orgs/orgA/manuals/manualA1/manual.pdf').put(pdf));
+    await assertSucceeds(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/manual.pdf').put(pdf));
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/manual.png').put(image));
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/techA1/manualA1/manual.pdf').put(pdf));
+    await assertFails(techStorage.ref('orgs/orgA/manuals/techA1/manualA1/manual.pdf').put(pdf));
+    await assertFails(ownerBStorage.ref('orgs/orgA/manuals/ownerB/manualA1/manual.pdf').put(pdf));
+    await assertFails(signedOutStorage.ref('orgs/orgA/manuals/signedOut/manualA1/manual.pdf').put(pdf));
   });
 
   it('allows operational uploads for machine photos and work order attachments', async () => {

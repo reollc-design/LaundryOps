@@ -1,17 +1,17 @@
 :root {
-  --bg: #f6f8fa;
+  --bg: #f4f0e6;
   --surface: #ffffff;
-  --surface-soft: #eef3f6;
-  --ink: #102033;
-  --ink-deep: #061427;
-  --text: #18212b;
-  --muted: #647282;
-  --subtle: #8a96a3;
-  --border: #dde5ec;
-  --divider: #e8eef3;
-  --primary: #1d5fdb;
-  --primary-pressed: #174bb0;
-  --teal: #009c9a;
+  --surface-soft: #f8f6f0;
+  --ink: #132033;
+  --ink-deep: #08203e;
+  --text: #1f2937;
+  --muted: #5c6677;
+  --subtle: #96a0ab;
+  --border: #e5d9c5;
+  --divider: #ebdfca;
+  --primary: #167f5f;
+  --primary-pressed: #10624a;
+  --teal: #14a37c;
   --ai: #6658d3;
   --running: #15803d;
   --warning: #d97706;
@@ -19,7 +19,10 @@
   --waiting: #7c3aed;
   --completed: #0f766e;
   --shadow: 0 10px 24px rgba(10, 23, 38, 0.08);
-  font-family: Inter, Roboto, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --deep-green: #0e5f40;
+  --soft-amber: #f4cc4c;
+  --fresh-green: #f0fffa;
+  font-family: Poppins, "Avenir Next", "Avenir", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -34,7 +37,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: radial-gradient(circle at 50% -20%, #ffffff 0, var(--bg) 48%);
+  background: radial-gradient(circle at 50% -28%, #fff9ea 0, var(--bg) 48%);
 }
 
 button,
@@ -70,7 +73,7 @@ button:focus-visible {
   position: relative;
   height: min(900px, calc(100vh - 56px));
   min-height: 760px;
-  background: var(--bg);
+  background: linear-gradient(160deg, #faf4e8 0%, #f7f0dd 56%, #f6efe2 100%);
   border: 10px solid #111827;
   border-radius: 34px;
   overflow: hidden;
@@ -98,7 +101,7 @@ button:focus-visible {
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  background: var(--ink-deep);
+  background: linear-gradient(90deg, var(--ink-deep), #0d426a);
   color: #fff;
   font-size: 12px;
   font-weight: 800;
@@ -384,12 +387,12 @@ button:focus-visible {
 .text-action {
   min-height: 34px;
   padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  color: #f9f6e8;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 800;
 }
 
 .welcome-hero {
@@ -401,9 +404,37 @@ button:focus-visible {
   padding: 18px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 18px;
-  background: linear-gradient(145deg, #0c2948, #061427);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(145deg, #0b395d 0%, #0b6a45 45%, #0f9358 100%);
   color: #fff;
-  box-shadow: 0 18px 38px rgba(8, 19, 33, 0.2);
+  box-shadow: 0 18px 38px rgba(24, 31, 44, 0.32);
+}
+
+.welcome-hero::before,
+.welcome-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.welcome-hero::before {
+  width: 170px;
+  height: 170px;
+  right: -45px;
+  top: -58px;
+  background: rgba(255, 217, 73, 0.22);
+  filter: blur(1px);
+}
+
+.welcome-hero::after {
+  width: 122px;
+  height: 122px;
+  left: -46px;
+  bottom: -56px;
+  background: rgba(18, 167, 118, 0.18);
+  filter: blur(1px);
 }
 
 .welcome-hero span,
@@ -419,8 +450,25 @@ button:focus-visible {
   max-width: 240px;
   font-size: 28px;
   line-height: 1.02;
-  font-weight: 950;
+  font-weight: 900;
   letter-spacing: 0;
+}
+
+.welcome-hero h1 span {
+  color: #ffe98b;
+}
+
+.trial-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(244, 204, 76, 0.2);
+  color: #fff5c5;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1px;
 }
 
 .welcome-hero p {
@@ -437,13 +485,16 @@ button:focus-visible {
 }
 
 .welcome-machine .machine-illustration {
-  width: 112px;
-  height: 142px;
-  background: linear-gradient(180deg, #f4f8fb 0%, #aab8c5 100%);
+  width: 120px;
+  height: 150px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #f2ecdd 0%, #f4efe2 100%);
 }
 
 .welcome-primary {
-  box-shadow: 0 10px 22px rgba(29, 95, 219, 0.3);
+  background: linear-gradient(90deg, #0f9458 0%, #10ae67 100%);
+  box-shadow: 0 10px 22px rgba(15, 148, 88, 0.35);
 }
 
 .welcome-secondary-actions {
@@ -465,9 +516,9 @@ button:focus-visible {
   gap: 10px;
   align-items: start;
   padding: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid #f1d89a;
   border-radius: 12px;
-  background: #fff;
+  background: #fffbef;
 }
 
 .trial-feature-row > span,
@@ -477,8 +528,24 @@ button:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 9px;
-  background: #e8f8f5;
-  color: var(--teal);
+  background: #def7f0;
+  color: var(--deep-green);
+}
+
+.trial-proof-card {
+  background: linear-gradient(135deg, #0f7d58 0%, #0d6b4d 100%);
+  color: #fff;
+  border-color: #3e9678;
+}
+
+.trial-proof-card strong,
+.trial-proof-card span {
+  color: #f9f4df;
+}
+
+.trial-proof-card > svg {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
 }
 
 .trial-feature-row strong,
@@ -490,14 +557,22 @@ button:focus-visible {
   font-weight: 950;
 }
 
-.trial-feature-row small,
-.trial-proof-card span {
+.trial-feature-row small {
   display: block;
   margin-top: 4px;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
   font-weight: 650;
+}
+
+.trial-proof-card strong {
+  color: #f9f4df;
+}
+
+.trial-feature-row small,
+.trial-proof-card span {
+  color: #fff;
 }
 
 .access-screen {
@@ -1581,6 +1656,13 @@ button:focus-visible {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  filter: saturate(1.05);
+}
+
+.secondary-action {
+  background: #fff;
+  border-color: #f2d48c;
+  color: var(--primary);
 }
 
 .issue-card {
@@ -1627,7 +1709,8 @@ button:focus-visible {
   width: 100%;
   background: var(--primary);
   color: #fff;
-  box-shadow: 0 8px 18px rgba(29, 95, 219, 0.22);
+  box-shadow: 0 8px 18px rgba(22, 127, 95, 0.33);
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .danger-action {

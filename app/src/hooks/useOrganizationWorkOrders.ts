@@ -1,4 +1,4 @@
-import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
+import { Timestamp, collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { useEffect, useMemo, useState } from 'react';
 import type { WorkOrderStatus, WorkOrderSummary } from '../data';
@@ -29,6 +29,33 @@ function asNumber(value: unknown): number | null {
       return parsed;
     }
   }
+  return null;
+}
+
+function toEpochMs(value: unknown): number | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (value instanceof Timestamp) {
+    return value.toMillis();
+  }
+
+  if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate: unknown }).toDate === 'function') {
+    const date = (value as { toDate: () => Date }).toDate();
+    const timestamp = date?.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   return null;
 }
 
@@ -164,10 +191,18 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
           const otherCostValue = asNumber(data.otherCost) ?? 0;
           const partsCost = formatUsd(partsCostValue);
           const laborCost = formatUsd(laborCostValue);
+          const maintenanceDate = asString(data.maintenanceDate) ?? asString(data.due) ?? asString(data.dueLabel);
+          const maintenanceDateEpoch = toEpochMs(data.maintenanceDateEpoch)
+            ?? (maintenanceDate ? toEpochMs(maintenanceDate) : null);
           const totalCost = formatUsd(partsCostValue + laborCostValue + otherCostValue);
+          const createdAtEpoch = toEpochMs(data.createdAt) ?? undefined;
+          const maintenanceDateDisplay = maintenanceDate ?? asString(data.dueLabel) ?? asString(data.due);
 
           return {
             id,
+            createdAtEpoch,
+            maintenanceDate: maintenanceDate ?? undefined,
+            maintenanceDateEpoch: maintenanceDateEpoch ?? undefined,
             number: asString(data.number) ?? id.toUpperCase(),
             machineId,
             machineNumber,
@@ -177,7 +212,7 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             statusLabel: asString(data.statusLabel) ?? statusLabel(status),
             priority,
             assignee: asString(data.assigneeName) ?? asString(data.assignedUserId) ?? 'Unassigned',
-            due: displayDue(asString(data.dueLabel) ?? asString(data.due)),
+            due: displayDue(maintenanceDateDisplay),
             source: (asString(data.source) === 'AI draft' || asString(data.source) === 'Preventive') ? (asString(data.source) as 'AI draft' | 'Preventive') : 'Manual entry',
             partsCost,
             laborCost,

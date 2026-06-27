@@ -167,8 +167,9 @@ service cloud.firestore {
         allow read: if isMember(orgId);
         allow create, update, delete: if hasRole(orgId, ['owner', 'admin', 'manager']);
 
-        match /chunks/{chunkId} {
-          allow read: if isMember(orgId);
+        match /{chunkCollection}/{chunkId} {
+          allow read: if isMember(orgId)
+            && chunkCollection.matches('chunks(_v[a-z0-9]+_[a-z0-9]+)?');
           allow create, update, delete: if false;
         }
       }

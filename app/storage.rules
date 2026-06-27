@@ -10,10 +10,6 @@ service firebase.storage {
       return /databases/(default)/documents/organizations/$(orgId)/memberships/$(request.auth.uid);
     }
 
-    function manualPath(orgId, manualId) {
-      return /databases/(default)/documents/organizations/$(orgId)/manuals/$(manualId);
-    }
-
     function organizationPath(orgId) {
       return /databases/(default)/documents/organizations/$(orgId);
     }
@@ -47,14 +43,6 @@ service firebase.storage {
         );
     }
 
-    function hasManualRecordForUploader(orgId, manualId, userId) {
-      return signedIn()
-        && request.auth.uid == userId
-        && firestore.exists(manualPath(orgId, manualId))
-        && firestore.get(manualPath(orgId, manualId)).data.createdBy == request.auth.uid
-        && firestore.get(manualPath(orgId, manualId)).data.status == 'processing';
-    }
-
     function isOperationalRole(orgId) {
       return hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
     }
@@ -76,8 +64,9 @@ service firebase.storage {
 
     match /orgs/{orgId}/manuals/{userId}/{manualId}/{fileName} {
       allow read: if isMember(orgId);
-      allow write: if hasRole(orgId, ['owner', 'admin', 'manager'])
-        && hasManualRecordForUploader(orgId, manualId, userId)
+      allow write: if signedIn()
+        && request.auth.uid == userId
+        && hasRole(orgId, ['owner', 'admin', 'manager'])
         && isReasonableUpload()
         && isPdf(fileName);
     }

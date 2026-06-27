@@ -35,6 +35,14 @@ function createWorkOrderNumber(): string {
   return `WO-${suffix}`;
 }
 
+function normalizeMaintenanceDate(value: string): string {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error('Maintenance date is invalid.');
+  }
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
 export interface CreateWorkOrderFromDraftInput {
   organizationId: string;
   machineId?: string | null;
@@ -44,6 +52,7 @@ export interface CreateWorkOrderFromDraftInput {
   status: WorkOrderStatus;
   priority: 'High' | 'Standard' | 'Low';
   assigneeName: string;
+  maintenanceDate: string;
   dueLabel?: string;
   repairType?: string;
   maintenanceType?: string;
@@ -67,6 +76,7 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
   if (!user) {
     throw new Error('No authenticated user. Sign in before creating work orders.');
   }
+  const maintenanceDate = normalizeMaintenanceDate(input.maintenanceDate);
   const hasMachine = Boolean(input.organizationId.trim() && input.machineId && input.machineNumber.trim() && input.machineModel.trim());
   const hasTechnicianEntry = Boolean(
     input.symptoms?.trim()
@@ -94,8 +104,10 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     status: input.status,
     statusLabel: statusLabel(input.status),
     priority: input.priority,
+    maintenanceDate,
     assigneeName: input.assigneeName,
-    dueLabel: input.dueLabel ?? null,
+    dueLabel: maintenanceDate,
+    maintenanceDateEpoch: Date.parse(maintenanceDate),
     repairType: input.repairType ?? null,
     maintenanceType: input.maintenanceType ?? null,
     symptoms: input.symptoms ?? null,
@@ -146,6 +158,7 @@ export interface UpdateWorkOrderDetailsInput {
   title: string;
   status: WorkOrderStatus;
   assigneeName: string;
+  maintenanceDate: string;
   dueLabel?: string;
   repairType?: string;
   maintenanceType?: string;
@@ -165,6 +178,7 @@ export async function updateWorkOrderDetails(input: UpdateWorkOrderDetailsInput)
   if (!user) {
     throw new Error('No authenticated user. Sign in before updating work orders.');
   }
+  const maintenanceDate = normalizeMaintenanceDate(input.maintenanceDate);
 
   const workOrderRef = doc(db, `organizations/${input.organizationId}/workOrders/${input.workOrderId}`);
   await updateDoc(workOrderRef, {
@@ -172,7 +186,9 @@ export async function updateWorkOrderDetails(input: UpdateWorkOrderDetailsInput)
     status: input.status,
     statusLabel: statusLabel(input.status),
     assigneeName: input.assigneeName,
-    dueLabel: input.dueLabel ?? null,
+    dueLabel: maintenanceDate,
+    maintenanceDate,
+    maintenanceDateEpoch: Date.parse(maintenanceDate),
     repairType: input.repairType ?? null,
     maintenanceType: input.maintenanceType ?? null,
     symptoms: input.symptoms ?? null,
