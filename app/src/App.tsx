@@ -21,12 +21,14 @@ import {
   KeyRound,
   LockKeyhole,
   Mail,
+  Menu,
   MoreVertical,
   Pencil,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
+  Star,
   Trash2,
   TrendingDown,
   UserPlus,
@@ -54,7 +56,16 @@ import {
 import type { AccountStat, MachineStatus, ManualStatus, OnboardingStep, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
 import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
-import { completeOwnerOnboarding, createOwnerAccount, signInWithEmail, signOutCurrentUser, type OwnerOnboardingDraft } from './firebase/auth';
+import {
+  completeGoogleSignInRedirect,
+  completeOwnerOnboarding,
+  createOwnerAccount,
+  signInWithEmail,
+  signInWithGoogle,
+  signInWithGoogleRedirect,
+  signOutCurrentUser,
+  type OwnerOnboardingDraft,
+} from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
@@ -228,8 +239,29 @@ function getAuthErrorMessage(error: unknown): string {
   if (code === 'auth/too-many-requests') {
     return 'Too many attempts. Wait a minute and try again.';
   }
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return 'Google sign-in was closed before it finished.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Your browser blocked the Google sign-in window. Allow popups for LaundryOps and try again.';
+  }
+  if (code === 'auth/account-exists-with-different-credential') {
+    return 'This email already has an account. Sign in with your email and password first.';
+  }
+  if (code === 'auth/redirect-cancelled-by-user') {
+    return 'Google redirect sign-in was canceled.';
+  }
 
   return maybeError.message ?? 'Authentication failed. Try again.';
+}
+
+function shouldFallbackToGoogleRedirect(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const code = (error as { code?: string }).code;
+  return code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment';
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -611,6 +643,19 @@ export function App() {
     }
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
   useEffect(() => {
+    if (authSession.loading || !authSession.configured) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        await completeGoogleSignInRedirect();
+      } catch (error) {
+        console.error('Unable to complete Google redirect sign-in.', error);
+      }
+    })();
+  }, [authSession.configured, authSession.loading]);
+  useEffect(() => {
     if (authSession.loading || userProfile.loading || !userProfile.loaded || !authSession.configured || !authSession.user) {
       return;
     }
@@ -672,6 +717,24 @@ export function App() {
       setActiveScreen('home');
       return null;
     } catch (error) {
+      return getAuthErrorMessage(error);
+    }
+  };
+  const handleGoogleSignIn = async (): Promise<string | null> => {
+    try {
+      await signInWithGoogle();
+      setActiveScreen('home');
+      return null;
+    } catch (error) {
+      if (shouldFallbackToGoogleRedirect(error)) {
+        try {
+          await signInWithGoogleRedirect();
+          return null;
+        } catch (redirectError) {
+          return getAuthErrorMessage(redirectError);
+        }
+      }
+
       return getAuthErrorMessage(error);
     }
   };
@@ -969,12 +1032,11 @@ export function App() {
 
   return (
     <main className="app-canvas">
-      <section className="phone-frame" aria-label="LaundryOps mobile UI preview">
-        <div className={`phone-shell ${isSetupFlow ? 'setup-shell' : 'workspace-shell'}`}>
-          <StatusBar />
+      <section className="phone-frame" aria-label="LaundryOps">
+        <div className={`phone-shell ${isSetupFlow ? 'setup-shell' : 'workspace-shell'} ${activeScreen === 'welcome' ? 'landing-shell' : ''}`}>
+          {activeScreen !== 'welcome' && <StatusBar />}
           {isSetupFlow ? (
             <div className="setup-content">
-              <BackendSessionBanner authSession={authSession} />
               {activeScreen === 'welcome' && (
                 <WelcomeScreen
                   onStartTrial={() => setActiveScreen('create-account')}
@@ -986,6 +1048,7 @@ export function App() {
                 <SignInScreen
                   onBack={() => setActiveScreen('welcome')}
                   onSignIn={handleEmailSignIn}
+                  onGoogleSignIn={handleGoogleSignIn}
                   onCreateAccount={() => setActiveScreen('create-account')}
                 />
               )}
@@ -1201,6 +1264,18 @@ function BackendSessionBanner({
   );
 }
 
+function TrialFeatureIcon({ featureId }: { featureId: string }) {
+  if (featureId === 'manual-ai') {
+    return <ShieldCheck size={31} />;
+  }
+
+  if (featureId === 'owner-reports') {
+    return <BarChart3 size={32} />;
+  }
+
+  return <Wrench size={31} />;
+}
+
 function WelcomeScreen({
   onStartTrial,
   onSignIn,
@@ -1213,22 +1288,27 @@ function WelcomeScreen({
   return (
     <div className="welcome-screen">
       <div className="welcome-top">
+        <div className="landing-menu-button" aria-hidden="true">
+          <Menu size={28} />
+        </div>
         <div className="welcome-brand">
-          <div className="brand-mark large" aria-hidden="true">
+          <div className="brand-mark large welcome-logo-mark" aria-hidden="true">
             <span className="brand-lines" />
           </div>
           <div>
-            <span>LaundryOps</span>
+            <span>Laundry<span>Ops</span></span>
             <strong>Maintenance command center</strong>
           </div>
         </div>
-        <button className="text-action" type="button" onClick={onSignIn}>Sign in</button>
+        <button className="text-action" type="button" onClick={onSignIn}>
+          <UserRound size={22} /> Sign in
+        </button>
       </div>
 
       <section className="welcome-hero">
         <div>
-          <span className="trial-badge">14-Day Free Trial</span>
-          <h1>Keep LaundryOps running. <span>More uptime.</span></h1>
+          <span className="trial-badge"><Star size={15} fill="currentColor" /> 14-Day Free Trial</span>
+          <h1>More <span className="uptime-word">uptime</span>. <br />More <span className="revenue-word">revenue</span>.</h1>
           <p>Track machines, maintenance records, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
         </div>
         <div className="welcome-machine">
@@ -1249,7 +1329,7 @@ function WelcomeScreen({
       <section className="trial-feature-list">
         {trialFeatures.map((feature) => (
           <div className="trial-feature-row" key={feature.id}>
-            <span><Check size={15} /></span>
+            <span className={`trial-feature-icon icon-${feature.id}`}><TrialFeatureIcon featureId={feature.id} /></span>
             <div>
               <strong>{feature.title}</strong>
               <small>{feature.detail}</small>
@@ -1258,8 +1338,8 @@ function WelcomeScreen({
         ))}
       </section>
 
-      <section className="trial-proof-card">
-        <ShieldCheck size={18} />
+      <section className="trial-feature-row trial-proof-card">
+        <span className="trial-feature-icon icon-trial"><ShieldCheck size={32} /></span>
         <div>
           <strong>No credit card required to start.</strong>
           <span>Create your account, add your machines, and test LaundryOps free for 14 days before choosing a paid plan.</span>
@@ -1272,18 +1352,20 @@ function WelcomeScreen({
 function SignInScreen({
   onBack,
   onSignIn,
+  onGoogleSignIn,
   onCreateAccount,
 }: {
   onBack: () => void;
   onSignIn: (email: string, password: string) => Promise<string | null>;
+  onGoogleSignIn: () => Promise<string | null>;
   onCreateAccount: () => void;
 }) {
   const [showReset, setShowReset] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
-  const [providerMessage, setProviderMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
 
   const submitSignIn = async () => {
     if (!email.trim() || !password) {
@@ -1292,10 +1374,19 @@ function SignInScreen({
     }
 
     setAuthError(null);
-    setProviderMessage(null);
     setIsSubmitting(true);
     const error = await onSignIn(email.trim(), password);
     setIsSubmitting(false);
+
+    if (error) {
+      setAuthError(error);
+    }
+  };
+  const submitGoogleSignIn = async () => {
+    setAuthError(null);
+    setIsGoogleSubmitting(true);
+    const error = await onGoogleSignIn();
+    setIsGoogleSubmitting(false);
 
     if (error) {
       setAuthError(error);
@@ -1331,21 +1422,16 @@ function SignInScreen({
             <span>Production Firebase Auth will send the reset email from this screen.</span>
           </div>
         )}
-        {providerMessage && (
-          <div className="auth-message">
-            <strong>Google sign-in not enabled yet</strong>
-            <span>{providerMessage}</span>
-          </div>
-        )}
         <button className="primary-action" type="button" onClick={submitSignIn} disabled={isSubmitting}>
           {isSubmitting ? 'Signing In...' : 'Sign In'}
         </button>
         <button
           className="google-action"
           type="button"
-          onClick={() => setProviderMessage('Enable Google provider in Firebase Auth to activate this button.')}
+          onClick={submitGoogleSignIn}
+          disabled={isGoogleSubmitting}
         >
-          Continue with Google
+          {isGoogleSubmitting ? 'Opening Google...' : 'Continue with Google'}
         </button>
         <div className="access-link-row">
           <button type="button" onClick={() => setShowReset(true)}>Forgot password?</button>

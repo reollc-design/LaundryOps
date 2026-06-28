@@ -1,7 +1,12 @@
 import {
   type Auth,
   createUserWithEmailAndPassword,
+  getAdditionalUserInfo,
+  GoogleAuthProvider,
+  getRedirectResult,
   signInWithEmailAndPassword,
+  signInWithPopup,
+  signInWithRedirect,
   signOut,
   updateProfile,
   type UserCredential,
@@ -20,6 +25,56 @@ function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
 export async function signInWithEmail(email: string, password: string): Promise<UserCredential> {
   const { auth } = requireFirebaseAuth();
   return signInWithEmailAndPassword(auth, email, password);
+}
+
+function getGoogleAuthProvider(): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return provider;
+}
+
+async function upsertGoogleUserProfile(credential: UserCredential, db: Firestore): Promise<void> {
+  const additionalUserInfo = getAdditionalUserInfo(credential);
+  await setDoc(
+    doc(db, 'users', credential.user.uid),
+    {
+      displayName: credential.user.displayName ?? null,
+      email: credential.user.email,
+      lastSignInAt: serverTimestamp(),
+      lastSignInProvider: 'google.com',
+      ...(additionalUserInfo?.isNewUser
+        ? {
+            createdAt: serverTimestamp(),
+            createdFrom: 'google-provider',
+          }
+        : {}),
+    },
+    { merge: true },
+  );
+}
+
+export async function signInWithGoogle(): Promise<UserCredential> {
+  const { auth, db } = requireFirebaseAuth();
+  const provider = getGoogleAuthProvider();
+  const credential = await signInWithPopup(auth, provider);
+  await upsertGoogleUserProfile(credential, db);
+  return credential;
+}
+
+export async function signInWithGoogleRedirect(): Promise<void> {
+  const { auth } = requireFirebaseAuth();
+  const provider = getGoogleAuthProvider();
+  await signInWithRedirect(auth, provider);
+}
+
+export async function completeGoogleSignInRedirect(): Promise<UserCredential | null> {
+  const { auth, db } = requireFirebaseAuth();
+  const credential = await getRedirectResult(auth);
+  if (!credential) {
+    return null;
+  }
+  await upsertGoogleUserProfile(credential, db);
+  return credential;
 }
 
 export async function createOwnerAccount(displayName: string, email: string, password: string): Promise<UserCredential> {

@@ -7,6 +7,7 @@
     "dev": "vite --configLoader runner",
     "build": "vite build --configLoader runner",
     "lint": "tsc --noEmit",
+    "visual:landing": "node tools/visual/landing-screenshots.mjs",
     "firebase:emulators": "firebase\\run-emulators.cmd",
     "test:rules": "firebase\\run-rules-tests.cmd"
   },
@@ -22,6 +23,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "firebase-tools": "^13.35.1",
+    "playwright": "^1.61.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
     "vitest": "^4.1.6"
