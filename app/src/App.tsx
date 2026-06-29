@@ -1200,9 +1200,9 @@ export function App() {
                     assistPreset={assistPreset}
                     onClearAssistPreset={() => setAssistPreset(null)}
                     onCreateWorkOrder={(machineId) => openCreateWorkOrder('ai-assist', machineId)}
-                    defaultMachineId={assistPreset?.machineId ?? null}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
+                    machines={machineCatalogData}
                     manualModels={orgManuals.manuals}
                   />
                 )}
@@ -4251,28 +4251,40 @@ function repairAssistModelKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+function repairAssistMachineModel(machine: UrgentMachine | null): string {
+  return [machine?.make?.trim(), machine?.modelNumber?.trim()].filter(Boolean).join(' ');
+}
+
+function repairAssistMachineSummary(machine: UrgentMachine | null): string {
+  if (!machine) {
+    return 'Choose a machine number';
+  }
+
+  const machineModel = repairAssistMachineModel(machine);
+  return machineModel ? `${machine.type} - ${machineModel}` : `${machine.type} - Make/model not set`;
+}
+
 function RepairAssistScreen({
   assistPreset,
   onClearAssistPreset,
   onCreateWorkOrder,
-  defaultMachineId,
   orgConnected,
   organizationId,
+  machines,
   manualModels,
 }: {
   assistPreset: AssistPreset | null;
   onClearAssistPreset: () => void;
   onCreateWorkOrder: (machineId?: string | null) => void;
-  defaultMachineId: string | null;
   orgConnected: boolean;
   organizationId: string | null;
+  machines: UrgentMachine[];
   manualModels: ManualLibraryRow[];
 }) {
-  const [machineModel, setMachineModel] = useState('');
+  const [selectedMachineId, setSelectedMachineId] = useState('');
   const [symptoms, setSymptoms] = useState('');
   const [errorCode, setErrorCode] = useState('');
   const [manualGroundingEnabled, setManualGroundingEnabled] = useState(true);
-  const [assistPresetDetached, setAssistPresetDetached] = useState(false);
   const [assistBusy, setAssistBusy] = useState(false);
   const [assistError, setAssistError] = useState<string | null>(null);
   const [assistAnswer, setAssistAnswer] = useState<string | null>(null);
@@ -4282,24 +4294,12 @@ function RepairAssistScreen({
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const assistRequestIdRef = useRef(0);
-  const activeAssistPreset = assistPresetDetached ? null : assistPreset;
-  const uploadedManualModels = useMemo(() => {
-    const seen = new Set<string>();
-    const models: string[] = [];
-
-    manualModels.forEach((manual) => {
-      const model = manual.model.trim();
-      const modelKey = model.toLowerCase();
-      if (!model || model === 'Model not set' || manual.status !== 'indexed' || seen.has(modelKey)) {
-        return;
-      }
-
-      seen.add(modelKey);
-      models.push(model);
-    });
-
-    return models.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }, [manualModels]);
+  const selectedMachine = useMemo(
+    () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
+    [machines, selectedMachineId],
+  );
+  const machineModel = useMemo(() => repairAssistMachineModel(selectedMachine), [selectedMachine]);
+  const selectedMachineHasMakeModel = Boolean(selectedMachine?.make?.trim() && selectedMachine?.modelNumber?.trim());
   const selectedModelHasIndexedManual = useMemo(() => {
     const selectedKey = repairAssistModelKey(machineModel);
     if (!selectedKey) {
@@ -4331,19 +4331,17 @@ function RepairAssistScreen({
 
   useEffect(() => {
     clearAssistResult();
-    setAssistPresetDetached(false);
-
-    if (assistPreset) {
-      setMachineModel(assistPreset.machineModel);
-      setSymptoms('');
-      setErrorCode('');
-      return;
-    }
-
-    setMachineModel(uploadedManualModels[0] ?? '');
+    setSelectedMachineId(assistPreset?.machineId ?? '');
     setSymptoms('');
     setErrorCode('');
-  }, [assistPreset?.machineId, assistPreset?.machineModel, assistPreset, uploadedManualModels]);
+  }, [assistPreset?.machineId]);
+
+  useEffect(() => {
+    if (machines.length > 0 && selectedMachineId && !machines.some((machine) => machine.id === selectedMachineId)) {
+      setSelectedMachineId('');
+      clearAssistResult();
+    }
+  }, [machines, selectedMachineId]);
 
   const runRepairAssist = async (): Promise<void> => {
     const requestId = assistRequestIdRef.current + 1;
@@ -4364,7 +4362,17 @@ function RepairAssistScreen({
       return;
     }
 
-    if (!machineModel.trim() || !selectedModelHasIndexedManual) {
+    if (!selectedMachine) {
+      setAssistError('Select a machine number before using Repair Assist.');
+      return;
+    }
+
+    if (!selectedMachineHasMakeModel) {
+      setAssistError('This machine needs make and model information before Repair Assist can find the correct manual.');
+      return;
+    }
+
+    if (!selectedModelHasIndexedManual) {
       setAssistError(NO_INDEXED_MANUAL_MESSAGE);
       return;
     }
@@ -4376,8 +4384,8 @@ function RepairAssistScreen({
         machineModel,
         symptoms,
         errorCode,
-        machineId: activeAssistPreset?.machineId,
-        machineNumber: activeAssistPreset?.machineNumber,
+        machineId: selectedMachine.id,
+        machineNumber: selectedMachine.machineNumber,
       });
       if (requestId !== assistRequestIdRef.current) {
         return;
@@ -4404,16 +4412,15 @@ function RepairAssistScreen({
       <section className="assist-machine-card">
         <MachineThumb />
         <div>
-          <strong>{activeAssistPreset?.machineNumber ?? 'Machine not selected'}</strong>
-          <span>{activeAssistPreset?.machineModel ?? 'Choose a machine to prefill Repair Assist'}</span>
-          <small>{activeAssistPreset ? 'Machine context loaded from the card action' : 'Enter a machine model to generate guidance'}</small>
+          <strong>{selectedMachine?.machineNumber ?? 'Machine not selected'}</strong>
+          <span>{repairAssistMachineSummary(selectedMachine)}</span>
+          <small>{selectedMachine ? 'Machine context loaded from your machine list' : 'Select an entered machine number to load make/model'}</small>
         </div>
         <button
           type="button"
           onClick={() => {
             onClearAssistPreset();
-            setAssistPresetDetached(false);
-            setMachineModel('');
+            setSelectedMachineId('');
             setSymptoms('');
             setErrorCode('');
             clearAssistResult();
@@ -4425,32 +4432,27 @@ function RepairAssistScreen({
 
       <section className="assist-form">
         <label>
-          <span>Uploaded machine model</span>
+          <span>Machine number</span>
           <select
-            value={machineModel}
+            value={selectedMachineId}
             onChange={(event) => {
               const nextValue = event.target.value;
-              setMachineModel(nextValue);
-              setAssistPresetDetached(Boolean(assistPreset && nextValue.trim() !== assistPreset.machineModel.trim()));
+              setSelectedMachineId(nextValue);
               clearAssistResult();
             }}
-            disabled={uploadedManualModels.length === 0}
+            disabled={machines.length === 0}
           >
-            {uploadedManualModels.length === 0 ? (
-              <option value="">Upload and index a manual first</option>
-            ) : (
-              uploadedManualModels.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))
-            )}
-            {machineModel && !uploadedManualModels.includes(machineModel) && (
-              <option value={machineModel}>{machineModel}</option>
-            )}
+            <option value="" disabled>
+              Select machine number
+            </option>
+            {machines.map((machine) => (
+              <option key={machine.id} value={machine.id}>
+                {machine.machineNumber}
+              </option>
+            ))}
           </select>
         </label>
-        {machineModel.trim() && !selectedModelHasIndexedManual && (
+        {selectedMachine && !selectedModelHasIndexedManual && selectedMachineHasMakeModel && (
           <p className="search-hint">No indexed machine manual is available for this machine yet.</p>
         )}
         <label>
@@ -4586,11 +4588,11 @@ function RepairAssistScreen({
           className="ai-action"
           type="button"
           onClick={() => {
-            if (!defaultMachineId) {
-              setAssistError('Open Repair Assist from a machine card, or type the machine model before saving as a maintenance record.');
+            if (!selectedMachine) {
+              setAssistError('Select a machine number before saving as a maintenance record.');
               return;
             }
-            onCreateWorkOrder(defaultMachineId);
+            onCreateWorkOrder(selectedMachine.id);
           }}
         >
           Save as Maintenance Record
