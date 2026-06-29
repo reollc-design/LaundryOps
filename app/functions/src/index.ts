@@ -591,10 +591,11 @@ function fallbackManualAnswer(params: {
   const preview = params.topChunks[0]?.text ?? '';
   const snippet = preview.length > 420 ? `${preview.slice(0, 420)}...` : preview;
   const codeLine = params.errorCode ? `Error code reported: ${params.errorCode}.\n` : '';
+  const symptomsLine = params.symptoms ? `Symptoms: ${params.symptoms}.` : 'Symptoms: not provided.';
   return [
     `Machine model: ${params.machineModel}.`,
     codeLine,
-    `Symptoms: ${params.symptoms}.`,
+    symptomsLine,
     'Manual source text selected. OpenAI did not return a usable answer, so here is the most relevant manual text:',
     snippet || 'No matching manual chunk was found. Upload and index a manual first.',
   ].filter(Boolean).join('\n');
@@ -618,6 +619,7 @@ async function buildGroundedManualAnswer(params: {
   }).join('\n\n');
 
   const errorCodeLine = params.errorCode ? `Error code: ${params.errorCode}` : 'Error code: none';
+  const symptomsLine = params.symptoms ? `Symptoms: ${params.symptoms}` : 'Symptoms: not provided';
   const response = await client.responses.create({
     model: getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL),
     input: [
@@ -636,7 +638,7 @@ async function buildGroundedManualAnswer(params: {
         role: 'user',
         content: [
           `Machine model: ${params.machineModel}`,
-          `Symptoms: ${params.symptoms}`,
+          symptomsLine,
           errorCodeLine,
           '',
           'Manual excerpts:',
@@ -975,10 +977,13 @@ export const generateRepairAssist = onRequest(
       const caller = await requireVerifiedCaller(request);
       const organizationId = requireString(request.body?.organizationId, 'organizationId');
       const requestedMachineModel = requireString(request.body?.machineModel, 'machineModel');
-      const symptoms = requireString(request.body?.symptoms, 'symptoms');
+      const symptoms = optionalString(request.body?.symptoms) ?? '';
       const errorCode = optionalString(request.body?.errorCode) ?? null;
       const machineId = optionalString(request.body?.machineId);
       const machineNumber = optionalString(request.body?.machineNumber);
+      if (!symptoms && !errorCode) {
+        throw new Error('Enter symptoms or an error code before using Repair Assist.');
+      }
       await assertOrganizationMember(organizationId, caller.uid);
 
       ensureFirebaseAdmin();

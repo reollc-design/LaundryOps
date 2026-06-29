@@ -217,8 +217,8 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
   if (!machineModel) {
     throw new Error('Machine model is required.');
   }
-  if (!symptoms) {
-    throw new Error('Symptoms are required.');
+  if (!symptoms && !errorCode) {
+    throw new Error('Enter symptoms or an error code.');
   }
 
   const data = await callManualEndpoint('generateRepairAssist', {

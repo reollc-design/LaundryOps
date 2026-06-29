@@ -3246,8 +3246,8 @@ function CreateWorkOrderScreen({
       setAssistantError('Keep this maintenance record tied to a machine before running AI Diagnose.');
       return;
     }
-    if (!symptoms.trim() || !errorCode.trim()) {
-      setAssistantError('Add symptoms and error code, then click AI Diagnose.');
+    if (!symptoms.trim() && !errorCode.trim()) {
+      setAssistantError('Add symptoms or an error code, then click AI Diagnose.');
       return;
     }
     if (!orgConnected || !organizationId) {
@@ -3359,7 +3359,7 @@ function CreateWorkOrderScreen({
           <span>Track issue details, labor parts, and status.</span>
         </div>
         <label className="review-field">
-          <span>Issue / Symptoms</span>
+          <span>Issue / Symptoms (optional)</span>
           <div className="symptoms-ai-row">
             <textarea
               value={symptoms}
@@ -3466,7 +3466,7 @@ function CreateWorkOrderScreen({
         <div>
           <strong>AI Repair Assist</strong>
           <span>{assistantManualTitle || 'Manual-backed guidance (if available)'}</span>
-          <small>{assistantGrounded ? 'Manual-backed answer ready' : hasMachineContext ? 'Enter symptoms + error code, then click AI Diagnose' : 'Select machine first to use AI Diagnose'}</small>
+          <small>{assistantGrounded ? 'Manual-backed answer ready' : hasMachineContext ? 'Enter symptoms or error code, then click AI Diagnose' : 'Select machine first to use AI Diagnose'}</small>
         </div>
       </section>
 
@@ -4377,6 +4377,11 @@ function RepairAssistScreen({
       return;
     }
 
+    if (!symptoms.trim() && !errorCode.trim()) {
+      setAssistError('Enter symptoms or an error code before using Repair Assist.');
+      return;
+    }
+
     setAssistBusy(true);
     try {
       const result = await generateManualRepairAssist({
@@ -4456,7 +4461,7 @@ function RepairAssistScreen({
           <p className="search-hint">No indexed machine manual is available for this machine yet.</p>
         )}
         <label>
-          <span>Symptoms</span>
+          <span>Symptoms (optional)</span>
           <input
             value={symptoms}
             onChange={(event) => {
