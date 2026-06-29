@@ -4244,6 +4244,13 @@ function WorkOrderDetailScreen({
   );
 }
 
+const NO_INDEXED_MANUAL_MESSAGE =
+  'No machine manual has been uploaded and indexed for this machine, so AI Repair Assist cannot provide a manual-grounded answer. Upload the manufacturer repair manual before using AI Repair Assist.';
+
+function repairAssistModelKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 function RepairAssistScreen({
   assistPreset,
   onClearAssistPreset,
@@ -4283,7 +4290,7 @@ function RepairAssistScreen({
     manualModels.forEach((manual) => {
       const model = manual.model.trim();
       const modelKey = model.toLowerCase();
-      if (!model || model === 'Model not set' || manual.status === 'missing' || seen.has(modelKey)) {
+      if (!model || model === 'Model not set' || manual.status !== 'indexed' || seen.has(modelKey)) {
         return;
       }
 
@@ -4293,6 +4300,20 @@ function RepairAssistScreen({
 
     return models.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   }, [manualModels]);
+  const selectedModelHasIndexedManual = useMemo(() => {
+    const selectedKey = repairAssistModelKey(machineModel);
+    if (!selectedKey) {
+      return false;
+    }
+
+    return manualModels.some((manual) => {
+      if (manual.status !== 'indexed') {
+        return false;
+      }
+      const manualKey = repairAssistModelKey(manual.model);
+      return Boolean(manualKey && (manualKey === selectedKey || manualKey.includes(selectedKey) || selectedKey.includes(manualKey)));
+    });
+  }, [machineModel, manualModels]);
 
   const clearAssistResult = (invalidateRequest = true): void => {
     if (invalidateRequest) {
@@ -4340,6 +4361,11 @@ function RepairAssistScreen({
 
     if (!orgConnected || !organizationId) {
       setAssistError('Complete onboarding first so Repair Assist can use your organization manuals.');
+      return;
+    }
+
+    if (!machineModel.trim() || !selectedModelHasIndexedManual) {
+      setAssistError(NO_INDEXED_MANUAL_MESSAGE);
       return;
     }
 
@@ -4411,7 +4437,7 @@ function RepairAssistScreen({
             disabled={uploadedManualModels.length === 0}
           >
             {uploadedManualModels.length === 0 ? (
-              <option value="">Upload a manual first</option>
+              <option value="">Upload and index a manual first</option>
             ) : (
               uploadedManualModels.map((model) => (
                 <option key={model} value={model}>
@@ -4424,6 +4450,9 @@ function RepairAssistScreen({
             )}
           </select>
         </label>
+        {machineModel.trim() && !selectedModelHasIndexedManual && (
+          <p className="search-hint">No indexed machine manual is available for this machine yet.</p>
+        )}
         <label>
           <span>Symptoms</span>
           <input
