@@ -3475,7 +3475,8 @@ button:focus-visible {
   font-weight: 850;
 }
 
-.assist-form input {
+.assist-form input,
+.assist-form select {
   width: 100%;
   min-height: 42px;
   padding: 10px 12px;

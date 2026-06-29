@@ -1203,6 +1203,7 @@ export function App() {
                     defaultMachineId={assistPreset?.machineId ?? null}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
+                    manualModels={orgManuals.manuals}
                   />
                 )}
                 {activeScreen === 'reports' && (
@@ -4250,6 +4251,7 @@ function RepairAssistScreen({
   defaultMachineId,
   orgConnected,
   organizationId,
+  manualModels,
 }: {
   assistPreset: AssistPreset | null;
   onClearAssistPreset: () => void;
@@ -4257,6 +4259,7 @@ function RepairAssistScreen({
   defaultMachineId: string | null;
   orgConnected: boolean;
   organizationId: string | null;
+  manualModels: ManualLibraryRow[];
 }) {
   const [machineModel, setMachineModel] = useState('');
   const [symptoms, setSymptoms] = useState('');
@@ -4273,6 +4276,23 @@ function RepairAssistScreen({
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const assistRequestIdRef = useRef(0);
   const activeAssistPreset = assistPresetDetached ? null : assistPreset;
+  const uploadedManualModels = useMemo(() => {
+    const seen = new Set<string>();
+    const models: string[] = [];
+
+    manualModels.forEach((manual) => {
+      const model = manual.model.trim();
+      const modelKey = model.toLowerCase();
+      if (!model || model === 'Model not set' || manual.status === 'missing' || seen.has(modelKey)) {
+        return;
+      }
+
+      seen.add(modelKey);
+      models.push(model);
+    });
+
+    return models.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [manualModels]);
 
   const clearAssistResult = (invalidateRequest = true): void => {
     if (invalidateRequest) {
@@ -4299,10 +4319,10 @@ function RepairAssistScreen({
       return;
     }
 
-    setMachineModel('');
+    setMachineModel(uploadedManualModels[0] ?? '');
     setSymptoms('');
     setErrorCode('');
-  }, [assistPreset?.machineId, assistPreset?.machineModel, assistPreset]);
+  }, [assistPreset?.machineId, assistPreset?.machineModel, assistPreset, uploadedManualModels]);
 
   const runRepairAssist = async (): Promise<void> => {
     const requestId = assistRequestIdRef.current + 1;
@@ -4379,8 +4399,8 @@ function RepairAssistScreen({
 
       <section className="assist-form">
         <label>
-          <span>Machine model</span>
-          <input
+          <span>Uploaded machine model</span>
+          <select
             value={machineModel}
             onChange={(event) => {
               const nextValue = event.target.value;
@@ -4388,7 +4408,21 @@ function RepairAssistScreen({
               setAssistPresetDetached(Boolean(assistPreset && nextValue.trim() !== assistPreset.machineModel.trim()));
               clearAssistResult();
             }}
-          />
+            disabled={uploadedManualModels.length === 0}
+          >
+            {uploadedManualModels.length === 0 ? (
+              <option value="">Upload a manual first</option>
+            ) : (
+              uploadedManualModels.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))
+            )}
+            {machineModel && !uploadedManualModels.includes(machineModel) && (
+              <option value={machineModel}>{machineModel}</option>
+            )}
+          </select>
         </label>
         <label>
           <span>Symptoms</span>
