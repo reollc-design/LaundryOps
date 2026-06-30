@@ -1191,6 +1191,7 @@ export function App() {
                     machineStatusBusy={selectedWorkOrderMachine ? machineStatusBusyId === selectedWorkOrderMachine.id : false}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
+                    organizationId={defaultOrganizationId}
                     onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
@@ -3844,6 +3845,7 @@ function WorkOrderDetailScreen({
   machineStatusBusy,
   machineStatusError,
   orgConnected,
+  organizationId,
   onUpdateDetails,
   onSetMachineStatus,
 }: {
@@ -3856,6 +3858,7 @@ function WorkOrderDetailScreen({
   machineStatusBusy: boolean;
   machineStatusError: string | null;
   orgConnected: boolean;
+  organizationId: string | null;
   onUpdateDetails: (entry: WorkOrderDetailsEntry) => Promise<void>;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
@@ -3879,6 +3882,9 @@ function WorkOrderDetailScreen({
   const [notesInput, setNotesInput] = useState('');
   const [aiDiagnosisInput, setAiDiagnosisInput] = useState('');
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailAssistantError, setDetailAssistantError] = useState<string | null>(null);
+  const [detailAssistantMessage, setDetailAssistantMessage] = useState<string | null>(null);
+  const [detailAssistantLoading, setDetailAssistantLoading] = useState(false);
   const [isDetailDirty, setIsDetailDirty] = useState(false);
   const [loadedDetailOrderId, setLoadedDetailOrderId] = useState<string | null>(null);
   const [pendingSavedSignature, setPendingSavedSignature] = useState<string | null>(null);
@@ -3887,7 +3893,7 @@ function WorkOrderDetailScreen({
   const parsedLaborCost = parseUsdAmount(laborCostInput);
   const parsedOtherCost = parseUsdAmount(otherCostInput);
   const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
-  const detailInputsDisabled = busy || !orgConnected || pendingSavedSignature !== null;
+  const detailInputsDisabled = busy || detailAssistantLoading || !orgConnected || pendingSavedSignature !== null;
 
   useEffect(() => {
     if (!order) {
@@ -3903,6 +3909,9 @@ function WorkOrderDetailScreen({
       setOtherCostInput('');
       setNotesInput('');
       setAiDiagnosisInput('');
+      setDetailAssistantError(null);
+      setDetailAssistantMessage(null);
+      setDetailAssistantLoading(false);
       setIsDetailDirty(false);
       setLoadedDetailOrderId(null);
       setPendingSavedSignature(null);
@@ -3932,6 +3941,8 @@ function WorkOrderDetailScreen({
     setNotesInput(order.notes ?? '');
     setAiDiagnosisInput(order.aiDiagnosis ?? '');
     setDetailError(null);
+    setDetailAssistantError(null);
+    setDetailAssistantMessage(null);
     setLoadedDetailOrderId(order.id);
     setIsDetailDirty(false);
     if (confirmedPendingSave) {
@@ -3956,21 +3967,21 @@ function WorkOrderDetailScreen({
     pendingSavedSignature,
   ]);
 
-  const submitUpdateDetails = async (): Promise<void> => {
+  const buildSavedDetailsEntry = (aiDiagnosisOverride = aiDiagnosisInput): WorkOrderDetailsEntry | null => {
     const partsCost = parseUsdAmount(partsCostInput);
     const laborCost = parseUsdAmount(laborCostInput);
     const otherCost = parseUsdAmount(otherCostInput);
     const hasInvalidCostInput = [partsCostInput, laborCostInput, otherCostInput].some((value) => value.trim() !== '' && parseUsdAmount(value) === null);
     if (hasInvalidCostInput) {
       setDetailError('Enter valid numbers for parts, labor, and other cost fields.');
-      return;
+      return null;
     }
     if (!maintenanceDate.trim()) {
       setDetailError('Set a maintenance date for this maintenance record.');
-      return;
+      return null;
     }
 
-    const savedEntry = {
+    return {
       maintenanceDate,
       status: selectedStatus,
       maintenanceType,
@@ -3982,15 +3993,83 @@ function WorkOrderDetailScreen({
       laborCost: laborCost ?? 0,
       otherCost: otherCost ?? 0,
       notes: notesInput,
-      aiDiagnosis: aiDiagnosisInput,
+      aiDiagnosis: aiDiagnosisOverride,
     };
+  };
+
+  const submitUpdateDetails = async (): Promise<void> => {
+    const savedEntry = buildSavedDetailsEntry();
+    if (!savedEntry) {
+      return;
+    }
 
     setDetailError(null);
+    setDetailAssistantError(null);
+    setDetailAssistantMessage(null);
     try {
       await onUpdateDetails(savedEntry);
       setPendingSavedSignature(editableWorkOrderSignature(savedEntry));
     } catch {
       // The parent handler displays the Firestore error in the shared record banner.
+    }
+  };
+
+  const runDetailAiDiagnosis = async (): Promise<void> => {
+    if (detailAssistantLoading) {
+      return;
+    }
+    if (!orgConnected || !organizationId) {
+      setDetailAssistantError('Complete onboarding first before using AI diagnostics.');
+      return;
+    }
+    if (!order) {
+      setDetailAssistantError('Open a maintenance record before using AI diagnostics.');
+      return;
+    }
+    if (!machine?.id) {
+      setDetailAssistantError('This maintenance record must be linked to a machine before AI can save a diagnosis.');
+      return;
+    }
+    if (!symptoms.trim() && !errorCode.trim()) {
+      setDetailAssistantError('Enter symptoms or an error code before using AI Diagnose.');
+      return;
+    }
+
+    const detailMachineModel = [machine.make?.trim(), machine.modelNumber?.trim()]
+      .filter(Boolean)
+      .join(' ') || order.machineModel;
+    if (!detailMachineModel.trim()) {
+      setDetailAssistantError('This machine needs make and model information before AI can find the correct manual.');
+      return;
+    }
+
+    setDetailError(null);
+    setDetailAssistantError(null);
+    setDetailAssistantMessage(null);
+    setDetailAssistantLoading(true);
+    try {
+      const result = await generateManualRepairAssist({
+        organizationId,
+        machineModel: detailMachineModel,
+        symptoms,
+        errorCode,
+        machineId: machine.id,
+        machineNumber: machine.machineNumber,
+      });
+      const savedEntry = buildSavedDetailsEntry(result.answer);
+      setAiDiagnosisInput(result.answer);
+      if (!savedEntry) {
+        setIsDetailDirty(true);
+        return;
+      }
+
+      await onUpdateDetails(savedEntry);
+      setPendingSavedSignature(editableWorkOrderSignature(savedEntry));
+      setDetailAssistantMessage(`AI diagnosis saved to this maintenance record${result.manual?.title ? ` from ${result.manual.title}` : ''}.`);
+    } catch (diagError) {
+      setDetailAssistantError(getErrorMessage(diagError, 'Could not generate and save AI diagnosis.'));
+    } finally {
+      setDetailAssistantLoading(false);
     }
   };
 
@@ -4205,7 +4284,20 @@ function WorkOrderDetailScreen({
       </section>
 
       <section className="content-section compact">
-        <h2>AI Diagnosis</h2>
+        <div className="section-heading">
+          <div>
+            <h2>AI Diagnosis</h2>
+            <span>Diagnosis Result</span>
+          </div>
+          <button
+            className="row-action-button row-action-ai"
+            type="button"
+            onClick={() => void runDetailAiDiagnosis()}
+            disabled={detailInputsDisabled || !machine?.id}
+          >
+            <Sparkles size={14} /> {detailAssistantLoading ? 'Diagnosing...' : 'AI Diagnose'}
+          </button>
+        </div>
         <label className="review-field">
           <span>Diagnosis Result</span>
           <textarea
@@ -4219,6 +4311,13 @@ function WorkOrderDetailScreen({
             disabled={detailInputsDisabled}
           />
         </label>
+        {detailAssistantMessage && <p className="search-hint">{detailAssistantMessage}</p>}
+        {detailAssistantError && (
+          <div className="auth-message">
+            <strong>AI Diagnose</strong>
+            <span>{detailAssistantError}</span>
+          </div>
+        )}
       </section>
 
       <section className="content-section compact">
