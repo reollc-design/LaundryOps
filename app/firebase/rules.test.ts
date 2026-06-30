@@ -257,6 +257,13 @@ describe('Firestore organization security', () => {
     await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ workOrderId: 'workA1' }));
   });
 
+  it('allows manual metadata edits but blocks direct manual deletes', async () => {
+    const ownerA = dbFor('ownerA');
+
+    await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualA1').update({ title: 'Updated Washer Manual' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1').delete());
+  });
+
   it('allows controlled owner bootstrap org creation and self-membership only', async () => {
     const ownerA = dbFor('ownerA');
 

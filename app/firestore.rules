@@ -165,7 +165,8 @@ service cloud.firestore {
 
       match /manuals/{manualId} {
         allow read: if isMember(orgId);
-        allow create, update, delete: if hasRole(orgId, ['owner', 'admin', 'manager']);
+        allow create, update: if hasRole(orgId, ['owner', 'admin', 'manager']);
+        allow delete: if false;
 
         match /{chunkCollection}/{chunkId} {
           allow read: if isMember(orgId)

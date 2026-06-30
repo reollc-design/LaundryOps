@@ -38,6 +38,11 @@ export interface UploadManualResult {
   storagePath: string;
 }
 
+export interface DeleteManualInput {
+  organizationId: string;
+  manualId: string;
+}
+
 export interface ManualRepairAssistInput {
   organizationId: string;
   machineModel: string;
@@ -203,6 +208,23 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
     manualId: manualRef.id,
     storagePath,
   };
+}
+
+export async function deleteOrganizationManual(input: DeleteManualInput): Promise<void> {
+  const organizationId = input.organizationId.trim();
+  const manualId = input.manualId.trim();
+
+  if (!organizationId) {
+    throw new Error('Missing organization ID.');
+  }
+  if (!manualId) {
+    throw new Error('Missing manual ID.');
+  }
+
+  await callManualEndpoint('deleteOrganizationManual', {
+    organizationId,
+    manualId,
+  });
 }
 
 export async function generateManualRepairAssist(input: ManualRepairAssistInput): Promise<ManualRepairAssistResult> {

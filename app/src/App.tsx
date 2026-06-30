@@ -67,7 +67,7 @@ import {
   type OwnerOnboardingDraft,
 } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
-import { generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
+import { deleteOrganizationManual, generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
 import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
@@ -2696,6 +2696,9 @@ function ManualLibraryScreen({
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
+  const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteSuccess, setDeleteSuccess] = useState<string | null>(null);
   const [filePickerKey, setFilePickerKey] = useState(0);
 
   const fallbackManualRows: ManualLibraryRow[] = manualRows.map((manual) => ({
@@ -2710,6 +2713,8 @@ function ManualLibraryScreen({
   const handleUpload = async (): Promise<void> => {
     setUploadError(null);
     setUploadSuccess(null);
+    setDeleteError(null);
+    setDeleteSuccess(null);
 
     if (!orgConnected || !organizationId) {
       setUploadError('Complete onboarding first to connect manual uploads to your organization account.');
@@ -2740,6 +2745,36 @@ function ManualLibraryScreen({
       setUploadError(getErrorMessage(error, 'Could not upload and index manual. Try again.'));
     } finally {
       setUploadBusy(false);
+    }
+  };
+
+  const handleDeleteManual = async (manual: ManualLibraryRow): Promise<void> => {
+    setDeleteError(null);
+    setDeleteSuccess(null);
+    setUploadError(null);
+    setUploadSuccess(null);
+
+    if (!orgConnected || !organizationId) {
+      setDeleteError('Complete onboarding first before deleting manuals.');
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete the manual for ${manual.model}? This removes the uploaded PDF and indexed AI source text.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeleteBusyId(manual.id);
+    try {
+      await deleteOrganizationManual({
+        organizationId,
+        manualId: manual.id,
+      });
+      setDeleteSuccess(`Deleted manual for ${manual.model}.`);
+    } catch (error) {
+      setDeleteError(getErrorMessage(error, 'Could not delete manual. Try again.'));
+    } finally {
+      setDeleteBusyId(null);
     }
   };
 
@@ -2833,9 +2868,27 @@ function ManualLibraryScreen({
         {orgConnected && orgManualsError && <p className="empty-state">Could not load live manuals: {orgManualsError}</p>}
         <div className="manual-list">
           {manualData.map((manual) => (
-            <ManualRow key={manual.id} manual={manual} />
+            <ManualRow
+              key={manual.id}
+              manual={manual}
+              canDelete={orgConnected}
+              deleting={deleteBusyId === manual.id}
+              onDelete={() => void handleDeleteManual(manual)}
+            />
           ))}
         </div>
+        {deleteError && (
+          <div className="auth-message">
+            <strong>Manual delete failed</strong>
+            <span>{deleteError}</span>
+          </div>
+        )}
+        {deleteSuccess && (
+          <div className="profile-status-line">
+            <Check size={16} />
+            <span>{deleteSuccess}</span>
+          </div>
+        )}
       </section>
 
       <section className="ai-grounding-card">
@@ -2853,7 +2906,17 @@ function ManualLibraryScreen({
   );
 }
 
-function ManualRow({ manual }: { manual: ManualLibraryRow }) {
+function ManualRow({
+  manual,
+  canDelete,
+  deleting,
+  onDelete,
+}: {
+  manual: ManualLibraryRow;
+  canDelete: boolean;
+  deleting: boolean;
+  onDelete: () => void;
+}) {
   const status: ManualStatus = manual.status;
   const statusLabel: Record<ManualStatus, string> = {
     indexed: 'Indexed',
@@ -2874,6 +2937,17 @@ function ManualRow({ manual }: { manual: ManualLibraryRow }) {
         <StatusBadge status={status === 'indexed' ? 'running' : status === 'processing' ? 'waiting' : 'down'}>{statusLabel[status]}</StatusBadge>
         <span>{manual.coverage}</span>
         <small>{manual.pages}</small>
+        {canDelete && (
+          <button
+            className="manual-delete-action"
+            type="button"
+            onClick={onDelete}
+            disabled={deleting}
+            aria-label={`Delete manual for ${manual.model}`}
+          >
+            <Trash2 size={13} /> {deleting ? 'Deleting...' : 'Delete'}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, Timestamp, getFirestore, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp, getFirestore, type CollectionReference, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import type { Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
@@ -496,6 +496,52 @@ async function readManualChunks(params: {
   return readCollection(LEGACY_MANUAL_CHUNK_COLLECTION);
 }
 
+async function deleteCollectionDocumentsInBatches(db: Firestore, collectionRef: CollectionReference): Promise<number> {
+  let deletedCount = 0;
+
+  while (true) {
+    const snapshot = await collectionRef.limit(FIRESTORE_BATCH_WRITE_LIMIT).get();
+    if (snapshot.empty) {
+      break;
+    }
+
+    const batch = db.batch();
+    snapshot.docs.forEach((docSnap) => batch.delete(docSnap.ref));
+    await batch.commit();
+    deletedCount += snapshot.size;
+
+    if (snapshot.size < FIRESTORE_BATCH_WRITE_LIMIT) {
+      break;
+    }
+  }
+
+  return deletedCount;
+}
+
+async function deleteManualChunkCollections(params: {
+  db: Firestore;
+  manualRef: DocumentReference;
+  manualData: Record<string, unknown>;
+}): Promise<number> {
+  const collectionNames = new Set<string>([
+    LEGACY_MANUAL_CHUNK_COLLECTION,
+    activeManualChunkCollection(params.manualData),
+  ]);
+  const collections = await params.manualRef.listCollections();
+  collections.forEach((collectionRef) => {
+    if (collectionRef.id === LEGACY_MANUAL_CHUNK_COLLECTION || collectionRef.id.startsWith(MANUAL_CHUNK_VERSION_PREFIX)) {
+      collectionNames.add(collectionRef.id);
+    }
+  });
+
+  let deletedCount = 0;
+  for (const collectionName of collectionNames) {
+    deletedCount += await deleteCollectionDocumentsInBatches(params.db, params.manualRef.collection(collectionName));
+  }
+
+  return deletedCount;
+}
+
 function queryTerms(value: string): string[] {
   const stopWords = new Set(['and', 'the', 'for', 'with', 'has', 'had', 'code', 'error', 'machine', 'washer', 'dryer']);
   return Array.from(
@@ -961,6 +1007,64 @@ export const indexOrganizationManual = onRequest(
         ).catch(() => undefined);
       }
       writeError(response, 400, 'manual_index_failed', message);
+    }
+  },
+);
+
+export const deleteOrganizationManual = onRequest(
+  { cors: true },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+
+    try {
+      const caller = await requireVerifiedCaller(request);
+      const organizationId = requireString(request.body?.organizationId, 'organizationId');
+      const manualId = requireString(request.body?.manualId, 'manualId');
+      await assertManualManager(organizationId, caller.uid);
+
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const manualRef = db.doc(`organizations/${organizationId}/manuals/${manualId}`);
+      const manualSnap = await manualRef.get();
+      if (!manualSnap.exists) {
+        throw new Error('Manual record not found.');
+      }
+
+      const manualData = manualSnap.data() ?? {};
+      const storagePath = optionalString(manualData.storagePath);
+      if (storagePath) {
+        const expectedPathPattern = new RegExp(`^orgs/${escapeRegExp(organizationId)}/manuals/[^/]+/${escapeRegExp(manualId)}/[^/]+\\.pdf$`, 'i');
+        if (!expectedPathPattern.test(storagePath)) {
+          throw new Error('Manual storage path is outside this organization.');
+        }
+
+        await getStorage().bucket().file(storagePath).delete().catch((error: unknown) => {
+          const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : null;
+          if (code !== 404 && code !== '404') {
+            throw error;
+          }
+        });
+      }
+
+      const deletedChunkCount = await deleteManualChunkCollections({
+        db,
+        manualRef,
+        manualData,
+      });
+      await manualRef.delete();
+
+      response.status(200).json({
+        ok: true,
+        manualId,
+        deletedChunkCount,
+        storageDeleted: Boolean(storagePath),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Manual delete failed.';
+      writeError(response, 400, 'manual_delete_failed', message);
     }
   },
 );
