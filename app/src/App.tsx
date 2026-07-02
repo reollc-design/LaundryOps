@@ -2303,7 +2303,7 @@ function MachinesScreen({
               machine={machine}
               busy={machineStatusBusyId === machine.id}
               onClick={() => onOpenMachineDetail(machine.id)}
-              onOpenLog={() => onOpenMachineDetail(machine.id)}
+              onOpenDetails={() => onOpenMachineDetail(machine.id)}
               onAskAi={() => onOpenAiAssist(machine)}
               onCreateWorkOrder={() => onCreateWorkOrder(machine.id)}
               onSetStatus={onSetMachineStatus}
@@ -2497,7 +2497,7 @@ function OverviewCard({
 function UrgentMachineRow({
   machine,
   onClick,
-  onOpenLog,
+  onOpenDetails,
   onAskAi,
   onCreateWorkOrder,
   onSetStatus,
@@ -2507,7 +2507,7 @@ function UrgentMachineRow({
 }: {
   machine: UrgentMachine;
   onClick: () => void;
-  onOpenLog?: () => void;
+  onOpenDetails?: () => void;
   onAskAi?: () => void;
   onCreateWorkOrder?: () => void;
   onSetStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
@@ -2549,16 +2549,16 @@ function UrgentMachineRow({
           </button>
         ))}
       </div>
-      {(onAskAi || onOpenLog || onCreateWorkOrder || onEdit || onDelete) && (
+      {(onAskAi || onOpenDetails || onCreateWorkOrder || onEdit || onDelete) && (
         <div className="machine-row-actions">
           {onAskAi && (
             <button className="row-action-button row-action-ai" type="button" onClick={onAskAi} disabled={busy}>
               <Sparkles size={14} /> AI Assist
             </button>
           )}
-          {onOpenLog && (
-            <button className="row-action-button" type="button" onClick={onOpenLog} disabled={busy}>
-              <FileText size={14} /> Log
+          {onOpenDetails && (
+            <button className="row-action-button" type="button" onClick={onOpenDetails} disabled={busy}>
+              <FileText size={14} /> Details
             </button>
           )}
           {onCreateWorkOrder && (
