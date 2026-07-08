@@ -67,7 +67,7 @@ import {
   type OwnerOnboardingDraft,
 } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
-import { deleteOrganizationManual, generateManualRepairAssist, uploadManualAndIndex } from './firebase/manuals';
+import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, uploadManualAndIndex } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
 import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
@@ -2700,6 +2700,9 @@ function ManualLibraryScreen({
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteSuccess, setDeleteSuccess] = useState<string | null>(null);
+  const [reindexBusy, setReindexBusy] = useState(false);
+  const [reindexError, setReindexError] = useState<string | null>(null);
+  const [reindexSuccess, setReindexSuccess] = useState<string | null>(null);
   const [filePickerKey, setFilePickerKey] = useState(0);
 
   const fallbackManualRows: ManualLibraryRow[] = manualRows.map((manual) => ({
@@ -2710,19 +2713,22 @@ function ManualLibraryScreen({
   const indexedCount = manualData.filter((manual) => manual.status === 'indexed').length;
   const missingCount = manualData.filter((manual) => manual.status === 'missing').length;
   const uploadReady = Boolean(orgConnected && organizationId && machineModel.trim() && selectedFile);
+  const reindexReady = Boolean(orgConnected && organizationId && manualData.length > 0);
 
   const handleUpload = async (): Promise<void> => {
     setUploadError(null);
     setUploadSuccess(null);
     setDeleteError(null);
     setDeleteSuccess(null);
+    setReindexError(null);
+    setReindexSuccess(null);
 
     if (!orgConnected || !organizationId) {
       setUploadError('Complete onboarding first to connect manual uploads to your organization account.');
       return;
     }
     if (!machineModel.trim()) {
-      setUploadError('Enter the machine model first.');
+      setUploadError('Enter the machine model number first.');
       return;
     }
     if (!selectedFile) {
@@ -2738,7 +2744,7 @@ function ManualLibraryScreen({
         file: selectedFile,
         linkedMachineCount: 0,
       });
-      setUploadSuccess(`Manual uploaded and indexed for ${machineModel.trim()}.`);
+      setUploadSuccess(`Manual uploaded and indexed for model number ${machineModel.trim()}.`);
       setMachineModel('');
       setSelectedFile(null);
       setFilePickerKey((value) => value + 1);
@@ -2754,6 +2760,8 @@ function ManualLibraryScreen({
     setDeleteSuccess(null);
     setUploadError(null);
     setUploadSuccess(null);
+    setReindexError(null);
+    setReindexSuccess(null);
 
     if (!orgConnected || !organizationId) {
       setDeleteError('Complete onboarding first before deleting manuals.');
@@ -2779,6 +2787,37 @@ function ManualLibraryScreen({
     }
   };
 
+  const handleReindexManuals = async (): Promise<void> => {
+    setReindexError(null);
+    setReindexSuccess(null);
+    setUploadError(null);
+    setUploadSuccess(null);
+    setDeleteError(null);
+    setDeleteSuccess(null);
+
+    if (!orgConnected || !organizationId) {
+      setReindexError('Complete onboarding first before re-indexing manuals.');
+      return;
+    }
+
+    const confirmed = window.confirm('Re-index all uploaded manuals? This reuses the existing PDF uploads and rebuilds the AI source text and error-code index.');
+    if (!confirmed) {
+      return;
+    }
+
+    setReindexBusy(true);
+    try {
+      const result = await reindexOrganizationManuals({ organizationId });
+      const failureNote = result.failedCount > 0 ? ` ${result.failedCount} manual(s) need review.` : '';
+      const limitNote = result.limited ? ' Only the first batch was processed; run it again for more.' : '';
+      setReindexSuccess(`Re-indexed ${result.reindexedCount} uploaded manual(s).${failureNote}${limitNote}`);
+    } catch (error) {
+      setReindexError(getErrorMessage(error, 'Could not re-index manuals. Try again.'));
+    } finally {
+      setReindexBusy(false);
+    }
+  };
+
   return (
     <div className="screen-stack">
       <section className="manual-summary">
@@ -2799,15 +2838,15 @@ function ManualLibraryScreen({
           <span className="upload-icon"><FileUp size={23} /></span>
           <div>
             <h2>Upload Repair Manual</h2>
-            <p>Link a PDF to a machine model so AI Repair Assist answers from the actual manual.</p>
+            <p>Link a PDF to a specific machine model number so AI Repair Assist answers from the actual manual.</p>
           </div>
         </div>
         <div className="upload-form">
           <label>
-            <span>Machine Model</span>
+            <span>Machine Model Number</span>
             <input
               value={machineModel}
-              placeholder="Ex: Washer Model 123"
+              placeholder="Ex: SFNNCASG113TN01"
               onChange={(event) => setMachineModel(event.target.value)}
               disabled={uploadBusy}
             />
@@ -2865,8 +2904,30 @@ function ManualLibraryScreen({
           <h2>Manual Library</h2>
           <span>{manualData.length} models</span>
         </div>
+        {orgConnected && (
+          <button
+            className="secondary-action full-width-action"
+            type="button"
+            onClick={() => void handleReindexManuals()}
+            disabled={!reindexReady || reindexBusy}
+          >
+            {reindexBusy ? 'Re-indexing Manuals...' : 'Re-index Uploaded Manuals'}
+          </button>
+        )}
         {orgConnected && orgManualsLoading && <p className="search-hint">Refreshing manuals from your company data...</p>}
         {orgConnected && orgManualsError && <p className="empty-state">Could not load live manuals: {orgManualsError}</p>}
+        {reindexError && (
+          <div className="auth-message">
+            <strong>Manual re-index failed</strong>
+            <span>{reindexError}</span>
+          </div>
+        )}
+        {reindexSuccess && (
+          <div className="profile-status-line">
+            <Check size={16} />
+            <span>{reindexSuccess}</span>
+          </div>
+        )}
         <div className="manual-list">
           {manualData.map((manual) => (
             <ManualRow
@@ -4418,7 +4479,7 @@ function WorkOrderDetailScreen({
 }
 
 const NO_INDEXED_MANUAL_MESSAGE =
-  'No machine manual has been uploaded and indexed for this machine, so AI Repair Assist cannot provide a manual-grounded answer. Upload the manufacturer repair manual before using AI Repair Assist.';
+  'No machine manual has been uploaded and indexed for this machine model number, so AI Repair Assist cannot provide a manual-grounded answer. Upload the manufacturer repair manual using the exact model number before using AI Repair Assist.';
 
 function repairAssistModelKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -4474,7 +4535,7 @@ function RepairAssistScreen({
   const machineModel = useMemo(() => repairAssistMachineModel(selectedMachine), [selectedMachine]);
   const selectedMachineHasMakeModel = Boolean(selectedMachine?.make?.trim() && selectedMachine?.modelNumber?.trim());
   const selectedModelHasIndexedManual = useMemo(() => {
-    const selectedKey = repairAssistModelKey(machineModel);
+    const selectedKey = repairAssistModelKey(selectedMachine?.modelNumber ?? '');
     if (!selectedKey) {
       return false;
     }
@@ -4483,10 +4544,10 @@ function RepairAssistScreen({
       if (manual.status !== 'indexed') {
         return false;
       }
-      const manualKey = repairAssistModelKey(manual.model);
-      return Boolean(manualKey && (manualKey === selectedKey || manualKey.includes(selectedKey) || selectedKey.includes(manualKey)));
+      const manualKey = repairAssistModelKey(`${manual.model} ${manual.title}`);
+      return Boolean(manualKey && manualKey.includes(selectedKey));
     });
-  }, [machineModel, manualModels]);
+  }, [manualModels, selectedMachine?.modelNumber]);
 
   const clearAssistResult = (invalidateRequest = true): void => {
     if (invalidateRequest) {

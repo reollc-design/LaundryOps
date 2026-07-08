@@ -24,6 +24,15 @@ interface ManualEndpointResponse {
     title: string;
     machineModel: string;
   };
+  reindexedCount?: number;
+  failedCount?: number;
+  skippedCount?: number;
+  uploadedManualCount?: number;
+  limited?: boolean;
+  failures?: Array<{
+    manualId: string;
+    message: string;
+  }>;
 }
 
 export interface UploadManualInput {
@@ -41,6 +50,22 @@ export interface UploadManualResult {
 export interface DeleteManualInput {
   organizationId: string;
   manualId: string;
+}
+
+export interface ReindexManualsInput {
+  organizationId: string;
+}
+
+export interface ReindexManualsResult {
+  reindexedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  uploadedManualCount: number;
+  limited: boolean;
+  failures: Array<{
+    manualId: string;
+    message: string;
+  }>;
 }
 
 export interface ManualRepairAssistInput {
@@ -225,6 +250,27 @@ export async function deleteOrganizationManual(input: DeleteManualInput): Promis
     organizationId,
     manualId,
   });
+}
+
+export async function reindexOrganizationManuals(input: ReindexManualsInput): Promise<ReindexManualsResult> {
+  const organizationId = input.organizationId.trim();
+
+  if (!organizationId) {
+    throw new Error('Missing organization ID.');
+  }
+
+  const data = await callManualEndpoint('reindexOrganizationManuals', {
+    organizationId,
+  });
+
+  return {
+    reindexedCount: typeof data.reindexedCount === 'number' ? data.reindexedCount : 0,
+    failedCount: typeof data.failedCount === 'number' ? data.failedCount : 0,
+    skippedCount: typeof data.skippedCount === 'number' ? data.skippedCount : 0,
+    uploadedManualCount: typeof data.uploadedManualCount === 'number' ? data.uploadedManualCount : 0,
+    limited: Boolean(data.limited),
+    failures: Array.isArray(data.failures) ? data.failures : [],
+  };
 }
 
 export async function generateManualRepairAssist(input: ManualRepairAssistInput): Promise<ManualRepairAssistResult> {

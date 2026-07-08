@@ -9,6 +9,7 @@ Use this as the running cleanup list before beta and before app-store packaging.
 - Update GitHub Actions to require `VITE_FUNCTIONS_API_BASE_URL` or confirm `VITE_BILLING_API_BASE_URL` is intentionally used for Functions.
 - Decide whether GitHub Actions should deploy Storage rules along with Hosting and Firestore rules.
 - Keep targeted Functions deploys for LaundryOps backend changes; do not broad-deploy unrelated functions from this project.
+- Implement actual server-side rate limiting for expensive and sensitive Cloud Functions, especially `generateRepairAssist`, `indexOrganizationManual`, `deleteOrganizationManual`, `createStripeCheckoutSession`, and `createStripeBillingPortalSession`. Headers alone do not block abuse; enforce limits with Firestore counters, App Check, Cloud Armor, or another backend gate before public launch.
 - Update Firebase rules tests and manual AI setup docs to match the current manual upload Storage path.
 - Before creating any new Google Cloud/Firebase project that uses Developer Connect Git repository connections, explicitly enable the Secret Manager API (`secretmanager.googleapis.com`). Starting September 21, 2026, Developer Connect will no longer auto-enable it. Existing LaundryOps projects should not need action from this notice.
 - Review Firebase Authentication users before launch. `Authentication > Users` contains login identities only, not companies or machine records.
