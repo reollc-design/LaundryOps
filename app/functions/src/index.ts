@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, Timestamp, getFirestore, type CollectionReference, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
+import { FieldPath, FieldValue, Timestamp, getFirestore, type CollectionReference, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import type { Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
@@ -9,6 +10,26 @@ import { setGlobalOptions } from 'firebase-functions/v2/options';
 import OpenAI from 'openai';
 import { PDFParse } from 'pdf-parse';
 import Stripe from 'stripe';
+import {
+  buildManualErrorCodeIndex,
+  chunkManualText,
+  errorCodeAliases,
+  processManualPages,
+  type ManualChunkText,
+  type ManualErrorCodeIndexEntry,
+} from './manual-indexing.js';
+import {
+  assertOrganizationAccess,
+  bearerTokenFromHeader,
+  consumeRateLimit,
+  OrganizationAccessError,
+  RateLimitExceededError,
+  type OrganizationAccessState,
+  type RateLimitRecord,
+  type RequestRateLimitOperation,
+  RequestAuthenticationError,
+  REQUEST_RATE_LIMIT_POLICIES,
+} from './request-protection.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -34,21 +55,18 @@ const ALLOWED_CORS_ORIGINS = process.env.FUNCTIONS_EMULATOR === 'true'
   ? [...PRODUCTION_CORS_ORIGINS, ...LOCAL_CORS_ORIGINS]
   : PRODUCTION_CORS_ORIGINS;
 const DEFAULT_MANUAL_MODEL = 'gpt-5.5';
-const MAX_MANUAL_CHUNK_LENGTH = 1400;
 const MAX_REPAIR_ASSIST_CHUNKS = 8;
 const MAX_CODE_ALIAS_PARTS = 5;
 const MAX_CODE_ALIAS_PATTERN_LENGTH = 200;
 const MAX_DOCUMENT_ID_LENGTH = 200;
 const MAX_STORAGE_PATH_LENGTH = 1024;
 const MAX_MACHINE_MODEL_LENGTH = 500;
-const MAX_MANUAL_ERROR_CODE_INDEX_DOCS = 250;
-const MAX_MANUAL_ERROR_CODE_CHUNKS = 8;
-const MAX_MANUAL_ERROR_CODE_PREVIEW_LENGTH = 240;
-const MAX_BULK_MANUAL_REINDEX_COUNT = 100;
+const MANUAL_REINDEX_PAGE_SIZE = 100;
 const FIRESTORE_BATCH_WRITE_LIMIT = 450;
 const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
 const MANUAL_CHUNK_VERSION_PREFIX = 'chunks_v';
-const MANUAL_ERROR_CODE_COLLECTION = 'errorCodes';
+const LEGACY_MANUAL_ERROR_CODE_COLLECTION = 'errorCodes';
+const MANUAL_ERROR_CODE_VERSION_PREFIX = 'errorCodes_v';
 type BillingPlanKey = 'monthly' | 'annual';
 type ManualStatus = 'indexed' | 'processing' | 'missing';
 
@@ -59,19 +77,6 @@ interface MachineContext {
   make?: string;
   modelNumber?: string;
   model: string;
-}
-
-interface ManualChunkText {
-  chunkId: string;
-  text: string;
-}
-
-interface ManualErrorCodeIndexEntry {
-  normalizedCode: string;
-  displayCode: string;
-  aliases: string[];
-  chunkIds: string[];
-  previews: Array<{ chunkId: string; text: string }>;
 }
 
 interface ManualIndexResult {
@@ -182,16 +187,31 @@ function toDateOrNull(epochSeconds: number | null | undefined): Date | null {
 
 async function requireVerifiedCaller(request: Request): Promise<{ uid: string; email: string | null }> {
   ensureFirebaseAdmin();
-  const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new Error('Missing auth token.');
+  const idToken = bearerTokenFromHeader(request.headers.authorization);
+  let decoded;
+  try {
+    decoded = await getAuth().verifyIdToken(idToken);
+  } catch {
+    throw new RequestAuthenticationError('Invalid auth token.');
   }
-
-  const idToken = authHeader.slice('Bearer '.length).trim();
-  const decoded = await getAuth().verifyIdToken(idToken);
   return {
     uid: decoded.uid,
     email: typeof decoded.email === 'string' ? decoded.email : null,
+  };
+}
+
+function organizationAccessState(
+  orgSnap: FirebaseFirestore.DocumentSnapshot,
+  membershipSnap: FirebaseFirestore.DocumentSnapshot,
+): OrganizationAccessState {
+  const orgData = orgSnap.data();
+  const membershipData = membershipSnap.data();
+  return {
+    organizationExists: orgSnap.exists,
+    ownerUserId: optionalString(orgData?.ownerUserId),
+    membershipExists: membershipSnap.exists,
+    membershipRole: membershipData?.role,
+    membershipStatus: membershipData?.status,
   };
 }
 
@@ -201,20 +221,11 @@ async function assertOwnerOrAdmin(organizationId: string, uid: string): Promise<
   const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
   const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
-  const orgData = orgSnap.data();
-  if (orgData?.ownerUserId === uid) {
-    return;
-  }
-  if (!membershipSnap.exists) {
-    throw new Error('Organization access not found.');
-  }
-
-  const membershipData = membershipSnap.data();
-  const role = membershipData?.role;
-  const status = membershipData?.status;
-  if ((role !== 'owner' && role !== 'admin') || status !== 'active') {
-    throw new Error('Owner or admin access is required.');
-  }
+  assertOrganizationAccess({
+    uid,
+    mode: 'ownerOrAdmin',
+    state: organizationAccessState(orgSnap, membershipSnap),
+  });
 }
 
 async function assertManualManager(organizationId: string, uid: string): Promise<void> {
@@ -223,21 +234,11 @@ async function assertManualManager(organizationId: string, uid: string): Promise
   const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
   const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
-  const orgData = orgSnap.data();
-  if (orgData?.ownerUserId === uid) {
-    return;
-  }
-  if (!membershipSnap.exists) {
-    throw new Error('Organization access not found.');
-  }
-
-  const membershipData = membershipSnap.data();
-  const role = membershipData?.role;
-  const status = membershipData?.status;
-  const canManageManuals = role === 'owner' || role === 'admin' || role === 'manager';
-  if (!canManageManuals || status !== 'active') {
-    throw new Error('Owner, admin, or manager access is required.');
-  }
+  assertOrganizationAccess({
+    uid,
+    mode: 'manualManager',
+    state: organizationAccessState(orgSnap, membershipSnap),
+  });
 }
 
 async function assertOrganizationMember(organizationId: string, uid: string): Promise<void> {
@@ -246,18 +247,11 @@ async function assertOrganizationMember(organizationId: string, uid: string): Pr
   const orgRef = db.doc(`organizations/${organizationId}`);
   const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
   const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
-  const orgData = orgSnap.data();
-  if (orgData?.ownerUserId === uid) {
-    return;
-  }
-  if (!membershipSnap.exists) {
-    throw new Error('Organization access not found.');
-  }
-
-  const membershipData = membershipSnap.data();
-  if (membershipData?.status !== 'active') {
-    throw new Error('An active organization membership is required.');
-  }
+  assertOrganizationAccess({
+    uid,
+    mode: 'member',
+    state: organizationAccessState(orgSnap, membershipSnap),
+  });
 }
 
 function normalizeMachineModelKey(value: string): string {
@@ -424,17 +418,31 @@ async function findIndexedManualForModel(params: {
     }
   }
 
-  const indexedSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
-    .where('status', '==', 'indexed')
-    .limit(100)
-    .get();
+  const indexedDocs = [];
+  let indexedCursor: string | undefined;
+  while (true) {
+    let indexedQuery = params.db.collection(`organizations/${params.organizationId}/manuals`)
+      .orderBy(FieldPath.documentId())
+      .limit(MANUAL_REINDEX_PAGE_SIZE);
+    if (indexedCursor) {
+      indexedQuery = indexedQuery.startAfter(indexedCursor);
+    }
+
+    const indexedPage = await indexedQuery.get();
+    indexedDocs.push(...indexedPage.docs.filter((docSnap) => docSnap.data().status === 'indexed'));
+    const nextCursor = indexedPage.docs[indexedPage.docs.length - 1]?.id;
+    if (indexedPage.empty || indexedPage.size < MANUAL_REINDEX_PAGE_SIZE || !nextCursor || nextCursor === indexedCursor) {
+      break;
+    }
+    indexedCursor = nextCursor;
+  }
 
   const makeKey = compactKey(params.machine?.make ?? '');
   const modelNumberKey = compactKey(params.machine?.modelNumber ?? '');
   const strongModelKeys = uniqueStrings(modelKeys.map(compactKey).filter((value) => value.length >= 4));
   const hasMakeAndModelNumber = makeKey.length >= 3 && modelNumberKey.length >= 4;
   const compactModelNumberKey = compactKey(params.machine?.modelNumber ?? '');
-  const candidates = indexedSnap.docs
+  const candidates = indexedDocs
     .map((docSnap) => {
       const data = docSnap.data();
       const manualModel = optionalString(data.machineModel) ?? optionalString(data.title) ?? docSnap.id;
@@ -477,51 +485,20 @@ function manualStatusFromValue(value: unknown): ManualStatus {
   return 'processing';
 }
 
-function chunkManualText(text: string, maxLength: number = MAX_MANUAL_CHUNK_LENGTH): string[] {
-  const normalized = text
-    .replace(/\r/g, '\n')
-    .replace(/\t/g, ' ')
-    .replace(/\u0000/g, ' ')
-    .replace(/ {2,}/g, ' ')
-    .trim();
-
-  if (!normalized) {
-    return [];
-  }
-
-  const paragraphs = normalized
-    .split(/\n{2,}/)
-    .map((part) => part.replace(/\n+/g, ' ').trim())
-    .filter((part) => part.length > 0);
-
-  const chunks: string[] = [];
-  let current = '';
-  for (const paragraph of paragraphs) {
-    if (!current) {
-      current = paragraph;
-      continue;
-    }
-    if ((current.length + 2 + paragraph.length) <= maxLength) {
-      current = `${current}\n\n${paragraph}`;
-      continue;
-    }
-    chunks.push(current);
-    current = paragraph;
-  }
-
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks;
-}
-
 function newManualChunkCollectionName(): string {
   return `${MANUAL_CHUNK_VERSION_PREFIX}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function newManualErrorCodeCollectionName(): string {
+  return `${MANUAL_ERROR_CODE_VERSION_PREFIX}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function activeManualChunkCollection(manualData: Record<string, unknown>): string {
   return optionalString(manualData.activeChunkCollection) ?? LEGACY_MANUAL_CHUNK_COLLECTION;
+}
+
+function activeManualErrorCodeCollection(manualData: Record<string, unknown>): string {
+  return optionalString(manualData.activeErrorCodeCollection) ?? LEGACY_MANUAL_ERROR_CODE_COLLECTION;
 }
 
 function manualChunkId(index: number): string {
@@ -580,12 +557,7 @@ async function readManualChunks(params: {
       .filter((chunk) => chunk.text.length > 0);
   };
 
-  const chunks = await readCollection(collectionName);
-  if (chunks.length > 0 || collectionName === LEGACY_MANUAL_CHUNK_COLLECTION) {
-    return chunks;
-  }
-
-  return readCollection(LEGACY_MANUAL_CHUNK_COLLECTION);
+  return readCollection(collectionName);
 }
 
 async function deleteCollectionDocumentsInBatches(db: Firestore, collectionRef: CollectionReference): Promise<number> {
@@ -610,7 +582,7 @@ async function deleteCollectionDocumentsInBatches(db: Firestore, collectionRef: 
   return deletedCount;
 }
 
-async function deleteManualChunkCollections(params: {
+async function deleteManualIndexCollections(params: {
   db: Firestore;
   manualRef: DocumentReference;
   manualData: Record<string, unknown>;
@@ -618,10 +590,17 @@ async function deleteManualChunkCollections(params: {
   const collectionNames = new Set<string>([
     LEGACY_MANUAL_CHUNK_COLLECTION,
     activeManualChunkCollection(params.manualData),
+    LEGACY_MANUAL_ERROR_CODE_COLLECTION,
+    activeManualErrorCodeCollection(params.manualData),
   ]);
   const collections = await params.manualRef.listCollections();
   collections.forEach((collectionRef) => {
-    if (collectionRef.id === LEGACY_MANUAL_CHUNK_COLLECTION || collectionRef.id.startsWith(MANUAL_CHUNK_VERSION_PREFIX)) {
+    if (
+      collectionRef.id === LEGACY_MANUAL_CHUNK_COLLECTION
+      || collectionRef.id.startsWith(MANUAL_CHUNK_VERSION_PREFIX)
+      || collectionRef.id === LEGACY_MANUAL_ERROR_CODE_COLLECTION
+      || collectionRef.id.startsWith(MANUAL_ERROR_CODE_VERSION_PREFIX)
+    ) {
       collectionNames.add(collectionRef.id);
     }
   });
@@ -634,166 +613,31 @@ async function deleteManualChunkCollections(params: {
   return deletedCount;
 }
 
-function formatManualErrorCode(value: string): string {
-  return value
-    .toUpperCase()
-    .replace(/\s*[-:]\s*/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+async function deleteStaleManualIndexCollections(params: {
+  db: Firestore;
+  manualRef: DocumentReference;
+  manualData: Record<string, unknown>;
+}): Promise<number> {
+  const activeChunkCollection = activeManualChunkCollection(params.manualData);
+  const activeErrorCodeCollection = activeManualErrorCodeCollection(params.manualData);
+  const collections = await params.manualRef.listCollections();
+  let deletedCount = 0;
 
-function manualErrorCodeAliases(displayCode: string): string[] {
-  const compact = compactKey(displayCode).toUpperCase();
-  const spaced = compact.length > 1 ? `${compact.slice(0, 1)} ${compact.slice(1)}` : compact;
-  return uniqueStrings([
-    displayCode.toUpperCase(),
-    compact,
-    spaced,
-    spaced.replace(/\s+/g, '-'),
-    spaced.replace(/\s+/g, ':'),
-  ]);
-}
-
-const MANUAL_ERROR_CODE_CONTEXT_PATTERN = /\b(error|fault|code|codes|display|displays|diagnostic|diagnostics|alarm|alarms)\b/i;
-const MANUAL_ERROR_CODE_LINE_START_PATTERN = /^[\s*|:;.,-]*[EF]\s*[-:]?\s*[A-Z0-9]{1,5}\b/i;
-const MANUAL_ERROR_CODE_PATTERN = /\b(?:[EF]\s*[-:]?\s*[A-Z0-9]{1,5}|[A-Z]{1,3}\s*[-:]?\s*\d{1,5}|\d{1,3}\s*[-:]?\s*[A-Z]{1,3})\b/gi;
-const MANUAL_ERROR_CODE_BLOCKLIST = new Set([
-  'alarm',
-  'alarms',
-  'code',
-  'codes',
-  'diagnostic',
-  'diagnostics',
-  'display',
-  'displays',
-  'door',
-  'error',
-  'errors',
-  'fault',
-  'faults',
-]);
-
-function shouldScanManualLineForErrorCodes(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.length > 320) {
-    return false;
-  }
-  return MANUAL_ERROR_CODE_CONTEXT_PATTERN.test(trimmed) || MANUAL_ERROR_CODE_LINE_START_PATTERN.test(trimmed);
-}
-
-function isLikelyManualErrorCode(rawCode: string): boolean {
-  const trimmed = rawCode.replace(/\s+/g, ' ').trim();
-  const compact = compactKey(trimmed);
-  if (compact.length < 2 || compact.length > 12 || MANUAL_ERROR_CODE_BLOCKLIST.has(compact)) {
-    return false;
-  }
-
-  const hasDigit = /\d/.test(compact);
-  const hasSeparator = /[\s:-]/.test(trimmed);
-  const startsWithCommonErrorPrefix = /^[ef]/i.test(compact);
-  const isUppercaseLike = trimmed === trimmed.toUpperCase();
-  return hasDigit || (startsWithCommonErrorPrefix && compact.length <= 6 && (hasSeparator || isUppercaseLike));
-}
-
-function previewForManualErrorCode(chunkText: string, normalizedCode: string, preferredPreview?: string): string {
-  if (preferredPreview) {
-    return preferredPreview.length > MAX_MANUAL_ERROR_CODE_PREVIEW_LENGTH
-      ? `${preferredPreview.slice(0, MAX_MANUAL_ERROR_CODE_PREVIEW_LENGTH)}...`
-      : preferredPreview;
-  }
-
-  const lines = chunkText
-    .split(/\n+/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter((line) => line.length > 0);
-  const matchingLine = lines.find((line) => compactKey(line).includes(normalizedCode)) ?? lines[0] ?? '';
-  return matchingLine.length > MAX_MANUAL_ERROR_CODE_PREVIEW_LENGTH
-    ? `${matchingLine.slice(0, MAX_MANUAL_ERROR_CODE_PREVIEW_LENGTH)}...`
-    : matchingLine;
-}
-
-function manualErrorCodeContext(chunkText: string, index: number, rawCode: string): string {
-  const start = Math.max(0, index - 110);
-  const end = Math.min(chunkText.length, index + rawCode.length + 180);
-  return chunkText.slice(start, end).replace(/\s+/g, ' ').trim();
-}
-
-function contextSupportsManualErrorCode(context: string): boolean {
-  return MANUAL_ERROR_CODE_CONTEXT_PATTERN.test(context) || MANUAL_ERROR_CODE_LINE_START_PATTERN.test(context);
-}
-
-function addManualErrorCodeIndexEntry(params: {
-  entries: Map<string, ManualErrorCodeIndexEntry>;
-  chunk: ManualChunkText;
-  rawCode: string;
-  preview?: string;
-}): void {
-  if (!isLikelyManualErrorCode(params.rawCode)) {
-    return;
-  }
-
-  const displayCode = formatManualErrorCode(params.rawCode);
-  const normalizedCode = compactKey(displayCode);
-  const existing = params.entries.get(normalizedCode);
-  const entry: ManualErrorCodeIndexEntry = existing ?? {
-    normalizedCode,
-    displayCode,
-    aliases: manualErrorCodeAliases(displayCode),
-    chunkIds: [],
-    previews: [],
-  };
-
-  entry.aliases = uniqueStrings([...entry.aliases, ...manualErrorCodeAliases(displayCode)]);
-  if (!entry.chunkIds.includes(params.chunk.chunkId) && entry.chunkIds.length < MAX_MANUAL_ERROR_CODE_CHUNKS) {
-    entry.chunkIds.push(params.chunk.chunkId);
-    entry.previews.push({
-      chunkId: params.chunk.chunkId,
-      text: previewForManualErrorCode(params.chunk.text, normalizedCode, params.preview),
-    });
-  }
-  params.entries.set(normalizedCode, entry);
-}
-
-function buildManualErrorCodeIndex(chunks: ManualChunkText[]): ManualErrorCodeIndexEntry[] {
-  const entries = new Map<string, ManualErrorCodeIndexEntry>();
-
-  for (const chunk of chunks) {
-    const lines = chunk.text
-      .split(/\n+/)
-      .map((line) => line.replace(/\s+/g, ' ').trim())
-      .filter(shouldScanManualLineForErrorCodes);
-
-    for (const line of lines) {
-      for (const match of line.matchAll(MANUAL_ERROR_CODE_PATTERN)) {
-        const rawCode = match[0] ?? '';
-        addManualErrorCodeIndexEntry({
-          entries,
-          chunk,
-          rawCode,
-          preview: line,
-        });
-      }
+  for (const collectionRef of collections) {
+    const isChunkIndex = collectionRef.id === LEGACY_MANUAL_CHUNK_COLLECTION
+      || collectionRef.id.startsWith(MANUAL_CHUNK_VERSION_PREFIX);
+    const isErrorCodeIndex = collectionRef.id === LEGACY_MANUAL_ERROR_CODE_COLLECTION
+      || collectionRef.id.startsWith(MANUAL_ERROR_CODE_VERSION_PREFIX);
+    if (!isChunkIndex && !isErrorCodeIndex) {
+      continue;
     }
-
-    for (const match of chunk.text.matchAll(MANUAL_ERROR_CODE_PATTERN)) {
-      const rawCode = match[0] ?? '';
-      const matchIndex = match.index ?? 0;
-      const context = manualErrorCodeContext(chunk.text, matchIndex, rawCode);
-      if (!contextSupportsManualErrorCode(context)) {
-        continue;
-      }
-      addManualErrorCodeIndexEntry({
-        entries,
-        chunk,
-        rawCode,
-        preview: context,
-      });
+    if (collectionRef.id === activeChunkCollection || collectionRef.id === activeErrorCodeCollection) {
+      continue;
     }
+    deletedCount += await deleteCollectionDocumentsInBatches(params.db, collectionRef);
   }
 
-  return Array.from(entries.values())
-    .sort((a, b) => a.normalizedCode.localeCompare(b.normalizedCode))
-    .slice(0, MAX_MANUAL_ERROR_CODE_INDEX_DOCS);
+  return deletedCount;
 }
 
 async function writeManualErrorCodeIndexInBatches(params: {
@@ -801,10 +645,9 @@ async function writeManualErrorCodeIndexInBatches(params: {
   manualRef: DocumentReference;
   chunks: ManualChunkText[];
   uid: string;
+  collectionName: string;
 }): Promise<number> {
-  const errorCodeRef = params.manualRef.collection(MANUAL_ERROR_CODE_COLLECTION);
-  await deleteCollectionDocumentsInBatches(params.db, errorCodeRef);
-
+  const errorCodeRef = params.manualRef.collection(params.collectionName);
   const entries = buildManualErrorCodeIndex(params.chunks);
   let batch = params.db.batch();
   let writes = 0;
@@ -837,6 +680,7 @@ async function writeManualErrorCodeIndexInBatches(params: {
 
 async function readManualErrorCodeChunkIds(params: {
   manualRef: DocumentReference;
+  manualData: Record<string, unknown>;
   codeAliases: string[];
 }): Promise<string[]> {
   const normalizedCodes = uniqueStrings(params.codeAliases.map(compactKey))
@@ -845,8 +689,9 @@ async function readManualErrorCodeChunkIds(params: {
     return [];
   }
 
+  const collectionName = activeManualErrorCodeCollection(params.manualData);
   const docs = await Promise.all(
-    normalizedCodes.map((code) => params.manualRef.collection(MANUAL_ERROR_CODE_COLLECTION).doc(code).get()),
+    normalizedCodes.map((code) => params.manualRef.collection(collectionName).doc(code).get()),
   );
   const chunkIds: string[] = [];
   for (const docSnap of docs) {
@@ -878,37 +723,6 @@ function queryTerms(value: string): string[] {
         .filter((term) => term.length >= 2 && !stopWords.has(term)),
     ),
   );
-}
-
-function errorCodeAliases(errorCode: string | null, symptoms: string): string[] {
-  const sourceValues = [errorCode ?? ''];
-  const codePattern = /\b(?:error\s*code|code)\s*(?:is|:)?\s*([a-z0-9][a-z0-9\s:-]{0,12})/gi;
-  for (const match of symptoms.matchAll(codePattern)) {
-    sourceValues.push(match[1] ?? '');
-  }
-
-  const aliases: string[] = [];
-  for (const source of sourceValues) {
-    const cleaned = source
-      .toLowerCase()
-      .replace(/\b(on|and|with|for|in|at|while|when|during|showing|displaying)\b.*$/i, '')
-      .replace(/[.?!,;]+$/g, '')
-      .trim();
-    if (!cleaned) {
-      continue;
-    }
-
-    const parts = cleaned.split(/[^a-z0-9]+/).filter(Boolean);
-    const compact = parts.join('');
-    aliases.push(cleaned, compact);
-    if (parts.length > 1) {
-      aliases.push(parts.join(' '), parts.join('-'), parts.join(':'));
-    } else if (/^[a-z]{1,2}[0-9a-z]{1,5}$/.test(compact)) {
-      aliases.push(`${compact.slice(0, 1)} ${compact.slice(1)}`, `${compact.slice(0, 1)}-${compact.slice(1)}`);
-    }
-  }
-
-  return uniqueStrings(aliases).filter((alias) => compactKey(alias).length >= 2);
 }
 
 function escapeRegExp(value: string): string {
@@ -1150,6 +964,8 @@ const CLIENT_SAFE_ERROR_PREFIXES = [
 
 const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'Missing auth token.',
+  'Invalid auth token.',
+  'Too many requests. Please try again shortly.',
   'Organization access not found.',
   'Owner or admin access is required.',
   'Owner, admin, or manager access is required.',
@@ -1187,9 +1003,99 @@ function clientSafeErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function addRateLimitHeaders(response: Response): void {
-  response.set('X-RateLimit-Limit', '10');
-  response.set('X-RateLimit-Window', '60');
+interface RateLimitHeaderState {
+  limit: number;
+  windowSeconds: number;
+  remaining: number;
+  retryAfterSeconds?: number;
+}
+
+function rateLimitRecordFromData(data: Record<string, unknown> | undefined): RateLimitRecord | null {
+  const windowStartedAt = data?.windowStartedAt;
+  const windowStartedAtMs = windowStartedAt instanceof Timestamp
+    ? windowStartedAt.toMillis()
+    : typeof windowStartedAt === 'number'
+      ? windowStartedAt
+      : null;
+  const count = data?.count;
+  if (windowStartedAtMs === null || typeof count !== 'number') {
+    return null;
+  }
+  return { windowStartedAtMs, count };
+}
+
+function rateLimitDocumentId(operation: RequestRateLimitOperation, uid: string): string {
+  return createHash('sha256').update(`${operation}:${uid}`).digest('hex');
+}
+
+function addRateLimitHeaders(response: Response, state?: RateLimitHeaderState): void {
+  if (!response.get('X-RateLimit-Limit')) {
+    response.set('X-RateLimit-Limit', String(state?.limit ?? 10));
+    response.set('X-RateLimit-Window', String(state?.windowSeconds ?? 60));
+    response.set('X-RateLimit-Remaining', String(state?.remaining ?? state?.limit ?? 10));
+  }
+  if (state) {
+    response.set('X-RateLimit-Limit', String(state.limit));
+    response.set('X-RateLimit-Window', String(state.windowSeconds));
+    response.set('X-RateLimit-Remaining', String(state.remaining));
+    if (state.retryAfterSeconds !== undefined) {
+      response.set('Retry-After', String(state.retryAfterSeconds));
+    }
+  }
+}
+
+async function enforceRequestRateLimit(params: {
+  operation: RequestRateLimitOperation;
+  uid: string;
+  response: Response;
+}): Promise<RateLimitHeaderState> {
+  ensureFirebaseAdmin();
+  const policy = REQUEST_RATE_LIMIT_POLICIES[params.operation];
+  const db = getFirestore();
+  const rateLimitRef = db.doc(`functionRateLimits/${rateLimitDocumentId(params.operation, params.uid)}`);
+  const nowMs = Date.now();
+  let decision: ReturnType<typeof consumeRateLimit> | undefined;
+
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(rateLimitRef);
+    decision = consumeRateLimit(rateLimitRecordFromData(snapshot.data()), nowMs, policy);
+    if (decision.allowed) {
+      transaction.set(rateLimitRef, {
+        windowStartedAt: Timestamp.fromMillis(decision.record.windowStartedAtMs),
+        count: decision.record.count,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+  });
+
+  if (!decision) {
+    throw new Error('Could not evaluate request rate limit.');
+  }
+
+  const state: RateLimitHeaderState = {
+    limit: policy.limit,
+    windowSeconds: policy.windowSeconds,
+    remaining: decision.remaining,
+    retryAfterSeconds: decision.retryAfterSeconds,
+  };
+  addRateLimitHeaders(params.response, state);
+  if (!decision.allowed) {
+    throw new RateLimitExceededError(decision.retryAfterSeconds ?? policy.windowSeconds);
+  }
+  return state;
+}
+
+function httpStatusForError(error: unknown, fallbackStatus: number): number {
+  if (error instanceof RateLimitExceededError) {
+    return 429;
+  }
+  if (error instanceof RequestAuthenticationError) {
+    return 401;
+  }
+  if (error instanceof OrganizationAccessError) {
+    return 403;
+  }
+  return fallbackStatus;
 }
 
 function writeError(response: Response, status: number, code: string, message: string): void {
@@ -1212,6 +1118,9 @@ async function indexManualRecord(params: {
   const manualRef = params.db.doc(`organizations/${params.organizationId}/manuals/${params.manualId}`);
   let previousStatusForFailure: ManualStatus | null = null;
   let canMarkFailure = false;
+  let newChunkCollectionName: string | null = null;
+  let newErrorCodeCollectionName: string | null = null;
+  let committedNewIndex = false;
 
   try {
     const manualSnap = await manualRef.get();
@@ -1265,6 +1174,9 @@ async function indexManualRecord(params: {
     }, 0);
 
     const chunkCollectionName = newManualChunkCollectionName();
+    const errorCodeCollectionName = newManualErrorCodeCollectionName();
+    newChunkCollectionName = chunkCollectionName;
+    newErrorCodeCollectionName = errorCodeCollectionName;
     const storedChunks = await writeManualChunksInBatches({
       db: params.db,
       manualRef,
@@ -1277,6 +1189,7 @@ async function indexManualRecord(params: {
       manualRef,
       chunks: storedChunks,
       uid: params.uid,
+      collectionName: errorCodeCollectionName,
     });
     const pageCount = Number.isFinite(parsed.total) ? parsed.total : null;
 
@@ -1289,6 +1202,7 @@ async function indexManualRecord(params: {
         status: 'indexed',
         indexingStatus: 'idle',
         activeChunkCollection: chunkCollectionName,
+        activeErrorCodeCollection: errorCodeCollectionName,
         pageCount,
         chunkCount: chunks.length,
         errorCodeIndexCount,
@@ -1300,6 +1214,18 @@ async function indexManualRecord(params: {
       },
       { merge: true },
     );
+    committedNewIndex = true;
+    await deleteStaleManualIndexCollections({
+      db: params.db,
+      manualRef,
+      manualData: {
+        ...manualData,
+        activeChunkCollection: chunkCollectionName,
+        activeErrorCodeCollection: errorCodeCollectionName,
+      },
+    }).catch((cleanupError) => {
+      console.warn('Manual re-index succeeded but stale index cleanup failed.', cleanupError);
+    });
 
     return {
       manualId: params.manualId,
@@ -1309,6 +1235,16 @@ async function indexManualRecord(params: {
     };
   } catch (error) {
     const message = clientSafeErrorMessage(error, 'Manual indexing failed.');
+    if (!committedNewIndex) {
+      for (const collectionName of [newChunkCollectionName, newErrorCodeCollectionName]) {
+        if (!collectionName) {
+          continue;
+        }
+        await deleteCollectionDocumentsInBatches(params.db, manualRef.collection(collectionName)).catch((cleanupError) => {
+          console.warn('Failed to clean up an incomplete manual index collection.', cleanupError);
+        });
+      }
+    }
     if (canMarkFailure) {
       await manualRef.set(
         {
@@ -1336,6 +1272,7 @@ export const createStripeCheckoutSession = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'stripeCheckout', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const billingPlan = billingPlanFromRequest(request.body?.billingPlan);
       await assertOwnerOrAdmin(organizationId, caller.uid);
@@ -1349,7 +1286,7 @@ export const createStripeCheckoutSession = onRequest(
 
       const priceId = priceIdForBillingPlan(billingPlan);
       const successUrl = getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account?billing=success`);
-      const cancelUrl = getEnv('STRIPE_CANCEL_URL', successUrl);
+      const cancelUrl = getEnv('STRIPE_CANCEL_URL', `${DEFAULT_APP_URL}/account?billing=cancel`);
       const trialDays = trialDaysFromEnv();
 
       const session = await stripe.checkout.sessions.create({
@@ -1384,7 +1321,7 @@ export const createStripeCheckoutSession = onRequest(
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Could not start subscription checkout.');
-      writeError(response, 400, 'checkout_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'checkout_failed', message);
     }
   },
 );
@@ -1399,6 +1336,7 @@ export const createStripeBillingPortalSession = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'billingPortal', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       await assertOwnerOrAdmin(organizationId, caller.uid);
 
@@ -1422,7 +1360,7 @@ export const createStripeBillingPortalSession = onRequest(
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Could not open billing portal.');
-      writeError(response, 400, 'portal_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'portal_failed', message);
     }
   },
 );
@@ -1437,6 +1375,7 @@ export const indexOrganizationManual = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'indexManual', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const manualId = requirePathSafeDocumentId(request.body?.manualId, 'manualId');
       await assertManualManager(organizationId, caller.uid);
@@ -1460,7 +1399,7 @@ export const indexOrganizationManual = onRequest(
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Manual indexing failed.');
-      writeError(response, 400, 'manual_index_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'manual_index_failed', message);
     }
   },
 );
@@ -1475,55 +1414,60 @@ export const reindexOrganizationManuals = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'reindexManuals', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       await assertManualManager(organizationId, caller.uid);
 
       ensureFirebaseAdmin();
       const db = getFirestore();
-      const manualsSnap = await db.collection(`organizations/${organizationId}/manuals`)
-        .limit(MAX_BULK_MANUAL_REINDEX_COUNT)
-        .get();
-      const uploadedManuals = manualsSnap.docs.filter((docSnap) => {
-        const data = docSnap.data();
-        return Boolean(optionalString(data.storagePath) && optionalString(data.machineModel));
+      const result = await processManualPages({
+        fetchPage: async (cursor?: string) => {
+          let query = db.collection(`organizations/${organizationId}/manuals`)
+            .orderBy(FieldPath.documentId())
+            .limit(MANUAL_REINDEX_PAGE_SIZE);
+          if (cursor) {
+            query = query.startAfter(cursor);
+          }
+          const snapshot = await query.get();
+          return {
+            items: snapshot.docs,
+            nextCursor: snapshot.docs[snapshot.docs.length - 1]?.id,
+          };
+        },
+        getItemId: (manualSnap) => manualSnap.id,
+        shouldProcess: (manualSnap) => {
+          const data = manualSnap.data();
+          return Boolean(optionalString(data.storagePath) && optionalString(data.machineModel));
+        },
+        process: (manualSnap) => indexManualRecord({
+          db,
+          organizationId,
+          manualId: manualSnap.id,
+          uid: caller.uid,
+        }),
+        toErrorMessage: (error) => clientSafeErrorMessage(error, 'Manual indexing failed.'),
       });
-
-      const reindexed: ManualIndexResult[] = [];
-      const failed: Array<{ manualId: string; message: string }> = [];
-
-      for (const manualSnap of uploadedManuals) {
-        try {
-          const result = await indexManualRecord({
-            db,
-            organizationId,
-            manualId: manualSnap.id,
-            uid: caller.uid,
-          });
-          reindexed.push(result);
-        } catch (error) {
-          failed.push({
-            manualId: manualSnap.id,
-            message: clientSafeErrorMessage(error, 'Manual indexing failed.'),
-          });
-        }
-      }
 
       addRateLimitHeaders(response);
       response.status(200).json({
         ok: true,
         organizationId,
-        totalManualCount: manualsSnap.size,
-        uploadedManualCount: uploadedManuals.length,
-        reindexedCount: reindexed.length,
-        failedCount: failed.length,
-        skippedCount: manualsSnap.size - uploadedManuals.length,
-        manuals: reindexed,
-        failures: failed,
-        limited: manualsSnap.size >= MAX_BULK_MANUAL_REINDEX_COUNT,
+        totalManualCount: result.fetchedCount,
+        uploadedManualCount: result.fetchedCount - result.skippedCount,
+        reindexedCount: result.processed.length,
+        failedCount: result.failures.length,
+        skippedCount: result.skippedCount,
+        pagesProcessed: result.pagesProcessed,
+        manuals: result.processed,
+        failures: result.failures.map((failure) => ({
+          manualId: failure.itemId,
+          message: failure.message,
+        })),
+        limited: false,
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Manual bulk re-index failed.');
-      writeError(response, 400, 'manual_bulk_reindex_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'manual_bulk_reindex_failed', message);
     }
   },
 );
@@ -1538,6 +1482,7 @@ export const deleteOrganizationManual = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'deleteManual', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const manualId = requirePathSafeDocumentId(request.body?.manualId, 'manualId');
       await assertManualManager(organizationId, caller.uid);
@@ -1561,25 +1506,23 @@ export const deleteOrganizationManual = onRequest(
         });
       }
 
-      const deletedChunkCount = await deleteManualChunkCollections({
+      const deletedIndexCount = await deleteManualIndexCollections({
         db,
         manualRef,
         manualData,
       });
-      const deletedErrorCodeCount = await deleteCollectionDocumentsInBatches(db, manualRef.collection(MANUAL_ERROR_CODE_COLLECTION));
       await manualRef.delete();
 
       addRateLimitHeaders(response);
       response.status(200).json({
         ok: true,
         manualId,
-        deletedChunkCount,
-        deletedErrorCodeCount,
+        deletedIndexCount,
         storageDeleted: Boolean(storagePath),
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Manual delete failed.');
-      writeError(response, 400, 'manual_delete_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'manual_delete_failed', message);
     }
   },
 );
@@ -1594,6 +1537,7 @@ export const generateRepairAssist = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'repairAssist', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const requestedMachineModel = requireStringWithMaxLength(request.body?.machineModel, 'machineModel', MAX_MACHINE_MODEL_LENGTH);
       const symptoms = optionalStringWithMaxLength(request.body?.symptoms, 'symptoms', 2000) ?? '';
@@ -1643,6 +1587,7 @@ export const generateRepairAssist = onRequest(
       const codeAliases = errorCodeAliases(errorCode, symptoms);
       const indexedCodeChunkIds = await readManualErrorCodeChunkIds({
         manualRef: manualDoc.ref,
+        manualData,
         codeAliases,
       });
       const indexedCodeChunkIdSet = new Set(indexedCodeChunkIds);
@@ -1699,7 +1644,7 @@ export const generateRepairAssist = onRequest(
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Could not generate repair guidance.');
-      writeError(response, 400, 'repair_assist_failed', message);
+      writeError(response, httpStatusForError(error, 400), 'repair_assist_failed', message);
     }
   },
 );

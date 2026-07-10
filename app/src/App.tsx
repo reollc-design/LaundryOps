@@ -21,6 +21,7 @@ import {
   KeyRound,
   LockKeyhole,
   Mail,
+  MapPin,
   Menu,
   MoreVertical,
   Pencil,
@@ -568,6 +569,12 @@ export function App() {
     operatorName: '',
     businessAddress: '',
     ownerEmail: '',
+    locationName: '',
+    locationAddress: '',
+    machineNumber: '',
+    machineType: 'Washer',
+    machineMake: '',
+    machineModelNumber: '',
   });
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
@@ -741,9 +748,8 @@ export function App() {
   const handleOwnerCreate = async (draft: OwnerOnboardingDraft, password: string): Promise<string | null> => {
     try {
       await createOwnerAccount(draft.operatorName, draft.ownerEmail, password);
-      await completeOwnerOnboarding(draft);
       setOnboardingDraft(draft);
-      setActiveScreen('home');
+      setActiveScreen('owner-onboarding');
       return null;
     } catch (error) {
       return getAuthErrorMessage(error);
@@ -1467,6 +1473,12 @@ function CreateAccountAccessScreen({
       operatorName: operatorName.trim(),
       businessAddress: businessAddress.trim(),
       ownerEmail: email.trim(),
+      locationName: '',
+      locationAddress: '',
+      machineNumber: '',
+      machineType: 'Washer',
+      machineMake: '',
+      machineModelNumber: '',
     };
 
     if (!draft.businessName || !draft.operatorName || !draft.businessAddress || !draft.ownerEmail || !password) {
@@ -1518,7 +1530,7 @@ function CreateAccountAccessScreen({
           </div>
         </section>
         <button className="primary-action" type="button" onClick={submitCreateAccount} disabled={isSubmitting}>
-          {isSubmitting ? 'Creating Account...' : 'Create Account & Start Trial'}
+          {isSubmitting ? 'Creating Account...' : 'Create Account & Continue Setup'}
         </button>
         <div className="access-link-row single">
           <button type="button" onClick={onSignIn}>Already have an account?</button>
@@ -1607,6 +1619,19 @@ function OwnerOnboardingScreen({
   const isLastStep = activeStep === onboardingSteps.length - 1;
   const ownerEmailValue = draft.ownerEmail || ownerEmail;
 
+  const validateCurrentStep = (): string | null => {
+    if (currentStep.id === 'account' && (!draft.businessName.trim() || !draft.operatorName.trim() || !draft.businessAddress.trim() || !ownerEmailValue.trim())) {
+      return 'Business name, operator name, address, and email are required before continuing.';
+    }
+    if (currentStep.id === 'location' && (!draft.locationName.trim() || !draft.locationAddress.trim())) {
+      return 'Location name and location address are required before continuing.';
+    }
+    if (currentStep.id === 'machine' && (!draft.machineNumber.trim() || !draft.machineType.trim() || !draft.machineMake.trim() || !draft.machineModelNumber.trim())) {
+      return 'Machine number, type, make, and model number are required before finishing setup.';
+    }
+    return null;
+  };
+
   useEffect(() => {
     if (!draft.ownerEmail && ownerEmail && ownerEmail !== 'Owner email not available') {
       onDraftChange({
@@ -1617,17 +1642,13 @@ function OwnerOnboardingScreen({
   }, [draft, onDraftChange, ownerEmail]);
 
   const advance = async () => {
-    if (isLastStep) {
-      if (
-        !draft.businessName.trim() ||
-        !draft.operatorName.trim() ||
-        !draft.businessAddress.trim() ||
-        !ownerEmailValue.trim()
-      ) {
-        setSubmitError('Business name, operator name, address, and email are required before finishing setup.');
-        return;
-      }
+    const stepError = validateCurrentStep();
+    if (stepError) {
+      setSubmitError(stepError);
+      return;
+    }
 
+    if (isLastStep) {
       setSubmitError(null);
       setIsSubmitting(true);
       const error = await onFinish({
@@ -1739,6 +1760,7 @@ function OnboardingStepIcon({ step, compact = false }: { step: OnboardingStep; c
   const iconProps = { size: compact ? 17 : 22 };
   const Icon =
     step.icon === 'account' ? Building2 :
+    step.icon === 'location' ? MapPin :
     step.icon === 'machine' ? Wrench :
     BookOpen;
 
@@ -1774,6 +1796,31 @@ function OnboardingStepFields({
         <SetupField label="Operator Name" value={draft.operatorName} onChange={(value) => patchDraft({ operatorName: value })} />
         <SetupField label="Address" value={draft.businessAddress} onChange={(value) => patchDraft({ businessAddress: value })} />
         <SetupField label="Email Address" value={ownerEmail} onChange={(value) => patchDraft({ ownerEmail: value })} />
+      </div>
+    );
+  }
+
+  if (stepId === 'location') {
+    return (
+      <div className="setup-field-grid">
+        <SetupField label="Location Name" value={draft.locationName} onChange={(value) => patchDraft({ locationName: value })} />
+        <SetupField label="Location Address" value={draft.locationAddress} onChange={(value) => patchDraft({ locationAddress: value })} wide />
+      </div>
+    );
+  }
+
+  if (stepId === 'machine') {
+    return (
+      <div className="setup-field-grid">
+        <SetupField label="Machine Number" value={draft.machineNumber} onChange={(value) => patchDraft({ machineNumber: value })} />
+        <SetupSelectField
+          label="Machine Type"
+          value={draft.machineType}
+          options={['Washer', 'Dryer', 'Other']}
+          onChange={(value) => patchDraft({ machineType: value })}
+        />
+        <SetupField label="Make" value={draft.machineMake} onChange={(value) => patchDraft({ machineMake: value })} />
+        <SetupField label="Model Number" value={draft.machineModelNumber} onChange={(value) => patchDraft({ machineModelNumber: value })} />
       </div>
     );
   }
@@ -1835,6 +1882,8 @@ function SetupSelectField({
 function getOnboardingStepCopy(stepId: string) {
   const copy: Record<string, string> = {
     account: 'Create the company account that owns billing, users, machines, manuals, and reports.',
+    location: 'Add the first operating location where your machines are managed.',
+    machine: 'Add the first machine so your account opens with a usable maintenance workspace.',
   };
 
   return copy[stepId];

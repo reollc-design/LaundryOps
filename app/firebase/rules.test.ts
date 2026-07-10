@@ -6,6 +6,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
+import { doc, writeBatch } from 'firebase/firestore';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const PROJECT_ID = 'demo-laundryops-rules';
@@ -298,6 +299,64 @@ describe('Firestore organization security', () => {
         createdBy: 'ownerA',
       }),
     );
+  });
+
+  it('allows atomic onboarding to create the organization, membership, location, and first machine', async () => {
+    const ownerA = dbFor('ownerA');
+    const organizationRef = doc(ownerA, 'organizations/orgAtomic');
+    const membershipRef = doc(ownerA, 'organizations/orgAtomic/memberships/ownerA');
+    const locationRef = doc(ownerA, 'organizations/orgAtomic/locations/locationA');
+    const machineRef = doc(ownerA, 'organizations/orgAtomic/machines/machineA');
+    const batch = writeBatch(ownerA);
+
+    batch.set(organizationRef, {
+      name: 'Atomic Laundry',
+      operatorName: 'Owner A',
+      businessAddress: '123 Main Street',
+      ownerEmail: 'owner@example.com',
+      ownerUserId: 'ownerA',
+      createdBy: 'ownerA',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      subscriptionStatus: 'trialing',
+      trialStartedAt: '2026-05-20T00:00:00.000Z',
+      onboardingStatus: 'completed',
+    });
+    batch.set(membershipRef, {
+      role: 'owner',
+      status: 'active',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+    });
+    batch.set(locationRef, {
+      name: 'Main Store',
+      address: '123 Main Street',
+      status: 'active',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+      updatedAt: '2026-05-20T00:00:00.000Z',
+      updatedBy: 'ownerA',
+    });
+    batch.set(machineRef, {
+      machineNumber: 'W01',
+      type: 'Washer',
+      make: 'Speed Queen',
+      modelNumber: 'SC40',
+      model: 'Speed Queen SC40',
+      locationId: locationRef.id,
+      locationName: 'Main Store',
+      status: 'running',
+      statusLabel: 'Operational',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+      updatedAt: '2026-05-20T00:00:00.000Z',
+      updatedBy: 'ownerA',
+    });
+
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/memberships/ownerA').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/locations/locationA').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/machines/machineA').get());
   });
 
   it('blocks bootstrap org creation when owner identity does not match the signer', async () => {

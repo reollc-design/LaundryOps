@@ -55,6 +55,15 @@ service cloud.firestore {
       return hasRole(orgId, ['technician']);
     }
 
+    function isOnboardingOwner(orgId) {
+      return signedIn()
+        && getAfter(organizationPath(orgId)).data.ownerUserId == request.auth.uid
+        && getAfter(organizationPath(orgId)).data.createdBy == request.auth.uid
+        && getAfter(memberPath(orgId)).data.role == 'owner'
+        && getAfter(memberPath(orgId)).data.status == 'active'
+        && getAfter(memberPath(orgId)).data.createdBy == request.auth.uid;
+    }
+
     function unchanged(keys) {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys);
     }
@@ -109,7 +118,7 @@ service cloud.firestore {
         allow read: if isOwnerOrAdmin(orgId) || (signedIn() && request.auth.uid == userId);
         allow create: if signedIn()
           && userId == request.auth.uid
-          && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUserId == request.auth.uid
+          && getAfter(organizationPath(orgId)).data.ownerUserId == request.auth.uid
           && request.resource.data.role == 'owner'
           && request.resource.data.status == 'active'
           && request.resource.data.createdBy == request.auth.uid
@@ -122,9 +131,29 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      match /locations/{locationId} {
+        allow read: if isMember(orgId);
+        allow create: if (isOperationsLead(orgId) || isOnboardingOwner(orgId))
+          && request.resource.data.name is string
+          && request.resource.data.address is string
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'name',
+            'address',
+            'status',
+            'createdAt',
+            'createdBy',
+            'updatedAt',
+            'updatedBy'
+          ]);
+        allow update: if isOperationsLead(orgId)
+          && unchanged(['createdAt', 'createdBy']);
+        allow delete: if isOwnerOrAdmin(orgId);
+      }
+
       match /machines/{machineId} {
         allow read: if isMember(orgId);
-        allow create: if isOperationsLead(orgId);
+        allow create: if isOperationsLead(orgId) || isOnboardingOwner(orgId);
         allow update: if isOperationsLead(orgId)
           || (
             isTechnician(orgId)
