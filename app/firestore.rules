@@ -55,6 +55,19 @@ service cloud.firestore {
       return hasRole(orgId, ['technician']);
     }
 
+    function isOrganizationActive(orgId) {
+      return signedIn()
+        && exists(organizationPath(orgId))
+        && (
+          get(organizationPath(orgId)).data.subscriptionStatus == 'active'
+          || (
+            get(organizationPath(orgId)).data.subscriptionStatus == 'trialing'
+            && get(organizationPath(orgId)).data.trialEndsAt is timestamp
+            && request.time < get(organizationPath(orgId)).data.trialEndsAt
+          )
+        );
+    }
+
     function isOnboardingOwner(orgId) {
       return signedIn()
         && getAfter(organizationPath(orgId)).data.ownerUserId == request.auth.uid
@@ -62,6 +75,23 @@ service cloud.firestore {
         && getAfter(memberPath(orgId)).data.role == 'owner'
         && getAfter(memberPath(orgId)).data.status == 'active'
         && getAfter(memberPath(orgId)).data.createdBy == request.auth.uid;
+    }
+
+    function isOrganizationActiveForWrite(orgId) {
+      return isOrganizationActive(orgId)
+        || (
+          isOnboardingOwner(orgId)
+          && getAfter(organizationPath(orgId)).data.subscriptionStatus == 'trialing'
+          && getAfter(organizationPath(orgId)).data.trialEndsAt is timestamp
+          && request.time < getAfter(organizationPath(orgId)).data.trialEndsAt
+        );
+    }
+
+    function hasValidTrialWindow() {
+      return request.resource.data.trialStartedAt is timestamp
+        && request.resource.data.trialEndsAt is timestamp
+        && request.resource.data.trialStartedAt <= request.time
+        && request.resource.data.trialEndsAt == request.resource.data.trialStartedAt + duration.value(14, 'd');
     }
 
     function unchanged(keys) {
@@ -88,6 +118,7 @@ service cloud.firestore {
         && request.resource.data.ownerUserId == request.auth.uid
         && request.resource.data.createdBy == request.auth.uid
         && request.resource.data.subscriptionStatus == 'trialing'
+        && hasValidTrialWindow()
         && request.resource.data.keys().hasOnly([
           'name',
           'operatorName',
@@ -98,6 +129,7 @@ service cloud.firestore {
           'createdAt',
           'subscriptionStatus',
           'trialStartedAt',
+          'trialEndsAt',
           'onboardingStatus'
         ]);
       allow delete: if false;
@@ -133,7 +165,8 @@ service cloud.firestore {
 
       match /locations/{locationId} {
         allow read: if isMember(orgId);
-        allow create: if (isOperationsLead(orgId) || isOnboardingOwner(orgId))
+        allow create: if isOrganizationActiveForWrite(orgId)
+          && (isOperationsLead(orgId) || isOnboardingOwner(orgId))
           && request.resource.data.name is string
           && request.resource.data.address is string
           && request.resource.data.createdBy == request.auth.uid
@@ -146,55 +179,63 @@ service cloud.firestore {
             'updatedAt',
             'updatedBy'
           ]);
-        allow update: if isOperationsLead(orgId)
+        allow update: if isOrganizationActive(orgId)
+          && isOperationsLead(orgId)
           && unchanged(['createdAt', 'createdBy']);
-        allow delete: if isOwnerOrAdmin(orgId);
+        allow delete: if isOrganizationActive(orgId) && isOwnerOrAdmin(orgId);
       }
 
       match /machines/{machineId} {
         allow read: if isMember(orgId);
-        allow create: if isOperationsLead(orgId) || isOnboardingOwner(orgId);
-        allow update: if isOperationsLead(orgId)
-          || (
-            isTechnician(orgId)
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'status',
-              'statusLabel',
-              'updatedAt',
-              'updatedBy',
-              'lastServicedAt'
-            ])
+        allow create: if isOrganizationActiveForWrite(orgId)
+          && (isOperationsLead(orgId) || isOnboardingOwner(orgId));
+        allow update: if isOrganizationActive(orgId)
+          && (
+            isOperationsLead(orgId)
+            || (
+              isTechnician(orgId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status',
+                'statusLabel',
+                'updatedAt',
+                'updatedBy',
+                'lastServicedAt'
+              ])
+            )
           );
-        allow delete: if isOwnerOrAdmin(orgId);
+        allow delete: if isOrganizationActive(orgId) && isOwnerOrAdmin(orgId);
       }
 
       match /workOrders/{workOrderId} {
         allow read: if isMember(orgId);
-        allow create: if isOperationsLead(orgId);
-        allow update: if isOperationsLead(orgId)
-          || (
-            isTechnician(orgId)
-            && resource.data.assignedUserId == request.auth.uid
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'status',
-              'statusLabel',
-              'updatedAt',
-              'updatedBy',
-              'completedAt'
-            ])
+        allow create: if isOrganizationActive(orgId) && isOperationsLead(orgId);
+        allow update: if isOrganizationActive(orgId)
+          && (
+            isOperationsLead(orgId)
+            || (
+              isTechnician(orgId)
+              && resource.data.assignedUserId == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status',
+                'statusLabel',
+                'updatedAt',
+                'updatedBy',
+                'completedAt'
+              ])
+            )
           );
-        allow delete: if isOwnerOrAdmin(orgId);
+        allow delete: if isOrganizationActive(orgId) && isOwnerOrAdmin(orgId);
       }
 
       match /maintenanceEvents/{eventId} {
         allow read: if isMember(orgId);
-        allow create: if hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
-        allow update, delete: if isOwnerOrAdmin(orgId);
+        allow create: if isOrganizationActive(orgId) && hasRole(orgId, ['owner', 'admin', 'manager', 'technician']);
+        allow update, delete: if isOrganizationActive(orgId) && isOwnerOrAdmin(orgId);
       }
 
       match /manuals/{manualId} {
         allow read: if isMember(orgId);
-        allow create, update: if hasRole(orgId, ['owner', 'admin', 'manager']);
+        allow create, update: if isOrganizationActive(orgId) && hasRole(orgId, ['owner', 'admin', 'manager']);
         allow delete: if false;
 
         match /{chunkCollection}/{chunkId} {

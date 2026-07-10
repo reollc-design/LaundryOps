@@ -11,8 +11,9 @@ import {
   updateProfile,
   type UserCredential,
 } from 'firebase/auth';
-import { collection, doc, serverTimestamp, setDoc, writeBatch, type Firestore } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, setDoc, Timestamp, writeBatch, type Firestore } from 'firebase/firestore';
 import { getFirebaseClient } from './client';
+import { calculateTrialEndsAt } from '../trial';
 
 function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
   const client = getFirebaseClient();
@@ -151,6 +152,8 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
   const locationRef = doc(collection(db, `organizations/${organizationRef.id}/locations`));
   const machineRef = doc(collection(db, `organizations/${organizationRef.id}/machines`));
   const batch = writeBatch(db);
+  const trialStartedAt = Timestamp.now();
+  const trialEndsAt = Timestamp.fromMillis(calculateTrialEndsAt(trialStartedAt.toMillis()));
 
   batch.set(organizationRef, {
     name: trimmedDraft.businessName,
@@ -161,7 +164,8 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     createdBy: user.uid,
     createdAt: serverTimestamp(),
     subscriptionStatus: 'trialing',
-    trialStartedAt: serverTimestamp(),
+    trialStartedAt,
+    trialEndsAt,
     onboardingStatus: 'completed',
   });
   batch.set(membershipRef, {

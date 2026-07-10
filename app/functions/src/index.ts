@@ -30,6 +30,11 @@ import {
   RequestAuthenticationError,
   REQUEST_RATE_LIMIT_POLICIES,
 } from './request-protection.js';
+import {
+  buildCheckoutSubscriptionData,
+  evaluateTrialAccess,
+  timestampToMilliseconds,
+} from './trial.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -38,7 +43,6 @@ const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const openAiApiKey = defineSecret('OPENAI_API_KEY');
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
-const DEFAULT_TRIAL_DAYS = 14;
 const DEFAULT_MONTHLY_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
 const DEFAULT_ANNUAL_PRICE_ID = 'price_1TaMprJkHhybNz7FHvsmgQdh';
 const DEFAULT_APP_URL = 'https://laundryops-maintenance-app.web.app';
@@ -154,18 +158,6 @@ function getEnv(name: string, fallback?: string): string {
   throw new Error(`Missing server environment variable ${name}.`);
 }
 
-function trialDaysFromEnv(): number {
-  const raw = process.env.STRIPE_TRIAL_DAYS;
-  if (!raw) {
-    return DEFAULT_TRIAL_DAYS;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 730) {
-    return DEFAULT_TRIAL_DAYS;
-  }
-  return parsed;
-}
-
 function billingPlanFromRequest(value: unknown): BillingPlanKey {
   return value === 'monthly' ? 'monthly' : 'annual';
 }
@@ -215,6 +207,21 @@ function organizationAccessState(
   };
 }
 
+function assertActiveOrganizationTrial(orgSnap: FirebaseFirestore.DocumentSnapshot): void {
+  const orgData = orgSnap.data() ?? {};
+  const trial = evaluateTrialAccess(
+    {
+      subscriptionStatus: optionalString(orgData.subscriptionStatus),
+      trialStartedAtMs: timestampToMilliseconds(orgData.trialStartedAt),
+      trialEndsAtMs: timestampToMilliseconds(orgData.trialEndsAt),
+    },
+    Date.now(),
+  );
+  if (trial.status !== 'active') {
+    throw new Error('Your 14-day trial has ended. Choose a paid plan to continue.');
+  }
+}
+
 async function assertOwnerOrAdmin(organizationId: string, uid: string): Promise<void> {
   ensureFirebaseAdmin();
   const db = getFirestore();
@@ -239,6 +246,7 @@ async function assertManualManager(organizationId: string, uid: string): Promise
     mode: 'manualManager',
     state: organizationAccessState(orgSnap, membershipSnap),
   });
+  assertActiveOrganizationTrial(orgSnap);
 }
 
 async function assertOrganizationMember(organizationId: string, uid: string): Promise<void> {
@@ -252,6 +260,7 @@ async function assertOrganizationMember(organizationId: string, uid: string): Pr
     mode: 'member',
     state: organizationAccessState(orgSnap, membershipSnap),
   });
+  assertActiveOrganizationTrial(orgSnap);
 }
 
 function normalizeMachineModelKey(value: string): string {
@@ -888,6 +897,9 @@ function getStripeClient(): Stripe {
 interface OrganizationBillingIdentity {
   stripeCustomerId: string;
   organizationName: string;
+  subscriptionStatus: string | null;
+  trialStartedAtMs: number | null;
+  trialEndsAtMs: number | null;
 }
 
 async function getOrCreateStripeCustomer(params: {
@@ -905,9 +917,14 @@ async function getOrCreateStripeCustomer(params: {
 
   const orgData = orgSnap.data() ?? {};
   const organizationName = optionalString(orgData.name) ?? 'LaundryOps Account';
+  const billingIdentity = {
+    subscriptionStatus: optionalString(orgData.subscriptionStatus) ?? null,
+    trialStartedAtMs: timestampToMilliseconds(orgData.trialStartedAt),
+    trialEndsAtMs: timestampToMilliseconds(orgData.trialEndsAt),
+  };
   const existingCustomerId = optionalString(orgData.providerCustomerId);
   if (existingCustomerId) {
-    return { stripeCustomerId: existingCustomerId, organizationName };
+    return { stripeCustomerId: existingCustomerId, organizationName, ...billingIdentity };
   }
 
   const stripe = getStripeClient();
@@ -934,6 +951,7 @@ async function getOrCreateStripeCustomer(params: {
   return {
     stripeCustomerId: customer.id,
     organizationName,
+    ...billingIdentity,
   };
 }
 
@@ -1287,7 +1305,12 @@ export const createStripeCheckoutSession = onRequest(
       const priceId = priceIdForBillingPlan(billingPlan);
       const successUrl = getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account?billing=success`);
       const cancelUrl = getEnv('STRIPE_CANCEL_URL', `${DEFAULT_APP_URL}/account?billing=cancel`);
-      const trialDays = trialDaysFromEnv();
+      const subscriptionData = buildCheckoutSubscriptionData({
+        organizationId,
+        billingPlan,
+        trial: customerIdentity,
+        nowMs: Date.now(),
+      });
 
       const session = await stripe.checkout.sessions.create({
         mode: 'subscription',
@@ -1302,13 +1325,7 @@ export const createStripeCheckoutSession = onRequest(
           ownerUserId: caller.uid,
           billingPlan,
         },
-        subscription_data: {
-          trial_period_days: trialDays,
-          metadata: {
-            organizationId,
-            billingPlan,
-          },
-        },
+        subscription_data: subscriptionData,
       });
 
       addRateLimitHeaders(response);
@@ -1316,7 +1333,7 @@ export const createStripeCheckoutSession = onRequest(
         ok: true,
         checkoutUrl: session.url,
         sessionId: session.id,
-        trialDays,
+        trialEndUnixSeconds: subscriptionData.trial_end ?? null,
         billingPlan,
       });
     } catch (error) {
@@ -1721,9 +1738,9 @@ export const stripeWebhook = onRequest(
             billingProvider: 'stripe',
           };
 
-          if (trialEnd) {
-            billingPatch.trialEndsAt = Timestamp.fromDate(trialEnd);
-          }
+          // The organization trial window is created once during onboarding.
+          // Stripe's rounded Unix-second value is recorded on the billing record,
+          // but never replaces the organization's original trialEndsAt.
           await orgRef.set(billingPatch, { merge: true });
 
           if (subscriptionId) {

@@ -72,6 +72,7 @@ import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizati
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
 import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
+import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOrganizationTrial';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
@@ -184,6 +185,20 @@ function getReportPeriodCutoff(period: string, now = Date.now()): number | null 
   }
 
   return null;
+}
+
+function formatTrialDate(milliseconds: number | null): string {
+  if (milliseconds === null) {
+    return 'Not available';
+  }
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(milliseconds));
+}
+
+function trialDaysRemaining(milliseconds: number | null): number {
+  if (milliseconds === null) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil((milliseconds - Date.now()) / (24 * 60 * 60 * 1000)));
 }
 
 function getInitialScreen(): ScreenKey {
@@ -580,6 +595,8 @@ export function App() {
   const userProfile = useUserProfile(authSession.user);
   const defaultOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
   const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
+  const organizationTrial = useOrganizationTrial(authSession.user, defaultOrganizationId);
+  const workspaceTrialExpired = orgConnected && organizationTrial.status === 'expired';
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
@@ -1077,19 +1094,30 @@ export function App() {
             </div>
           ) : (
             <>
-              <AppHeader
-                title={title}
-                showBack={showBack}
-                activeScreen={activeScreen}
-                onBack={handleBack}
-                onAccountClick={() => setActiveScreen('account')}
-                workspaceLabel={workspaceLabel}
-                machineCount={machineCatalogData.length}
-                workOrderCount={workOrderQueueData.length}
-              />
-              <div className="screen-content">
-                <BackendSessionBanner authSession={authSession} compact />
-                {activeScreen === 'home' && (
+              {workspaceTrialExpired ? (
+                <TrialExpiredScreen
+                  billingBusyAction={billingBusyAction}
+                  billingError={billingError}
+                  onStartSubscription={handleStartSubscription}
+                  onManageBilling={handleManageBilling}
+                  onSignOut={handleSignOut}
+                  signOutBusy={signOutBusy}
+                />
+              ) : (
+                <>
+                  <AppHeader
+                    title={title}
+                    showBack={showBack}
+                    activeScreen={activeScreen}
+                    onBack={handleBack}
+                    onAccountClick={() => setActiveScreen('account')}
+                    workspaceLabel={workspaceLabel}
+                    machineCount={machineCatalogData.length}
+                    workOrderCount={workOrderQueueData.length}
+                  />
+                  <div className="screen-content">
+                    <BackendSessionBanner authSession={authSession} compact />
+                    {activeScreen === 'home' && (
                   <HomeScreen
                     setActiveScreen={setActiveScreen}
                     onOpenMachines={openMachinesScreen}
@@ -1107,8 +1135,8 @@ export function App() {
                     signOutError={signOutError}
                     onSignOut={handleSignOut}
                   />
-                )}
-                {activeScreen === 'machines' && (
+                    )}
+                    {activeScreen === 'machines' && (
                   <MachinesScreen
                     setActiveScreen={setActiveScreen}
                     activeFilter={machineFilterPreset ?? 'all'}
@@ -1125,8 +1153,8 @@ export function App() {
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                   />
-                )}
-                {activeScreen === 'machine-detail' && (
+                    )}
+                    {activeScreen === 'machine-detail' && (
                   <MachineDetailScreen
                     setActiveScreen={setActiveScreen}
                     machine={selectedMachine}
@@ -1134,8 +1162,8 @@ export function App() {
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
                     onOpenMaintenanceRecords={() => setActiveScreen('work-orders')}
                   />
-                )}
-                {activeScreen === 'manuals' && (
+                    )}
+                    {activeScreen === 'manuals' && (
                   <ManualLibraryScreen
                     setActiveScreen={setActiveScreen}
                     orgConnected={orgConnected}
@@ -1144,8 +1172,8 @@ export function App() {
                     orgManualsError={orgManuals.error}
                     orgManualsData={orgManuals.manuals}
                   />
-                )}
-                {activeScreen === 'account' && (
+                    )}
+                    {activeScreen === 'account' && (
                   <AccountScreen
                     authSession={authSession}
                     userProfile={userProfile}
@@ -1157,9 +1185,10 @@ export function App() {
                     billingError={billingError}
                     onStartSubscription={handleStartSubscription}
                     onManageBilling={handleManageBilling}
+                    organizationTrial={organizationTrial}
                   />
-                )}
-                {activeScreen === 'create-work-order' && (
+                    )}
+                    {activeScreen === 'create-work-order' && (
                   <CreateWorkOrderScreen
                     onSave={handleCreateWorkOrderFromDraft}
                     busy={workOrderBusy}
@@ -1170,8 +1199,8 @@ export function App() {
                     organizationId={defaultOrganizationId}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
-                )}
-                {activeScreen === 'work-orders' && (
+                    )}
+                    {activeScreen === 'work-orders' && (
                   <WorkOrdersScreen
                     setActiveScreen={setActiveScreen}
                     onCreateWorkOrder={() => openCreateWorkOrder('work-orders')}
@@ -1185,8 +1214,8 @@ export function App() {
                     workOrderDeleteBusyId={workOrderDeleteBusyId}
                     workOrderDeleteError={workOrderDeleteError}
                   />
-                )}
-                {activeScreen === 'work-order-detail' && (
+                    )}
+                    {activeScreen === 'work-order-detail' && (
                   <WorkOrderDetailScreen
                     setActiveScreen={setActiveScreen}
                     createdFromDraft={createdFromDraft}
@@ -1201,8 +1230,8 @@ export function App() {
                     onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
-                )}
-                {activeScreen === 'ai-assist' && (
+                    )}
+                    {activeScreen === 'ai-assist' && (
                   <RepairAssistScreen
                     assistPreset={assistPreset}
                     onClearAssistPreset={() => setAssistPreset(null)}
@@ -1212,16 +1241,18 @@ export function App() {
                     machines={machineCatalogData}
                     manualModels={orgManuals.manuals}
                   />
-                )}
-                {activeScreen === 'reports' && (
+                    )}
+                    {activeScreen === 'reports' && (
                   <ReportsScreen
                     orgConnected={orgConnected}
                     workOrders={workOrderQueueData}
                     machines={machineCatalogData}
                   />
-                )}
-              </div>
-              <BottomNav activeScreen={activeScreen} setActiveScreen={setActiveScreen} />
+                    )}
+                  </div>
+                  <BottomNav activeScreen={activeScreen} setActiveScreen={setActiveScreen} />
+                </>
+              )}
             </>
           )}
         </div>
@@ -3064,10 +3095,103 @@ function ManualRow({
   );
 }
 
+function TrialExpiredScreen({
+  billingBusyAction,
+  billingError,
+  onStartSubscription,
+  onManageBilling,
+  onSignOut,
+  signOutBusy,
+}: {
+  billingBusyAction: BillingAction | null;
+  billingError: string | null;
+  onStartSubscription: (billingPlan: BillingPlanKey) => Promise<void>;
+  onManageBilling: () => Promise<void>;
+  onSignOut: () => Promise<void>;
+  signOutBusy: boolean;
+}) {
+  const [selectedBillingPlan, setSelectedBillingPlan] = useState<BillingPlanKey>('annual');
+  const selectedPlan = billingPlans.find((plan) => plan.key === selectedBillingPlan) ?? billingPlans[0];
+
+  return (
+    <div className="screen-stack">
+      <section className="trial-card">
+        <div>
+          <span>14-Day Free Trial</span>
+          <strong>Your trial has ended</strong>
+          <p>Choose a paid plan to continue managing machines, maintenance records, manuals, reports, and Repair Assist.</p>
+        </div>
+        <div className="trial-days">
+          <strong>0</strong>
+          <span>days left</span>
+        </div>
+      </section>
+
+      <section className="content-section subscription-card">
+        <div className="section-heading">
+          <h2>Choose a plan to continue</h2>
+          <span>Annual recommended</span>
+        </div>
+        <div className="billing-plan-grid" role="radiogroup" aria-label="Subscription plan">
+          {billingPlans.map((plan) => (
+            <button
+              key={plan.key}
+              className={`billing-plan-option ${selectedBillingPlan === plan.key ? 'is-selected' : ''}`}
+              type="button"
+              role="radio"
+              aria-checked={selectedBillingPlan === plan.key}
+              onClick={() => setSelectedBillingPlan(plan.key)}
+            >
+              <span className="billing-plan-header">
+                <strong>{plan.name}</strong>
+                {plan.recommended && <small>Best value</small>}
+              </span>
+              <span className="billing-plan-price">
+                <b>{plan.price}</b>
+                <em>{plan.cadence}</em>
+              </span>
+              <span className="billing-plan-detail">{plan.detail}</span>
+            </button>
+          ))}
+        </div>
+        <div className="subscription-actions">
+          <button
+            className="primary-action"
+            type="button"
+            disabled={billingBusyAction !== null}
+            onClick={() => void onStartSubscription(selectedBillingPlan)}
+          >
+            <CreditCard size={18} />
+            {billingBusyAction === 'checkout' ? 'Starting...' : `Start ${selectedPlan.name} Plan`}
+          </button>
+          <button
+            className="secondary-action"
+            type="button"
+            disabled={billingBusyAction !== null}
+            onClick={() => void onManageBilling()}
+          >
+            {billingBusyAction === 'portal' ? 'Opening...' : 'Manage Billing'}
+          </button>
+          <button className="secondary-action" type="button" onClick={() => void onSignOut()} disabled={signOutBusy}>
+            {signOutBusy ? 'Signing Out...' : 'Sign Out'}
+          </button>
+        </div>
+        {billingError && (
+          <div className="auth-message">
+            <strong>Billing action failed</strong>
+            <span>{billingError}</span>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function AccountScreen({
   authSession,
   userProfile,
   orgConnected,
+  organizationTrial,
   signOutBusy,
   signOutError,
   onSignOut,
@@ -3079,6 +3203,7 @@ function AccountScreen({
   authSession: ReturnType<typeof useAuthSession>;
   userProfile: ReturnType<typeof useUserProfile>;
   orgConnected: boolean;
+  organizationTrial: OrganizationTrialState;
   signOutBusy: boolean;
   signOutError: string | null;
   onSignOut: () => Promise<void>;
@@ -3089,6 +3214,10 @@ function AccountScreen({
 }) {
   const [selectedBillingPlan, setSelectedBillingPlan] = useState<BillingPlanKey>('annual');
   const selectedPlan = billingPlans.find((plan) => plan.key === selectedBillingPlan) ?? billingPlans[0];
+  const trialExpired = organizationTrial.status === 'expired';
+  const paidSubscription = organizationTrial.subscriptionStatus === 'active';
+  const trialing = organizationTrial.subscriptionStatus === 'trialing' && !trialExpired;
+  const trialLabel = paidSubscription ? 'Subscription active' : trialExpired ? 'Trial ended' : 'Pro trial active';
 
   return (
     <div className="screen-stack">
@@ -3162,12 +3291,18 @@ function AccountScreen({
       <section className="trial-card">
         <div>
           <span>14-Day Free Trial</span>
-          <strong>Pro trial active</strong>
-          <p>Trial includes maintenance records, reports, manual uploads, and OpenAI Repair Assist.</p>
+          <strong>{trialLabel}</strong>
+          <p>
+            {trialExpired
+              ? 'Choose a paid plan to continue using LaundryOps.'
+              : paidSubscription
+                ? 'Your company subscription is active.'
+                : `Trial includes maintenance records, reports, manual uploads, and OpenAI Repair Assist. Ends ${formatTrialDate(organizationTrial.trialEndsAtMs)}.`}
+          </p>
         </div>
         <div className="trial-days">
-          <strong>14</strong>
-          <span>days</span>
+          <strong>{trialing ? trialDaysRemaining(organizationTrial.trialEndsAtMs) : paidSubscription ? '✓' : '0'}</strong>
+          <span>{trialing ? 'days left' : paidSubscription ? 'active' : 'days left'}</span>
         </div>
       </section>
 
@@ -3180,7 +3315,7 @@ function AccountScreen({
 
       <section className="content-section subscription-card">
         <div className="section-heading">
-          <h2>Choose your plan after your 14-day free trial</h2>
+          <h2>{trialExpired ? 'Choose a plan to continue' : 'Choose your plan after your 14-day free trial'}</h2>
           <span>Annual recommended</span>
         </div>
         <div className="subscription-line">
