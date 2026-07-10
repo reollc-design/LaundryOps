@@ -1175,8 +1175,6 @@ export function App() {
                     )}
                     {activeScreen === 'account' && (
                   <AccountScreen
-                    authSession={authSession}
-                    userProfile={userProfile}
                     orgConnected={orgConnected}
                     signOutBusy={signOutBusy}
                     signOutError={signOutError}
@@ -3188,8 +3186,6 @@ function TrialExpiredScreen({
 }
 
 function AccountScreen({
-  authSession,
-  userProfile,
   orgConnected,
   organizationTrial,
   signOutBusy,
@@ -3200,8 +3196,6 @@ function AccountScreen({
   onStartSubscription,
   onManageBilling,
 }: {
-  authSession: ReturnType<typeof useAuthSession>;
-  userProfile: ReturnType<typeof useUserProfile>;
   orgConnected: boolean;
   organizationTrial: OrganizationTrialState;
   signOutBusy: boolean;
@@ -3232,51 +3226,9 @@ function AccountScreen({
         </div>
       </section>
 
-      <section className="content-section profile-card">
-        <div className="section-heading">
-          <h2>User Session</h2>
-          {authSession.user ? <StatusBadge status="running">Authenticated</StatusBadge> : <StatusBadge status="down">Signed Out</StatusBadge>}
-        </div>
-        {!authSession.configured && (
-          <div className="profile-status-line">
-            <ShieldCheck size={17} />
-            <span>Firebase config is not set. Add VITE_FIREBASE_* values to enable live account access.</span>
-          </div>
-        )}
-        {authSession.configured && authSession.loading && (
-          <div className="profile-status-line">
-            <Hourglass size={17} />
-            <span>Checking active session...</span>
-          </div>
-        )}
-        {authSession.configured && authSession.error && (
-          <div className="profile-status-line profile-status-error">
-            <ShieldCheck size={17} />
-            <span>{authSession.error}</span>
-          </div>
-        )}
-        {authSession.user && (
-          <div className="profile-grid">
-            <ProfileValue label="UID" value={authSession.user.uid} />
-            <ProfileValue label="Session Email" value={authSession.user.email ?? 'No email'} />
-            <ProfileValue label="Profile Name" value={userProfile.profile?.displayName ?? authSession.user.displayName ?? 'Not set'} />
-            <ProfileValue label="Source" value={userProfile.profile?.createdFrom ?? 'No profile document yet'} />
-          </div>
-        )}
-        {authSession.user && userProfile.loading && (
-          <div className="profile-status-line">
-            <Hourglass size={17} />
-            <span>Reading `users/{'{uid}'}` profile document...</span>
-          </div>
-        )}
-        {authSession.user && userProfile.error && (
-          <div className="profile-status-line profile-status-error">
-            <ShieldCheck size={17} />
-            <span>{userProfile.error}</span>
-          </div>
-        )}
+      <section className="content-section">
         <div className="profile-actions">
-          <button className="secondary-action" type="button" onClick={() => void onSignOut()} disabled={!authSession.user || signOutBusy}>
+          <button className="secondary-action" type="button" onClick={() => void onSignOut()} disabled={signOutBusy}>
             {signOutBusy ? 'Signing Out...' : 'Sign Out'}
           </button>
         </div>
@@ -3388,15 +3340,6 @@ function AccountScreen({
           <AdminAction icon={FileText} title="Billing Decision" detail="Finalize Google Play or SaaS billing path before launch" />
         </div>
       </section>
-    </div>
-  );
-}
-
-function ProfileValue({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="profile-value">
-      <span>{label}</span>
-      <strong>{value}</strong>
     </div>
   );
 }
