@@ -106,6 +106,9 @@ jobs:
   deploy:
     name: Deploy LaundryOps
     runs-on: ubuntu-latest
+    concurrency:
+      group: laundryops-production
+      cancel-in-progress: false
     needs:
       - validate
       - validate-functions
@@ -168,6 +171,28 @@ jobs:
               exit 1
             fi
           done
+
+          expected_functions_url="https://us-central1-laundromat-maintenance-app.cloudfunctions.net"
+          if [ "$VITE_FIREBASE_PROJECT_ID" != "laundromat-maintenance-app" ]; then
+            echo "VITE_FIREBASE_PROJECT_ID does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_AUTH_DOMAIN" != "laundromat-maintenance-app.firebaseapp.com" ]; then
+            echo "VITE_FIREBASE_AUTH_DOMAIN does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_STORAGE_BUCKET" != "laundromat-maintenance-app.firebasestorage.app" ]; then
+            echo "VITE_FIREBASE_STORAGE_BUCKET does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_BILLING_API_BASE_URL" != "$expected_functions_url" ]; then
+            echo "VITE_BILLING_API_BASE_URL does not target LaundryOps Functions."
+            exit 1
+          fi
+          if [ "$VITE_FUNCTIONS_API_BASE_URL" != "$expected_functions_url" ]; then
+            echo "VITE_FUNCTIONS_API_BASE_URL does not target LaundryOps Functions."
+            exit 1
+          fi
 
       - name: Build
         run: npm run build
