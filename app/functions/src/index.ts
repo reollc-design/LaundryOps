@@ -35,6 +35,15 @@ import {
   evaluateTrialAccess,
   timestampToMilliseconds,
 } from './trial.js';
+import {
+  buildStripeBillingEventState,
+  decideStripeBillingEvent,
+  shouldUpdateOrganizationBillingState,
+  type StoredStripeBillingState,
+  type StripeBillingEventState,
+  type StripeBillingEventType,
+  type StripeSubscriptionSnapshot,
+} from './stripe-webhook-state.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -168,13 +177,6 @@ function priceIdForBillingPlan(plan: BillingPlanKey): string {
   }
 
   return getEnv('STRIPE_ANNUAL_PRICE_ID', DEFAULT_ANNUAL_PRICE_ID);
-}
-
-function toDateOrNull(epochSeconds: number | null | undefined): Date | null {
-  if (!epochSeconds || !Number.isFinite(epochSeconds)) {
-    return null;
-  }
-  return new Date(epochSeconds * 1000);
 }
 
 async function requireVerifiedCaller(request: Request): Promise<{ uid: string; email: string | null }> {
@@ -969,6 +971,105 @@ function stripeWebhookOrganizationId(value: unknown): string | undefined {
   }
 }
 
+function stripeResourceId(value: string | { id: string } | null | undefined): string | undefined {
+  return typeof value === 'string' ? value : optionalString(value?.id);
+}
+
+function stripeSubscriptionSnapshot(subscription: Stripe.Subscription): StripeSubscriptionSnapshot {
+  return {
+    id: subscription.id,
+    customerId: stripeResourceId(subscription.customer) ?? null,
+    status: subscription.status,
+    trialEndSeconds: subscription.trial_end ?? null,
+  };
+}
+
+function storedBillingState(data: FirebaseFirestore.DocumentData | undefined, organization: boolean): StoredStripeBillingState {
+  if (!data) {
+    return {};
+  }
+  return organization
+    ? {
+        eventId: data.lastStripeBillingEventId,
+        eventCreated: data.lastStripeBillingEventCreated,
+        eventType: data.lastStripeBillingEventType,
+        subscriptionId: data.providerSubscriptionId,
+        status: data.subscriptionStatus,
+      }
+    : {
+        eventId: data.lastEventId,
+        eventCreated: data.lastEventCreated,
+        eventType: data.lastEventType,
+        subscriptionId: data.providerSubscriptionId,
+        status: data.status,
+      };
+}
+
+async function applyStripeBillingEvent(
+  db: Firestore,
+  eventState: StripeBillingEventState,
+): Promise<'applied' | 'ignored' | 'missing-organization'> {
+  const orgRef = db.doc(`organizations/${eventState.organizationId}`);
+  const subscriptionRef = db.doc(billingRecordPath(eventState.organizationId, eventState.id));
+
+  return db.runTransaction(async (transaction) => {
+    const orgSnap = await transaction.get(orgRef);
+    const subscriptionSnap = await transaction.get(subscriptionRef);
+    if (!orgSnap.exists) {
+      return 'missing-organization';
+    }
+
+    const subscriptionDecision = decideStripeBillingEvent(
+      eventState,
+      storedBillingState(subscriptionSnap.data(), false),
+    );
+    if (subscriptionDecision !== 'apply') {
+      return 'ignored';
+    }
+
+    const eventTimestamp = FieldValue.serverTimestamp();
+    transaction.set(
+      subscriptionRef,
+      {
+        provider: 'stripe',
+        providerSubscriptionId: eventState.id,
+        providerCustomerId: eventState.customerId,
+        status: eventState.status,
+        trialEndsAt: eventState.trialEndSeconds === null
+          ? null
+          : Timestamp.fromMillis(eventState.trialEndSeconds * 1000),
+        lastEventType: eventState.eventType,
+        lastEventId: eventState.eventId,
+        lastEventCreated: eventState.eventCreated,
+        updatedAt: eventTimestamp,
+      },
+      { merge: true },
+    );
+
+    const organizationState = storedBillingState(orgSnap.data(), true);
+    if (shouldUpdateOrganizationBillingState(eventState, organizationState)) {
+      transaction.set(
+        orgRef,
+        {
+          providerCustomerId: eventState.customerId,
+          providerSubscriptionId: eventState.id,
+          subscriptionStatus: eventState.status,
+          billingStatus: eventState.status,
+          billingProvider: 'stripe',
+          lastStripeBillingEventType: eventState.eventType,
+          lastStripeBillingEventId: eventState.eventId,
+          lastStripeBillingEventCreated: eventState.eventCreated,
+          updatedAt: eventTimestamp,
+          updatedBy: 'stripe-webhook',
+        },
+        { merge: true },
+      );
+    }
+
+    return 'applied';
+  });
+}
+
 const CLIENT_SAFE_ERROR_PREFIXES = [
   'Missing required field:',
   'organizationId exceeds maximum length',
@@ -1699,71 +1800,46 @@ export const stripeWebhook = onRequest(
       ) {
         const payloadObject = event.data.object;
         let organizationId: string | undefined;
-        let subscriptionId: string | undefined;
-        let customerId: string | undefined;
-        let subscriptionStatus: string | undefined;
-        let trialEnd: Date | null = null;
+        let subscription: Stripe.Subscription | undefined;
 
         if (event.type === 'checkout.session.completed') {
           const checkoutSession = payloadObject as Stripe.Checkout.Session;
           organizationId = stripeWebhookOrganizationId(checkoutSession.metadata?.organizationId);
-          customerId = typeof checkoutSession.customer === 'string' ? checkoutSession.customer : undefined;
-          subscriptionId = typeof checkoutSession.subscription === 'string' ? checkoutSession.subscription : undefined;
-          subscriptionStatus = 'trialing';
+          const subscriptionId = stripeResourceId(checkoutSession.subscription);
+          if (subscriptionId) {
+            subscription = await stripe.subscriptions.retrieve(subscriptionId);
+            organizationId ??= stripeWebhookOrganizationId(subscription.metadata?.organizationId);
+          }
         } else {
-          const subscription = payloadObject as Stripe.Subscription;
+          subscription = payloadObject as Stripe.Subscription;
           organizationId = stripeWebhookOrganizationId(subscription.metadata?.organizationId);
-          subscriptionId = subscription.id;
-          customerId = typeof subscription.customer === 'string' ? subscription.customer : undefined;
-          subscriptionStatus = subscription.status;
-          trialEnd = toDateOrNull(subscription.trial_end ?? null);
         }
 
-        if (organizationId) {
-          const orgRef = db.doc(`organizations/${organizationId}`);
-          const orgSnap = await orgRef.get();
-          if (!orgSnap.exists) {
-            console.warn(`Stripe webhook skipped unknown organization ${organizationId}.`);
-            response.status(200).json({ received: true });
-            return;
-          }
-
-          const billingPatch: Record<string, unknown> = {
-            providerCustomerId: customerId ?? null,
-            providerSubscriptionId: subscriptionId ?? null,
-            subscriptionStatus: subscriptionStatus ?? 'trialing',
-            billingStatus: subscriptionStatus ?? 'trialing',
-            updatedAt: FieldValue.serverTimestamp(),
-            updatedBy: 'stripe-webhook',
-            billingProvider: 'stripe',
-          };
-
-          // The organization trial window is created once during onboarding.
-          // Stripe's rounded Unix-second value is recorded on the billing record,
-          // but never replaces the organization's original trialEndsAt.
-          await orgRef.set(billingPatch, { merge: true });
-
-          if (subscriptionId) {
-            await db.doc(billingRecordPath(organizationId, subscriptionId)).set(
-              {
-                provider: 'stripe',
-                providerSubscriptionId: subscriptionId,
-                providerCustomerId: customerId ?? null,
-                status: subscriptionStatus ?? 'trialing',
-                trialEndsAt: trialEnd ? Timestamp.fromDate(trialEnd) : null,
-                lastEventType: event.type,
-                lastEventId: event.id,
-                updatedAt: FieldValue.serverTimestamp(),
-              },
-              { merge: true },
-            );
+        if (organizationId && subscription) {
+          const result = await applyStripeBillingEvent(
+            db,
+            buildStripeBillingEventState({
+              eventId: event.id,
+              eventCreated: event.created,
+              eventType: event.type as StripeBillingEventType,
+              organizationId,
+              subscription: stripeSubscriptionSnapshot(subscription),
+            }),
+          );
+          if (result === 'missing-organization') {
+            console.warn('Stripe webhook skipped an unknown organization.', { eventType: event.type });
           }
         }
       }
 
       response.status(200).json({ received: true });
     } catch (error) {
-      console.error('Webhook handling failed.', error);
+      console.error('Webhook handling failed.', {
+        name: error instanceof Error ? error.name : 'UnknownError',
+        code: typeof error === 'object' && error !== null && 'code' in error
+          ? String(error.code)
+          : undefined,
+      });
       response.status(400).send('Webhook handling failed.');
     }
   },

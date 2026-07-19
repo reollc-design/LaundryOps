@@ -136,9 +136,13 @@ service cloud.firestore {
       allow update: if isOwnerOrAdmin(orgId)
         && unchanged([
           'billingStatus',
+          'billingProvider',
           'subscriptionStatus',
           'providerCustomerId',
           'providerSubscriptionId',
+          'lastStripeBillingEventType',
+          'lastStripeBillingEventId',
+          'lastStripeBillingEventCreated',
           'ownerUserId',
           'trialStartedAt',
           'trialEndsAt',

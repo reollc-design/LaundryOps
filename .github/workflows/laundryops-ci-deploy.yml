@@ -71,6 +71,9 @@ jobs:
       - name: Build Functions
         run: npm run build
 
+      - name: Test Functions
+        run: npm test
+
   validate-rules:
     name: Validate Firebase rules
     runs-on: ubuntu-latest
@@ -128,12 +131,17 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: |
+            app/package-lock.json
+            app/functions/package-lock.json
 
-      - name: Install dependencies
+      - name: Install app dependencies
         run: npm ci
+
+      - name: Install Functions dependencies
+        run: npm ci --prefix functions
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -164,5 +172,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Deploy LaundryOps hosting, Firestore rules, and Storage rules
-        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage --project laundromat-maintenance-app --non-interactive
+      - name: Deploy coordinated LaundryOps release
+        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive

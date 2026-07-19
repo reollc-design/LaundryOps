@@ -219,6 +219,12 @@ describe('Firestore organization security', () => {
 
     await assertSucceeds(ownerA.doc('organizations/orgA/machines/washerA1').get());
     await assertSucceeds(ownerA.doc('organizations/orgA').update({ name: 'Sun State Laundry Ops' }));
+    await assertFails(ownerA.doc('organizations/orgA').update({
+      billingProvider: 'stripe',
+      lastStripeBillingEventType: 'customer.subscription.updated',
+      lastStripeBillingEventId: 'evt_client_tamper',
+      lastStripeBillingEventCreated: 9_999_999_999,
+    }));
     await assertFails(ownerA.doc('organizations/orgA/subscriptions/current').update({ status: 'active' }));
     await assertFails(ownerA.doc('organizations/orgA/auditLogs/logA2').set({ action: 'manual.clientWrite' }));
   });

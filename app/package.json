@@ -8,7 +8,7 @@
     "build": "vite build --configLoader runner",
     "lint": "tsc --noEmit",
     "test:trial": "node --experimental-strip-types src/trial.test.mjs && node --experimental-strip-types functions/trial.test.mjs",
-    "test:functions": "node --experimental-strip-types functions/manual-indexing.test.mjs && node --experimental-strip-types functions/request-protection.test.mjs",
+    "test:functions": "npm --prefix functions test",
     "visual:landing": "node tools/visual/landing-screenshots.mjs",
     "firebase:emulators": "firebase\\run-emulators.cmd",
     "test:rules": "firebase\\run-rules-tests.cmd"
