@@ -6,7 +6,7 @@ Use this as the running cleanup list before beta and before app-store packaging.
 
 - Complete the Sunstate separation from LaundryOps Firebase. Verify Sunstate Dashboard V2 sign-in, all dashboard pages, `syncAmazonIncomeSheet`, and the exact 45-record dataset in `sunstate-commercial-dashboard`; switch normal use to the V2 Hosting URL; then inventory and, only with separate approval, remove the legacy Sunstate Hosting, Function, and Amazon data from `laundromat-maintenance-app`. Preserve all LaundryOps resources throughout the cleanup.
 - [x] Cloud Functions build-image cleanup configured. Artifact Registry repository `projects/laundromat-maintenance-app/locations/us-central1/repositories/gcf-artifacts` now automatically deletes container images older than 7 days.
-- [ ] GitHub Actions Functions validation implemented locally. The workflow now uses Node.js 22 to run the Functions TypeScript check and build, and blocks deployment if either fails. Mark complete after the change is pushed and the first GitHub Actions run passes.
+- [x] GitHub Actions now validates the Functions TypeScript build. The workflow uses Node.js 22 to run the Functions TypeScript check and build, blocks deployment if either fails, and passed in pull-request Actions run 33.
 - Update GitHub Actions to require `VITE_FUNCTIONS_API_BASE_URL` or confirm `VITE_BILLING_API_BASE_URL` is intentionally used for Functions.
 - Decide whether GitHub Actions should deploy Storage rules along with Hosting and Firestore rules.
 - Keep targeted Functions deploys for LaundryOps backend changes; do not broad-deploy unrelated functions from this project.
