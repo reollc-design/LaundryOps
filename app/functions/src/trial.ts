@@ -1,12 +1,25 @@
 export const TRIAL_DAYS = 14;
 export const TRIAL_DURATION_MS = TRIAL_DAYS * 24 * 60 * 60 * 1000;
+export const DEVELOPER_ACCESS_ENTITLEMENT = 'developer';
+export const DEVELOPER_BILLING_DISABLED_MESSAGE = 'Billing is not available for developer workspaces.';
 
 export type TrialAccessStatus = 'active' | 'expired';
 
 export interface TrialRecordInput {
+  accessEntitlement?: unknown;
   subscriptionStatus?: unknown;
   trialStartedAtMs?: number | null;
   trialEndsAtMs?: number | null;
+}
+
+export function hasDeveloperAccess(record: TrialRecordInput): boolean {
+  return record.accessEntitlement === DEVELOPER_ACCESS_ENTITLEMENT;
+}
+
+export function assertBillingAllowed(record: TrialRecordInput): void {
+  if (hasDeveloperAccess(record)) {
+    throw new Error(DEVELOPER_BILLING_DISABLED_MESSAGE);
+  }
 }
 
 export interface TrialAccessResult {
@@ -48,7 +61,7 @@ export function resolveTrialEndsAt(record: TrialRecordInput): number | null {
 }
 
 export function evaluateTrialAccess(record: TrialRecordInput, nowMs: number): TrialAccessResult {
-  if (record.subscriptionStatus === 'active') {
+  if (hasDeveloperAccess(record) || record.subscriptionStatus === 'active') {
     return { status: 'active', trialEndsAtMs: resolveTrialEndsAt(record) };
   }
 
@@ -64,7 +77,7 @@ export function evaluateTrialAccess(record: TrialRecordInput, nowMs: number): Tr
 }
 
 export function stripeTrialEndForCheckout(record: TrialRecordInput, nowMs: number): number | undefined {
-  if (record.subscriptionStatus !== 'trialing') {
+  if (hasDeveloperAccess(record) || record.subscriptionStatus !== 'trialing') {
     return undefined;
   }
 

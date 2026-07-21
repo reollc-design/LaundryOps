@@ -20,6 +20,7 @@ The app now has local Firebase scaffold files at the app root:
 - `functions/src/index.ts` - Stripe billing endpoints (Checkout + Billing Portal) and webhook scaffold.
 - `firebase/stripe-setup.md` - Stripe dashboard + key + webhook setup guide.
 - `firebase/manual-ai-setup.md` - setup guide for manual indexing and OpenAI-backed Repair Assist.
+- `firebase/developer-connect-setup.md` - future-project requirement to enable Secret Manager before Developer Connect repository setup.
 - `firebase/beta-test-checklist.md` - launch-critical beta test checklist.
 - `.tools/jdk11/` - local bundled JDK used only for Firebase emulator commands in this workspace.
 - `.firebase-local-emulators/` - local cache path for downloaded emulator binaries inside the workspace.

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  assertBillingAllowed,
   calculateTrialEndsAt,
   buildCheckoutSubscriptionData,
   evaluateTrialAccess,
@@ -16,6 +17,22 @@ assert.equal(evaluateTrialAccess({ subscriptionStatus: 'trialing', trialStartedA
 assert.equal(evaluateTrialAccess({ subscriptionStatus: 'trialing', trialStartedAtMs: startedAt, trialEndsAtMs: endsAt }, endsAt + 1).status, 'expired');
 assert.equal(evaluateTrialAccess({ subscriptionStatus: 'active', trialStartedAtMs: startedAt, trialEndsAtMs: endsAt }, endsAt).status, 'active');
 assert.equal(evaluateTrialAccess({ subscriptionStatus: 'canceled', trialStartedAtMs: startedAt, trialEndsAtMs: endsAt }, endsAt - 1).status, 'expired');
+assert.equal(evaluateTrialAccess({ accessEntitlement: 'developer', subscriptionStatus: 'trialing', trialStartedAtMs: startedAt, trialEndsAtMs: endsAt }, endsAt).status, 'active');
+assert.equal(evaluateTrialAccess({ accessEntitlement: 'developer', subscriptionStatus: 'trialing', trialStartedAtMs: startedAt, trialEndsAtMs: endsAt }, endsAt + 1).status, 'active');
+assert.equal(evaluateTrialAccess({ accessEntitlement: 'developer', subscriptionStatus: 'canceled' }, endsAt + 1).status, 'active');
+assert.doesNotThrow(() => assertBillingAllowed({ subscriptionStatus: 'trialing' }));
+assert.throws(
+  () => assertBillingAllowed({ accessEntitlement: 'developer', subscriptionStatus: 'trialing' }),
+  /Billing is not available for developer workspaces\./,
+);
+assert.equal(
+  stripeTrialEndForCheckout(
+    { accessEntitlement: 'developer', subscriptionStatus: 'trialing', trialEndsAtMs: endsAt },
+    endsAt - 1000,
+  ),
+  undefined,
+  'developer workspaces must never receive Stripe trial configuration',
+);
 
 const organizationTrial = {
   subscriptionStatus: 'trialing',

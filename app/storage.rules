@@ -51,7 +51,11 @@ service firebase.storage {
       return signedIn()
         && firestore.exists(organizationPath(orgId))
         && (
-          firestore.get(organizationPath(orgId)).data.subscriptionStatus == 'active'
+          (
+            'accessEntitlement' in firestore.get(organizationPath(orgId)).data
+            && firestore.get(organizationPath(orgId)).data.accessEntitlement == 'developer'
+          )
+          || firestore.get(organizationPath(orgId)).data.subscriptionStatus == 'active'
           || (
             firestore.get(organizationPath(orgId)).data.subscriptionStatus == 'trialing'
             && firestore.get(organizationPath(orgId)).data.trialEndsAt is timestamp

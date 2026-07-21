@@ -59,7 +59,11 @@ service cloud.firestore {
       return signedIn()
         && exists(organizationPath(orgId))
         && (
-          get(organizationPath(orgId)).data.subscriptionStatus == 'active'
+          (
+            'accessEntitlement' in get(organizationPath(orgId)).data
+            && get(organizationPath(orgId)).data.accessEntitlement == 'developer'
+          )
+          || get(organizationPath(orgId)).data.subscriptionStatus == 'active'
           || (
             get(organizationPath(orgId)).data.subscriptionStatus == 'trialing'
             && get(organizationPath(orgId)).data.trialEndsAt is timestamp
@@ -143,6 +147,9 @@ service cloud.firestore {
           'lastStripeBillingEventType',
           'lastStripeBillingEventId',
           'lastStripeBillingEventCreated',
+          'accessEntitlement',
+          'accessEntitlementGrantedAt',
+          'accessEntitlementGrantedBy',
           'ownerUserId',
           'trialStartedAt',
           'trialEndsAt',

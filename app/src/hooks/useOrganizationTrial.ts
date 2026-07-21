@@ -2,11 +2,12 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { getFirebaseClient } from '../firebase/client';
-import { evaluateTrialAccess, type TrialAccessStatus } from '../trial';
+import { evaluateTrialAccess, shouldScheduleTrialExpiration, type TrialAccessStatus } from '../trial';
 
 export interface OrganizationTrialState {
   loading: boolean;
   status: TrialAccessStatus | 'unknown';
+  accessEntitlement: string | null;
   subscriptionStatus: string | null;
   trialStartedAtMs: number | null;
   trialEndsAtMs: number | null;
@@ -14,6 +15,7 @@ export interface OrganizationTrialState {
 }
 
 interface TrialRecord {
+  accessEntitlement: string | null;
   subscriptionStatus: string | null;
   trialStartedAtMs: number | null;
   trialEndsAtMs: number | null;
@@ -62,6 +64,7 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
         const data = snapshot.data();
         setRecord(snapshot.exists()
           ? {
+              accessEntitlement: typeof data?.accessEntitlement === 'string' ? data.accessEntitlement : null,
               subscriptionStatus: typeof data?.subscriptionStatus === 'string' ? data.subscriptionStatus : null,
               trialStartedAtMs: timestampToMillis(data?.trialStartedAt),
               trialEndsAtMs: timestampToMillis(data?.trialEndsAt),
@@ -83,18 +86,19 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
   const evaluation = record ? evaluateTrialAccess(record, nowMs) : null;
 
   useEffect(() => {
-    if (!evaluation || evaluation.status !== 'active' || record?.subscriptionStatus !== 'trialing' || evaluation.trialEndsAtMs === null) {
+    if (!evaluation || !record || !shouldScheduleTrialExpiration(record, evaluation)) {
       return undefined;
     }
 
     const delay = Math.max(0, evaluation.trialEndsAtMs - Date.now() + 1);
     const timeout = window.setTimeout(() => setNowMs(Date.now()), Math.min(delay, 2_147_000_000));
     return () => window.clearTimeout(timeout);
-  }, [evaluation, record?.subscriptionStatus]);
+  }, [evaluation, record]);
 
   return {
     loading,
     status: loading || !record || !evaluation ? 'unknown' : evaluation.status,
+    accessEntitlement: record?.accessEntitlement ?? null,
     subscriptionStatus: record?.subscriptionStatus ?? null,
     trialStartedAtMs: record?.trialStartedAtMs ?? null,
     trialEndsAtMs: evaluation?.trialEndsAtMs ?? null,

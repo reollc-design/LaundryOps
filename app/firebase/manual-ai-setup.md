@@ -38,9 +38,13 @@ Deploy:
 
 Manual upload uses:
 
-- Storage path: `orgs/{orgId}/manuals/{manualId}/{fileName}`
+- Storage path: `orgs/{orgId}/manuals/{userId}/{manualId}/{fileName}`
 - Firestore doc: `organizations/{orgId}/manuals/{manualId}`
 - Active chunk docs: `organizations/{orgId}/manuals/{manualId}/{activeChunkCollection}/{chunkId}`
+
+`userId` is the UID of the signed-in uploader. The web client creates the Firestore manual document first, then uploads the PDF under that user's UID and the new manual document ID. Storage rules allow owner, admin, and manager roles to upload only inside their own UID folder while the organization is active. Uploads must be under 25 MB and must satisfy the beta PDF check. Other active organization members may read a manual, but client-side deletion is denied; `deleteOrganizationManual` performs trusted backend cleanup.
+
+The indexer accepts only this organization-scoped shape and verifies that the `orgId` and `manualId` in the Storage path match the Firestore manual being indexed. The Firestore manual document stores the exact path in its `storagePath` field.
 
 The indexer writes each new manual extraction to a fresh chunk collection first, then updates `activeChunkCollection` only after all chunks are written. Existing indexed manuals stay marked `indexed` while a replacement version is processing, so Repair Assist can keep using the last good manual if a re-index fails.
 

@@ -31,6 +31,7 @@ import {
   REQUEST_RATE_LIMIT_POLICIES,
 } from './request-protection.js';
 import {
+  assertBillingAllowed,
   buildCheckoutSubscriptionData,
   evaluateTrialAccess,
   timestampToMilliseconds,
@@ -213,6 +214,7 @@ function assertActiveOrganizationTrial(orgSnap: FirebaseFirestore.DocumentSnapsh
   const orgData = orgSnap.data() ?? {};
   const trial = evaluateTrialAccess(
     {
+      accessEntitlement: optionalString(orgData.accessEntitlement),
       subscriptionStatus: optionalString(orgData.subscriptionStatus),
       trialStartedAtMs: timestampToMilliseconds(orgData.trialStartedAt),
       trialEndsAtMs: timestampToMilliseconds(orgData.trialEndsAt),
@@ -918,6 +920,7 @@ async function getOrCreateStripeCustomer(params: {
   }
 
   const orgData = orgSnap.data() ?? {};
+  assertBillingAllowed({ accessEntitlement: optionalString(orgData.accessEntitlement) });
   const organizationName = optionalString(orgData.name) ?? 'LaundryOps Account';
   const billingIdentity = {
     subscriptionStatus: optionalString(orgData.subscriptionStatus) ?? null,
@@ -1090,6 +1093,7 @@ const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'Owner, admin, or manager access is required.',
   'An active organization membership is required.',
   'Organization not found.',
+  'Billing is not available for developer workspaces.',
   'Manual record not found.',
   'Manual PDF is missing from Storage.',
   'Unable to extract text from the provided PDF. Please ensure the PDF contains readable text.',
@@ -1396,13 +1400,13 @@ export const createStripeCheckoutSession = onRequest(
       const billingPlan = billingPlanFromRequest(request.body?.billingPlan);
       await assertOwnerOrAdmin(organizationId, caller.uid);
 
-      const stripe = getStripeClient();
       const customerIdentity = await getOrCreateStripeCustomer({
         organizationId,
         uid: caller.uid,
         email: caller.email,
       });
 
+      const stripe = getStripeClient();
       const priceId = priceIdForBillingPlan(billingPlan);
       const successUrl = getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account?billing=success`);
       const cancelUrl = getEnv('STRIPE_CANCEL_URL', `${DEFAULT_APP_URL}/account?billing=cancel`);

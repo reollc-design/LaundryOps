@@ -76,6 +76,7 @@ import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOr
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
+import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
@@ -796,6 +797,11 @@ export function App() {
   const handleStartSubscription = async (billingPlan: BillingPlanKey): Promise<void> => {
     setBillingError(null);
 
+    if (organizationTrial.accessEntitlement === DEVELOPER_ACCESS_ENTITLEMENT) {
+      setBillingError('Billing is not required for this developer workspace.');
+      return;
+    }
+
     if (!defaultOrganizationId) {
       setBillingError('No organization is connected yet. Finish onboarding first.');
       return;
@@ -816,6 +822,11 @@ export function App() {
   };
   const handleManageBilling = async (): Promise<void> => {
     setBillingError(null);
+
+    if (organizationTrial.accessEntitlement === DEVELOPER_ACCESS_ENTITLEMENT) {
+      setBillingError('Billing is not required for this developer workspace.');
+      return;
+    }
 
     if (!defaultOrganizationId) {
       setBillingError('No organization is connected yet. Finish onboarding first.');
@@ -3208,10 +3219,17 @@ function AccountScreen({
 }) {
   const [selectedBillingPlan, setSelectedBillingPlan] = useState<BillingPlanKey>('annual');
   const selectedPlan = billingPlans.find((plan) => plan.key === selectedBillingPlan) ?? billingPlans[0];
+  const developerAccess = organizationTrial.accessEntitlement === DEVELOPER_ACCESS_ENTITLEMENT;
   const trialExpired = organizationTrial.status === 'expired';
   const paidSubscription = organizationTrial.subscriptionStatus === 'active';
-  const trialing = organizationTrial.subscriptionStatus === 'trialing' && !trialExpired;
-  const trialLabel = paidSubscription ? 'Subscription active' : trialExpired ? 'Trial ended' : 'Pro trial active';
+  const trialing = !developerAccess && organizationTrial.subscriptionStatus === 'trialing' && !trialExpired;
+  const trialLabel = developerAccess
+    ? 'Developer access active'
+    : paidSubscription
+      ? 'Subscription active'
+      : trialExpired
+        ? 'Trial ended'
+        : 'Pro trial active';
 
   return (
     <div className="screen-stack">
@@ -3242,10 +3260,12 @@ function AccountScreen({
 
       <section className="trial-card">
         <div>
-          <span>14-Day Free Trial</span>
+          <span>{developerAccess ? 'Developer Access' : '14-Day Free Trial'}</span>
           <strong>{trialLabel}</strong>
           <p>
-            {trialExpired
+            {developerAccess
+              ? 'Permanent internal workspace access. Billing is not required.'
+              : trialExpired
               ? 'Choose a paid plan to continue using LaundryOps.'
               : paidSubscription
                 ? 'Your company subscription is active.'
@@ -3253,8 +3273,8 @@ function AccountScreen({
           </p>
         </div>
         <div className="trial-days">
-          <strong>{trialing ? trialDaysRemaining(organizationTrial.trialEndsAtMs) : paidSubscription ? '✓' : '0'}</strong>
-          <span>{trialing ? 'days left' : paidSubscription ? 'active' : 'days left'}</span>
+          <strong>{developerAccess ? 'DEV' : trialing ? trialDaysRemaining(organizationTrial.trialEndsAtMs) : paidSubscription ? '✓' : '0'}</strong>
+          <span>{developerAccess ? 'permanent' : trialing ? 'days left' : paidSubscription ? 'active' : 'days left'}</span>
         </div>
       </section>
 
@@ -3265,7 +3285,22 @@ function AccountScreen({
       </section>
       {accountStats.length === 0 && <p className="empty-state">No account metrics yet.</p>}
 
-      <section className="content-section subscription-card">
+      {developerAccess ? (
+        <section className="content-section subscription-card">
+          <div className="section-heading">
+            <h2>Developer workspace</h2>
+            <span>Permanent access</span>
+          </div>
+          <div className="subscription-line">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>Billing is not required</strong>
+              <span>This internal company workspace has permanent developer access.</span>
+            </div>
+          </div>
+        </section>
+      ) : (
+        <section className="content-section subscription-card">
         <div className="section-heading">
           <h2>{trialExpired ? 'Choose a plan to continue' : 'Choose your plan after your 14-day free trial'}</h2>
           <span>Annual recommended</span>
@@ -3327,7 +3362,8 @@ function AccountScreen({
             <span>{billingError}</span>
           </div>
         )}
-      </section>
+        </section>
+      )}
 
       <section className="content-section admin-card">
         <div className="section-heading">
