@@ -4642,7 +4642,7 @@ function WorkOrderDetailScreen({
 }
 
 const NO_INDEXED_MANUAL_MESSAGE =
-  'No machine manual has been uploaded and indexed for this machine model number, so AI Repair Assist cannot provide a manual-grounded answer. Upload the manufacturer repair manual using the exact model number before using AI Repair Assist.';
+  'No machine manual has been uploaded and indexed for this machine model, so AI Repair Assist cannot provide a manual-grounded answer. Upload the manufacturer repair manual and link it to this machine model before using AI Repair Assist.';
 
 function repairAssistModelKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');

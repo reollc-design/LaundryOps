@@ -37,6 +37,38 @@ function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)));
 }
 
+function modelCandidates(value: string): string[] {
+  return uniqueStrings([
+    compactKey(value),
+    ...value.split(/\s+/).map(compactKey),
+  ]).filter((candidate) => candidate.length >= 3 && /\d/.test(candidate));
+}
+
+export function manualModelMatchesMachine(
+  manualModel: string,
+  machine: { make?: string; modelNumber?: string; model?: string },
+): boolean {
+  const manualModels = modelCandidates(manualModel);
+  if (manualModels.length === 0) {
+    return false;
+  }
+
+  const modelNumber = machine.modelNumber ?? '';
+  const modelNumberKey = compactKey(modelNumber);
+  if (modelNumberKey) {
+    const makeModelKey = compactKey([machine.make, modelNumber].filter(Boolean).join(' '));
+    const requiresManufacturer = /^\d+$/.test(modelNumberKey) || modelNumberKey.length < 4;
+    const authoritativeMachineModels = uniqueStrings([
+      ...(requiresManufacturer ? [] : [modelNumberKey]),
+      makeModelKey === modelNumberKey ? '' : makeModelKey,
+    ]);
+    return manualModels.some((candidate) => authoritativeMachineModels.includes(candidate));
+  }
+
+  const legacyMachineModels = modelCandidates(machine.model ?? '');
+  return manualModels.some((candidate) => legacyMachineModels.includes(candidate));
+}
+
 export function chunkManualText(text: string, maxLength: number = MAX_MANUAL_CHUNK_LENGTH): string[] {
   const normalized = text
     .replace(/\r/g, '\n')

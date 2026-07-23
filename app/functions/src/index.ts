@@ -14,6 +14,7 @@ import {
   buildManualErrorCodeIndex,
   chunkManualText,
   errorCodeAliases,
+  manualModelMatchesMachine,
   processManualPages,
   type ManualChunkText,
   type ManualErrorCodeIndexEntry,
@@ -465,7 +466,13 @@ async function findIndexedManualForModel(params: {
         optionalString(data.machineModelKey) ?? '',
         optionalString(data.machineModelCompactKey) ?? '',
       ].join(' '));
-      const hasModelNumber = compactModelNumberKey.length >= 4 && manualKey.includes(compactModelNumberKey);
+      const hasModelNumber = params.machine
+        ? manualModelMatchesMachine(manualModel, {
+          make: params.machine.make,
+          modelNumber: params.machine.modelNumber,
+          model: params.machine.model,
+        })
+        : compactModelNumberKey.length >= 4 && manualKey.includes(compactModelNumberKey);
       const hasMake = makeKey.length >= 3 && manualKey.includes(makeKey);
       const hasStrongModel = strongModelKeys.some((modelKey) => manualKey.includes(modelKey) || modelKey.includes(manualKey));
       let score = 0;
@@ -1292,8 +1299,12 @@ async function indexManualRecord(params: {
     const machineModelCompactKey = compactKey(machineModelKey);
     const machinesSnap = await params.db.collection(`organizations/${params.organizationId}/machines`).get();
     const linkedMachineCount = machinesSnap.docs.reduce((count, docSnap) => {
-      const model = optionalString(docSnap.data().model) ?? '';
-      return normalizeMachineModelKey(model) === machineModelKey ? count + 1 : count;
+      const machine = docSnap.data();
+      return manualModelMatchesMachine(machineModel, {
+        make: optionalString(machine.make),
+        modelNumber: optionalString(machine.modelNumber),
+        model: optionalString(machine.model),
+      }) ? count + 1 : count;
     }, 0);
 
     const chunkCollectionName = newManualChunkCollectionName();

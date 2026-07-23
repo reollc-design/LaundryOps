@@ -4,6 +4,7 @@ import {
   chunkManualText,
   errorCodeAliases,
   manualErrorCodeAliases,
+  manualModelMatchesMachine,
   processManualPages,
 } from './src/manual-indexing.ts';
 
@@ -63,6 +64,111 @@ test('does not index ordinary prose as an error code', () => {
 test('returns no chunks for unreadable or empty extracted PDF text', () => {
   assert.deepEqual(chunkManualText(''), []);
   assert.deepEqual(chunkManualText('   \u0000\t  '), []);
+});
+
+test('matches manual model numbers despite case, spacing, dashes, make, or product-family wording', () => {
+  const manualModel = 'SFNNCASG113TN01';
+  const matchingMachines = [
+    { modelNumber: 'SFNNCASG113TN01' },
+    { modelNumber: 'sfnncasg113tn01' },
+    { modelNumber: 'SFN-NCASG-113TN01' },
+    { model: 'Speed Queen Horizon SFNNCASG113TN01' },
+  ];
+
+  assert.equal(
+    matchingMachines.every((machine) => manualModelMatchesMachine(manualModel, machine)),
+    true,
+  );
+});
+
+test('matches a manufacturer-prefixed manual model to a bare machine model number', () => {
+  assert.equal(
+    manualModelMatchesMachine('ADC285', {
+      make: 'ADC',
+      modelNumber: '285',
+      model: 'ADC 285',
+    }),
+    true,
+  );
+});
+
+test('does not treat nearby model numbers as the same model', () => {
+  const differentModels = [
+    {
+      make: 'Speed Queen',
+      modelNumber: 'SFNNCASG113TN010',
+      model: 'Speed Queen Horizon SFNNCASG113TN010',
+    },
+    {
+      make: 'Speed Queen',
+      modelNumber: 'SFNNCASG113TN01A',
+      model: 'Speed Queen Horizon SFNNCASG113TN01A',
+    },
+    {
+      make: 'Speed Queen',
+      modelNumber: 'XSFNNCASG113TN01',
+      model: 'Speed Queen Horizon XSFNNCASG113TN01',
+    },
+  ];
+
+  assert.equal(
+    differentModels.every((machine) => !manualModelMatchesMachine('SFNNCASG113TN01', machine)),
+    true,
+  );
+});
+
+test('does not ignore a conflicting manufacturer on a short numeric model', () => {
+  const otherBrandMachine = {
+      make: 'Other Brand',
+      modelNumber: '285',
+      model: 'Other Brand 285',
+  };
+
+  assert.equal(
+    ['ADC285', 'ADC 285', '285'].every((manualModel) => !manualModelMatchesMachine(manualModel, otherBrandMachine)),
+    true,
+  );
+});
+
+test('requires and accepts the correct manufacturer for a short numeric model', () => {
+  const adcMachine = {
+    make: 'ADC',
+    modelNumber: '285',
+    model: 'ADC 285',
+  };
+
+  assert.equal(
+    ['ADC285', 'ADC 285'].every((manualModel) => manualModelMatchesMachine(manualModel, adcMachine)),
+    true,
+  );
+  assert.equal(
+    manualModelMatchesMachine('285', adcMachine),
+    false,
+  );
+});
+
+test('uses an explicit model number instead of a stale combined-model field', () => {
+  assert.equal(
+    manualModelMatchesMachine('ABC123', {
+      make: 'Example',
+      modelNumber: 'ABC124',
+      model: 'Example ABC123',
+    }),
+    false,
+  );
+});
+
+test('counts all eight machines that share the same normalized model number', () => {
+  const machines = Array.from({ length: 8 }, (_, index) => ({
+    make: 'Speed Queen',
+    modelNumber: index % 2 === 0 ? 'SFNNCASG113TN01' : 'SFN-NCASG-113TN01',
+    model: `Speed Queen Horizon SFNNCASG113TN01 machine ${index + 1}`,
+  }));
+
+  assert.equal(
+    machines.filter((machine) => manualModelMatchesMachine('SFNNCASG113TN01', machine)).length,
+    8,
+  );
 });
 
 test('processes every page beyond the first 100 and reports skipped manuals', async () => {
