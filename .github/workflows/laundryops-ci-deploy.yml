@@ -205,4 +205,4 @@ jobs:
         run: printf 'DOCUMENT_AI_OCR_PROCESSOR_ID=%s\nDOCUMENT_AI_OCR_LOCATION=%s\n' "$DOCUMENT_AI_OCR_PROCESSOR_ID" "$DOCUMENT_AI_OCR_LOCATION" > functions/.env.laundromat-maintenance-app
 
       - name: Deploy coordinated LaundryOps release
-        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,firestore:indexes,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
