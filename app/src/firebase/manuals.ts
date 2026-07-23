@@ -15,6 +15,7 @@ interface ManualEndpointResponse {
   grounded?: boolean;
   model?: string;
   sourceMode?: string;
+  answerMode?: 'openai' | 'manual-fallback';
   citations?: Array<{
     chunkId: string;
     preview: string;
@@ -82,6 +83,7 @@ export interface ManualRepairAssistResult {
   grounded: boolean;
   model: string | null;
   sourceMode: string | null;
+  answerMode: 'openai' | 'manual-fallback';
   manual: {
     id: string;
     title: string;
@@ -303,6 +305,7 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
     grounded: Boolean(data.grounded),
     model: data.model ?? null,
     sourceMode: data.sourceMode ?? null,
+    answerMode: data.answerMode === 'manual-fallback' ? 'manual-fallback' : 'openai',
     manual: data.manual ?? null,
     citations: Array.isArray(data.citations) ? data.citations : [],
   };

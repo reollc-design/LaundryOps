@@ -4688,6 +4688,7 @@ function RepairAssistScreen({
   const [assistManualTitle, setAssistManualTitle] = useState<string | null>(null);
   const [assistGrounded, setAssistGrounded] = useState(false);
   const [assistModel, setAssistModel] = useState<string | null>(null);
+  const [assistAnswerMode, setAssistAnswerMode] = useState<'openai' | 'manual-fallback' | null>(null);
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
   const [photoMessage, setPhotoMessage] = useState<string | null>(null);
   const assistRequestIdRef = useRef(0);
@@ -4722,6 +4723,7 @@ function RepairAssistScreen({
     setAssistManualTitle(null);
     setAssistGrounded(false);
     setAssistModel(null);
+    setAssistAnswerMode(null);
     setAssistCitations([]);
     setPhotoMessage(null);
   };
@@ -4796,6 +4798,7 @@ function RepairAssistScreen({
       setAssistGrounded(result.grounded);
       setAssistManualTitle(result.manual?.title ?? null);
       setAssistModel(result.model);
+      setAssistAnswerMode(result.answerMode);
       setAssistCitations(result.citations);
     } catch (error) {
       if (requestId !== assistRequestIdRef.current) {
@@ -4967,7 +4970,7 @@ function RepairAssistScreen({
           </div>
           <aside className="confidence-card">
             <span>Confidence</span>
-            <strong>{assistGrounded ? 'High' : 'Medium'}</strong>
+            <strong>{assistAnswerMode === 'manual-fallback' ? 'Manual only' : assistGrounded ? 'High' : 'Medium'}</strong>
             <div className="confidence-bars">
               <i />
               <i />
@@ -4977,7 +4980,13 @@ function RepairAssistScreen({
             </div>
             <span>Source</span>
             <b>{assistManualTitle ?? 'Manual not selected yet'}</b>
-            <small>{assistGrounded ? `${assistModel ?? 'GPT-5.5'} explaining uploaded manual` : 'Manual required'}</small>
+            <small>
+              {assistAnswerMode === 'manual-fallback'
+                ? 'AI response unavailable - grounded manual excerpt shown'
+                : assistGrounded
+                  ? `${assistModel ?? 'GPT-5.5'} explaining uploaded manual`
+                  : 'Manual required'}
+            </small>
           </aside>
         </div>
       </section>

@@ -271,9 +271,26 @@ export function buildManualErrorCodeIndex(chunks: ManualChunkText[]): ManualErro
 
 export function errorCodeAliases(errorCode: string | null, symptoms: string): string[] {
   const sourceValues = [errorCode ?? ''];
-  const codePattern = /\b(?:error\s*code|code)\s*(?:is|:)?\s*([a-z0-9][a-z0-9\s:-]{0,12})/gi;
+  const codePattern = /\b(?:error\s*code|code)\s*(?:is|:)?\s*((?:[ef]\s*[-:]?\s*[a-z0-9]{1,5})|(?:[a-z]{1,3}\s*[-:]?\s*\d{1,5}))\b/gi;
   for (const match of symptoms.matchAll(codePattern)) {
     sourceValues.push(match[1] ?? '');
+  }
+
+  const displayPattern = /\b(?:showing|displaying|shows|displays)\s*(?:error\s*code\s*)?(?:is|:)?\s*((?:[ef]\s*[-:]?\s*[a-z0-9]{1,5})|(?:[a-z]{1,3}\s*[-:]?\s*\d{1,5}))\b/gi;
+  for (const match of symptoms.matchAll(displayPattern)) {
+    sourceValues.push(match[1] ?? '');
+  }
+
+  const standaloneSymptoms = symptoms.trim();
+  const standaloneCompact = compactKey(standaloneSymptoms);
+  const standaloneCodePattern = /^(?:[ef][\s:-]+[a-z0-9]{1,5}|[ef][a-z0-9]*\d[a-z0-9]*|e(?:dl|dr))$/i;
+  if (
+    standaloneSymptoms.length <= 14
+    && standaloneCompact.length >= 2
+    && standaloneCompact.length <= 8
+    && standaloneCodePattern.test(standaloneSymptoms)
+  ) {
+    sourceValues.push(standaloneSymptoms);
   }
 
   const aliases: string[] = [];
@@ -293,7 +310,11 @@ export function errorCodeAliases(errorCode: string | null, symptoms: string): st
     if (parts.length > 1) {
       aliases.push(parts.join(' '), parts.join('-'), parts.join(':'));
     } else if (/^[a-z]{1,2}[0-9a-z]{1,5}$/.test(compact)) {
-      aliases.push(`${compact.slice(0, 1)} ${compact.slice(1)}`, `${compact.slice(0, 1)}-${compact.slice(1)}`);
+      aliases.push(
+        `${compact.slice(0, 1)} ${compact.slice(1)}`,
+        `${compact.slice(0, 1)}-${compact.slice(1)}`,
+        `${compact.slice(0, 1)}:${compact.slice(1)}`,
+      );
     }
   }
 

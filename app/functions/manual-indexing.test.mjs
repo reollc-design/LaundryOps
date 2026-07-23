@@ -50,6 +50,49 @@ test('builds equivalent query aliases for spaced, hyphenated, and compact input'
   assert.deepEqual(['E01', 'E 01', 'E-01', 'E:01'].every((alias) => manualErrorCodeAliases('E 01').includes(alias)), true);
 });
 
+for (const symptoms of ['E DR', 'E-DR', 'EDR', 'e dr', 'e-dr', 'edr']) {
+  test(`recognizes and normalizes bare "${symptoms}" entered in Symptoms`, () => {
+    const expectedAliases = ['e dr', 'edr', 'e-dr', 'e:dr'];
+    const aliases = errorCodeAliases(null, symptoms);
+    assert.deepEqual(
+      expectedAliases.every((alias) => aliases.includes(alias)),
+      true,
+      `Expected "${symptoms}" to produce aliases: ${expectedAliases.join(', ')}`,
+    );
+  });
+}
+
+test('does not misclassify ordinary symptom prose as a bare error code', () => {
+  const symptomInputs = [
+    'Door will not release after the cycle finishes',
+    'Machine is displaying a warning and making a grinding noise',
+    'Water remains in the drum when the washer stops',
+    'fan loud',
+    'easy',
+    'FIRE',
+    'FILL',
+    'empty',
+    'earth',
+    'eject',
+    'excess',
+  ];
+
+  for (const symptoms of symptomInputs) {
+    assert.deepEqual(errorCodeAliases(null, symptoms), []);
+  }
+});
+
+test('recognizes a code described as showing on the machine display', () => {
+  const aliases = errorCodeAliases(null, 'Machine is displaying e dr');
+  assert.deepEqual(['e dr', 'edr', 'e-dr', 'e:dr'].every((alias) => aliases.includes(alias)), true);
+});
+
+test('stops a labeled error code before the remaining symptom sentence', () => {
+  const aliases = errorCodeAliases(null, 'error code E DR but door will not open');
+  assert.deepEqual(['e dr', 'edr', 'e-dr', 'e:dr'].every((alias) => aliases.includes(alias)), true);
+  assert.equal(aliases.some((alias) => alias.includes('door')), false);
+});
+
 test('does not index ordinary prose as an error code', () => {
   const entries = buildManualErrorCodeIndex([
     {

@@ -5,6 +5,7 @@ import { FieldPath, FieldValue, Timestamp, getFirestore, type CollectionReferenc
 import { getStorage } from 'firebase-admin/storage';
 import type { Response } from 'express';
 import { defineSecret } from 'firebase-functions/params';
+import { logger } from 'firebase-functions';
 import { onRequest, type Request } from 'firebase-functions/v2/https';
 import { setGlobalOptions } from 'firebase-functions/v2/options';
 import OpenAI from 'openai';
@@ -19,6 +20,13 @@ import {
   type ManualChunkText,
   type ManualErrorCodeIndexEntry,
 } from './manual-indexing.js';
+import {
+  buildManualFallbackAnswer,
+  OPENAI_REPAIR_ASSIST_TIMEOUT_MS,
+  resolveRepairAssistAnswer,
+  safeExternalErrorDetails,
+  type RepairAssistAnswerResult,
+} from './repair-assist.js';
 import {
   assertOrganizationAccess,
   bearerTokenFromHeader,
@@ -813,37 +821,33 @@ function scoreChunk(text: string, terms: string[], codeAliases: string[]): numbe
   return score;
 }
 
-function fallbackManualAnswer(params: {
-  machineModel: string;
-  symptoms: string;
-  errorCode: string | null;
-  topChunks: Array<{ chunkId: string; text: string }>;
-}): string {
-  const preview = params.topChunks[0]?.text ?? '';
-  const snippet = preview.length > 420 ? `${preview.slice(0, 420)}...` : preview;
-  const codeLine = params.errorCode ? `Error code reported: ${params.errorCode}.\n` : '';
-  const symptomsLine = params.symptoms ? `Symptoms: ${params.symptoms}.` : 'Symptoms: not provided.';
-  return [
-    `Machine model: ${params.machineModel}.`,
-    codeLine,
-    symptomsLine,
-    'Manual source text selected. OpenAI did not return a usable answer, so here is the most relevant manual text:',
-    snippet || 'No matching manual chunk was found. Upload and index a manual first.',
-  ].filter(Boolean).join('\n');
-}
-
 async function buildGroundedManualAnswer(params: {
   machineModel: string;
   symptoms: string;
   errorCode: string | null;
+  codeAliases: string[];
   topChunks: Array<{ chunkId: string; text: string }>;
-}): Promise<string> {
+}): Promise<RepairAssistAnswerResult> {
+  const fallbackAnswer = buildManualFallbackAnswer(params);
   const apiKey = optionalString(openAiApiKey.value());
   if (!apiKey) {
-    throw new Error('OpenAI API key is not configured for Repair Assist. Set Firebase secret OPENAI_API_KEY.');
+    return {
+      answer: fallbackAnswer,
+      mode: 'manual-fallback',
+      fallbackReason: 'request_failed',
+      error: {
+        errorName: 'OpenAiConfigurationError',
+        errorCode: 'missing_api_key',
+        timeout: false,
+      },
+    };
   }
 
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({
+    apiKey,
+    timeout: OPENAI_REPAIR_ASSIST_TIMEOUT_MS,
+    maxRetries: 0,
+  });
   const excerpts = params.topChunks.map((chunk, index) => {
     const compact = chunk.text.replace(/\s+/g, ' ').trim();
     return `[Chunk ${index + 1} | ${chunk.chunkId}] ${compact}`;
@@ -851,49 +855,48 @@ async function buildGroundedManualAnswer(params: {
 
   const errorCodeLine = params.errorCode ? `Error code: ${params.errorCode}` : 'Error code: none';
   const symptomsLine = params.symptoms ? `Symptoms: ${params.symptoms}` : 'Symptoms: not provided';
-  const response = await client.responses.create({
-    model: getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL),
-    input: [
-      {
-        role: 'system',
-        content: [
-          'You are a professional commercial laundry repair technician.',
-          'The uploaded technical manual excerpts are the source of truth.',
-          'First and foremost, base repair guidance explicitly on the provided manual excerpts.',
-          'If the excerpts do not contain the requested error code or repair procedure, say that clearly before adding any general repair knowledge.',
-          'Do not pretend a part number, voltage, resistance value, or procedure came from the manual unless it appears in the excerpts.',
-          'Use practical technician language and include safety warnings before electrical or panel-access steps.',
-        ].join(' '),
-      },
-      {
-        role: 'user',
-        content: [
-          `Machine model: ${params.machineModel}`,
-          symptomsLine,
-          errorCodeLine,
-          '',
-          'Manual excerpts:',
-          excerpts || 'No excerpts available.',
-          '',
-          'Return the answer in this exact structure:',
-          '### 1. Likely Causes',
-          '### 2. Step-by-Step Repair Instructions',
-          '### 3. Required Parts',
-          '### 4. Difficulty Level',
-          '### 5. Safety Precautions',
-          '',
-          'Cite chunk IDs where useful, for example [chunk-003].',
-        ].join('\n'),
-      },
-    ],
+  return resolveRepairAssistAnswer({
+    fallbackAnswer,
+    requestAnswer: async () => {
+      const response = await client.responses.create({
+        model: getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL),
+        input: [
+          {
+            role: 'system',
+            content: [
+              'You are a professional commercial laundry repair technician.',
+              'The uploaded technical manual excerpts are the source of truth.',
+              'First and foremost, base repair guidance explicitly on the provided manual excerpts.',
+              'If the excerpts do not contain the requested error code or repair procedure, say that clearly before adding any general repair knowledge.',
+              'Do not pretend a part number, voltage, resistance value, or procedure came from the manual unless it appears in the excerpts.',
+              'Use practical technician language and include safety warnings before electrical or panel-access steps.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: [
+              `Machine model: ${params.machineModel}`,
+              symptomsLine,
+              errorCodeLine,
+              '',
+              'Manual excerpts:',
+              excerpts || 'No excerpts available.',
+              '',
+              'Return the answer in this exact structure:',
+              '### 1. Likely Causes',
+              '### 2. Step-by-Step Repair Instructions',
+              '### 3. Required Parts',
+              '### 4. Difficulty Level',
+              '### 5. Safety Precautions',
+              '',
+              'Cite chunk IDs where useful, for example [chunk-003].',
+            ].join('\n'),
+          },
+        ],
+      });
+      return response.output_text;
+    },
   });
-
-  const output = response.output_text?.trim();
-  if (output && output.length > 0) {
-    return output;
-  }
-
-  return fallbackManualAnswer(params);
 }
 
 function getStripeClient(): Stripe {
@@ -1117,7 +1120,7 @@ const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'subscriptionId is invalid.',
 ]);
 
-function clientSafeErrorMessage(error: unknown, fallback: string): string {
+function clientSafeErrorMessage(error: unknown, fallback: string, logUnexpected = true): string {
   const message = error instanceof Error ? error.message : '';
   if (
     message &&
@@ -1127,7 +1130,7 @@ function clientSafeErrorMessage(error: unknown, fallback: string): string {
     return message;
   }
 
-  if (message) {
+  if (message && logUnexpected) {
     console.error(fallback, error);
   }
   return fallback;
@@ -1661,8 +1664,10 @@ export const deleteOrganizationManual = onRequest(
 );
 
 export const generateRepairAssist = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, secrets: [openAiApiKey] },
+  { cors: ALLOWED_CORS_ORIGINS, secrets: [openAiApiKey], timeoutSeconds: 120 },
   async (request: Request, response: Response) => {
+    let stage = 'request_received';
+    logger.info('repair_assist_stage', { stage });
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -1670,6 +1675,8 @@ export const generateRepairAssist = onRequest(
 
     try {
       const caller = await requireVerifiedCaller(request);
+      stage = 'authentication_complete';
+      logger.info('repair_assist_stage', { stage });
       await enforceRequestRateLimit({ operation: 'repairAssist', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const requestedMachineModel = requireStringWithMaxLength(request.body?.machineModel, 'machineModel', MAX_MACHINE_MODEL_LENGTH);
@@ -1681,6 +1688,8 @@ export const generateRepairAssist = onRequest(
         throw new Error('Enter symptoms or an error code before using Repair Assist.');
       }
       await assertOrganizationMember(organizationId, caller.uid);
+      stage = 'authorization_complete';
+      logger.info('repair_assist_stage', { stage });
 
       ensureFirebaseAdmin();
       const db = getFirestore();
@@ -1693,6 +1702,8 @@ export const generateRepairAssist = onRequest(
         symptoms,
         errorCode,
       });
+      stage = 'machine_resolved';
+      logger.info('repair_assist_stage', { stage });
       const machineModel = machine?.model ?? requestedMachineModel;
       if (!isSpecificMachineModel(machineModel)) {
         throw new Error('Machine make and model number are required before Repair Assist can select the correct manufacturer manual.');
@@ -1707,6 +1718,8 @@ export const generateRepairAssist = onRequest(
       if (!manualDoc) {
         throw new Error('No indexed manual matches this machine model number. Upload and index the manufacturer repair manual using the exact model number first.');
       }
+      stage = 'manual_selected';
+      logger.info('repair_assist_stage', { stage });
 
       const manualData = manualDoc.data();
       const chunks = await readManualChunks({
@@ -1716,6 +1729,8 @@ export const generateRepairAssist = onRequest(
       if (chunks.length === 0) {
         throw new Error('Manual is indexed but has no readable stored chunks.');
       }
+      stage = 'manual_chunks_loaded';
+      logger.info('repair_assist_stage', { stage, chunkCount: chunks.length });
 
       const codeAliases = errorCodeAliases(errorCode, symptoms);
       const indexedCodeChunkIds = await readManualErrorCodeChunkIds({
@@ -1750,21 +1765,44 @@ export const generateRepairAssist = onRequest(
       if (topChunks.length === 0) {
         throw new Error('The selected manual does not contain enough source text for this repair request.');
       }
+      stage = 'manual_search_complete';
+      logger.info('repair_assist_stage', {
+        stage,
+        errorCodeDetected: codeAliases.length > 0,
+        matchedChunkCount: topChunks.length,
+      });
 
-      const answer = await buildGroundedManualAnswer({
+      stage = 'openai_request';
+      logger.info('repair_assist_stage', { stage });
+      const answerResult = await buildGroundedManualAnswer({
         machineModel,
         symptoms,
         errorCode,
+        codeAliases,
         topChunks,
       });
+      if (answerResult.mode === 'manual-fallback') {
+        logger.warn('repair_assist_stage', {
+          stage: 'manual_fallback',
+          fallbackReason: answerResult.fallbackReason,
+          ...(answerResult.error ?? {}),
+        });
+      } else {
+        logger.info('repair_assist_stage', { stage: 'openai_response_received' });
+      }
 
       addRateLimitHeaders(response);
+      stage = 'response_sent';
+      logger.info('repair_assist_stage', { stage, answerMode: answerResult.mode });
       response.status(200).json({
         ok: true,
         grounded: true,
-        model: getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL),
+        model: answerResult.mode === 'openai'
+          ? getEnv('OPENAI_MANUAL_MODEL', DEFAULT_MANUAL_MODEL)
+          : null,
         sourceMode: 'manual-source-of-truth',
-        answer,
+        answerMode: answerResult.mode,
+        answer: answerResult.answer,
         manual: {
           id: manualDoc.id,
           title: optionalString(manualData.title) ?? manualDoc.id,
@@ -1776,7 +1814,11 @@ export const generateRepairAssist = onRequest(
         })),
       });
     } catch (error) {
-      const message = clientSafeErrorMessage(error, 'Could not generate repair guidance.');
+      logger.error('repair_assist_failed', {
+        stage,
+        ...safeExternalErrorDetails(error),
+      });
+      const message = clientSafeErrorMessage(error, 'Could not generate repair guidance.', false);
       writeError(response, httpStatusForError(error, 400), 'repair_assist_failed', message);
     }
   },
