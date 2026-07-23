@@ -29,6 +29,14 @@ export interface ManualPageProcessResult<R> {
   failures: Array<{ itemId: string; message: string }>;
 }
 
+export function isManualIndexLeaseActive(leaseExpiresAtMs: number | null, nowMs: number): boolean {
+  return leaseExpiresAtMs !== null && leaseExpiresAtMs > nowMs;
+}
+
+export function isManualOcrJobActive(status: unknown): boolean {
+  return status === 'batch_queued' || status === 'batch_starting' || status === 'batch_processing';
+}
+
 function compactKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }

@@ -123,6 +123,8 @@ jobs:
       VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
       VITE_BILLING_API_BASE_URL: ${{ secrets.VITE_BILLING_API_BASE_URL }}
       VITE_FUNCTIONS_API_BASE_URL: ${{ secrets.VITE_FUNCTIONS_API_BASE_URL }}
+      DOCUMENT_AI_OCR_PROCESSOR_ID: ${{ secrets.DOCUMENT_AI_OCR_PROCESSOR_ID }}
+      DOCUMENT_AI_OCR_LOCATION: us
       VITE_USE_FIREBASE_EMULATORS: 'false'
     defaults:
       run:
@@ -163,6 +165,7 @@ jobs:
             VITE_FIREBASE_APP_ID
             VITE_BILLING_API_BASE_URL
             VITE_FUNCTIONS_API_BASE_URL
+            DOCUMENT_AI_OCR_PROCESSOR_ID
           )
 
           for var_name in "${required_vars[@]}"; do
@@ -197,5 +200,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Provide Document AI deployment parameter
+        shell: bash
+        run: printf 'DOCUMENT_AI_OCR_PROCESSOR_ID=%s\nDOCUMENT_AI_OCR_LOCATION=%s\n' "$DOCUMENT_AI_OCR_PROCESSOR_ID" "$DOCUMENT_AI_OCR_LOCATION" > functions/.env.laundromat-maintenance-app
+
       - name: Deploy coordinated LaundryOps release
-        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive

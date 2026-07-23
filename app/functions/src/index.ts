@@ -1,13 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldPath, FieldValue, Timestamp, getFirestore, type CollectionReference, type DocumentReference, type Firestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import type { Response } from 'express';
-import { defineSecret } from 'firebase-functions/params';
+import { defineSecret, defineString } from 'firebase-functions/params';
 import { logger } from 'firebase-functions';
 import { onRequest, type Request } from 'firebase-functions/v2/https';
 import { setGlobalOptions } from 'firebase-functions/v2/options';
+import { onSchedule } from 'firebase-functions/v2/scheduler';
 import OpenAI from 'openai';
 import { PDFParse } from 'pdf-parse';
 import Stripe from 'stripe';
@@ -15,11 +16,22 @@ import {
   buildManualErrorCodeIndex,
   chunkManualText,
   errorCodeAliases,
+  isManualIndexLeaseActive,
+  isManualOcrJobActive,
   manualModelMatchesMachine,
   processManualPages,
   type ManualChunkText,
   type ManualErrorCodeIndexEntry,
 } from './manual-indexing.js';
+import { completePendingManualOcrJobs } from './manual-ocr-worker.js';
+import {
+  MAX_INLINE_OCR_PAGES,
+  collectManualOcrShards,
+  createDocumentAiOcrClient,
+  extractManualOcrText,
+  manualPdfPageCount,
+  splitManualPdfForBatchOcr,
+} from './manual-ocr.js';
 import {
   buildRepairAssistInputContent,
   buildManualFallbackAnswer,
@@ -63,6 +75,8 @@ setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const openAiApiKey = defineSecret('OPENAI_API_KEY');
+const documentAiOcrProcessorId = defineString('DOCUMENT_AI_OCR_PROCESSOR_ID');
+const documentAiOcrLocation = defineString('DOCUMENT_AI_OCR_LOCATION', { default: 'us' });
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
 const DEFAULT_MONTHLY_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
@@ -89,6 +103,9 @@ const MAX_STORAGE_PATH_LENGTH = 1024;
 const MAX_MACHINE_MODEL_LENGTH = 500;
 const MANUAL_REINDEX_PAGE_SIZE = 100;
 const FIRESTORE_BATCH_WRITE_LIMIT = 450;
+const MANUAL_INDEX_LEASE_DURATION_MS = 10 * 60 * 1000;
+const MANUAL_OCR_OUTPUT_PREFIX = '__laundryops/manual-ocr';
+const MANUAL_OCR_INPUT_PREFIX = '__laundryops/manual-ocr-input';
 const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
 const MANUAL_CHUNK_VERSION_PREFIX = 'chunks_v';
 const LEGACY_MANUAL_ERROR_CODE_COLLECTION = 'errorCodes';
@@ -110,6 +127,36 @@ interface ManualIndexResult {
   chunkCount: number;
   errorCodeIndexCount: number;
   pageCount: number | null;
+  processing?: boolean;
+}
+
+interface ManualIndexLease {
+  token: string;
+  manualData: Record<string, unknown>;
+}
+
+function documentAiProjectId(): string {
+  const projectId = optionalString(process.env.GCLOUD_PROJECT) ?? optionalString(process.env.GCP_PROJECT);
+  if (!projectId) {
+    throw new Error('Document OCR project configuration is unavailable.');
+  }
+  return projectId;
+}
+
+function documentAiOcrConfig(): { projectId: string; location: string; processorId: string } {
+  return {
+    projectId: documentAiProjectId(),
+    location: documentAiOcrLocation.value(),
+    processorId: documentAiOcrProcessorId.value(),
+  };
+}
+
+function manualOcrOutputPrefix(organizationId: string, manualId: string, jobId: string): string {
+  return `${MANUAL_OCR_OUTPUT_PREFIX}/${organizationId}/${manualId}/${jobId}/`;
+}
+
+function manualOcrInputPrefix(organizationId: string, manualId: string, jobId: string): string {
+  return `${MANUAL_OCR_INPUT_PREFIX}/${organizationId}/${manualId}/${jobId}/`;
 }
 
 function ensureFirebaseAdmin(): void {
@@ -589,6 +636,59 @@ async function readManualChunks(params: {
   };
 
   return readCollection(collectionName);
+}
+
+function timestampMilliseconds(value: unknown): number | null {
+  return value instanceof Timestamp ? value.toMillis() : null;
+}
+
+async function acquireManualIndexLease(params: {
+  db: Firestore;
+  manualRef: DocumentReference;
+  uid: string;
+}): Promise<ManualIndexLease> {
+  const token = randomUUID();
+  const nowMs = Date.now();
+  const leaseExpiresAt = Timestamp.fromMillis(nowMs + MANUAL_INDEX_LEASE_DURATION_MS);
+
+  return params.db.runTransaction(async (transaction) => {
+    const manualSnap = await transaction.get(params.manualRef);
+    if (!manualSnap.exists) {
+      throw new Error('Manual record not found.');
+    }
+    const manualData = manualSnap.data() ?? {};
+    const leaseExpiresAtMs = timestampMilliseconds(manualData.indexingLeaseExpiresAt);
+    if (isManualIndexLeaseActive(leaseExpiresAtMs, nowMs)) {
+      throw new Error('Manual is already being indexed. Please wait for it to finish.');
+    }
+
+    transaction.set(params.manualRef, {
+      indexingLeaseToken: token,
+      indexingLeaseExpiresAt: leaseExpiresAt,
+      indexingLeaseStartedAt: FieldValue.serverTimestamp(),
+      indexingLeaseOwner: params.uid,
+    }, { merge: true });
+    return { token, manualData };
+  });
+}
+
+async function releaseManualIndexLease(params: {
+  db: Firestore;
+  manualRef: DocumentReference;
+  token: string;
+}): Promise<void> {
+  await params.db.runTransaction(async (transaction) => {
+    const manualSnap = await transaction.get(params.manualRef);
+    if (!manualSnap.exists || manualSnap.data()?.indexingLeaseToken !== params.token) {
+      return;
+    }
+    transaction.set(params.manualRef, {
+      indexingLeaseToken: FieldValue.delete(),
+      indexingLeaseExpiresAt: FieldValue.delete(),
+      indexingLeaseStartedAt: FieldValue.delete(),
+      indexingLeaseOwner: FieldValue.delete(),
+    }, { merge: true });
+  });
 }
 
 async function deleteCollectionDocumentsInBatches(db: Firestore, collectionRef: CollectionReference): Promise<number> {
@@ -1134,6 +1234,8 @@ const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'manualId is invalid.',
   'machineId is invalid.',
   'subscriptionId is invalid.',
+  'Manual is already being indexed. Please wait for it to finish.',
+  'Manual OCR is already processing. Please wait for it to finish.',
 ]);
 
 function clientSafeErrorMessage(error: unknown, fallback: string, logUnexpected = true): string {
@@ -1147,7 +1249,10 @@ function clientSafeErrorMessage(error: unknown, fallback: string, logUnexpected 
   }
 
   if (message && logUnexpected) {
-    console.error(fallback, error);
+    logger.error('function_error', {
+      operation: fallback,
+      ...safeExternalErrorDetails(error),
+    });
   }
   return fallback;
 }
@@ -1263,6 +1368,11 @@ async function indexManualRecord(params: {
   organizationId: string;
   manualId: string;
   uid: string;
+  ocrTextOverride?: {
+    text: string;
+    pageCount: number | null;
+    requestCount: number;
+  };
 }): Promise<ManualIndexResult> {
   const manualRef = params.db.doc(`organizations/${params.organizationId}/manuals/${params.manualId}`);
   let previousStatusForFailure: ManualStatus | null = null;
@@ -1270,15 +1380,19 @@ async function indexManualRecord(params: {
   let newChunkCollectionName: string | null = null;
   let newErrorCodeCollectionName: string | null = null;
   let committedNewIndex = false;
+  let manualIndexLease: ManualIndexLease | null = null;
 
   try {
-    const manualSnap = await manualRef.get();
-    if (!manualSnap.exists) {
-      throw new Error('Manual record not found.');
+    manualIndexLease = await acquireManualIndexLease({
+      db: params.db,
+      manualRef,
+      uid: params.uid,
+    });
+    const manualData = manualIndexLease.manualData;
+    if (!params.ocrTextOverride && isManualOcrJobActive(manualData.ocrStatus)) {
+      throw new Error('Manual OCR is already processing. Please wait for it to finish.');
     }
-
     canMarkFailure = true;
-    const manualData = manualSnap.data() ?? {};
     const storagePath = requireManualStoragePath(manualData.storagePath, params.organizationId, params.manualId);
     const machineModel = requireStringWithMaxLength(manualData.machineModel, 'machineModel', MAX_MACHINE_MODEL_LENGTH);
     const title = optionalString(manualData.title) ?? storagePath.split('/').slice(-1)[0] ?? 'Manual PDF';
@@ -1297,21 +1411,160 @@ async function indexManualRecord(params: {
       { merge: true },
     );
 
-    const bucket = getStorage().bucket();
-    const file = bucket.file(storagePath);
-    const [exists] = await file.exists();
-    if (!exists) {
-      throw new Error('Manual PDF is missing from Storage.');
+    const previouslyOcrIndexed = previousStatus === 'indexed'
+      && manualData.ocrStatus === 'completed'
+      && manualData.textExtractionMethod === 'document_ai_ocr';
+    const priorChunks = previouslyOcrIndexed
+      ? await readManualChunks({ manualRef, manualData })
+      : [];
+    let text = priorChunks.map((chunk) => chunk.text).join('\n\n').trim();
+    let textExtractionMethod: 'document_ai_ocr' | 'pdf_text_fallback' = 'document_ai_ocr';
+    let ocrStatus: 'completed' | 'fallback' = 'completed';
+    let ocrPageCount = typeof manualData.ocrPageCount === 'number' ? manualData.ocrPageCount : 0;
+    let ocrRequestCount = typeof manualData.ocrRequestCount === 'number' ? manualData.ocrRequestCount : 0;
+    let ocrError: string | null = null;
+    let pageCount = typeof manualData.pageCount === 'number' ? manualData.pageCount : null;
+
+    if (params.ocrTextOverride) {
+      text = params.ocrTextOverride.text.trim();
+      textExtractionMethod = 'document_ai_ocr';
+      ocrStatus = 'completed';
+      ocrPageCount = params.ocrTextOverride.pageCount ?? 0;
+      ocrRequestCount = params.ocrTextOverride.requestCount;
+      pageCount = params.ocrTextOverride.pageCount;
+    } else if (!text) {
+      const bucket = getStorage().bucket();
+      const file = bucket.file(storagePath);
+      const [exists] = await file.exists();
+      if (!exists) {
+        throw new Error('Manual PDF is missing from Storage.');
+      }
+
+      const [pdfBytes] = await file.download();
+      const parser = new PDFParse({ data: pdfBytes });
+      const parsed = await parser.getText();
+      await parser.destroy();
+      pageCount = Number.isFinite(parsed.total) ? parsed.total : null;
+      if (pageCount === null) {
+        pageCount = await manualPdfPageCount(pdfBytes).catch(() => null);
+      }
+      const pdfText = (parsed.text ?? '').trim();
+      text = pdfText;
+      textExtractionMethod = 'pdf_text_fallback';
+      ocrStatus = 'fallback';
+      ocrPageCount = 0;
+      ocrRequestCount = 0;
+
+      if (pageCount === null) {
+        throw new Error('Unable to determine the PDF page count. Please upload a standard manufacturer PDF and try again.');
+      }
+
+      if (pageCount > MAX_INLINE_OCR_PAGES) {
+        const jobId = randomUUID();
+        const batchRootPrefix = manualOcrOutputPrefix(params.organizationId, params.manualId, jobId);
+        const inputPrefix = manualOcrInputPrefix(params.organizationId, params.manualId, jobId);
+        const splitPdfParts = pageCount !== null && pageCount > 500
+          ? await splitManualPdfForBatchOcr({ pdfBytes })
+          : [pdfBytes];
+        const requiresTemporaryInputs = splitPdfParts.length > 1;
+        const sourceParts = requiresTemporaryInputs
+          ? splitPdfParts.map((bytes, partIndex) => ({
+            bytes,
+            partIndex,
+            storagePath: `${inputPrefix}part-${String(partIndex + 1).padStart(4, '0')}.pdf`,
+          }))
+          : [{ bytes: pdfBytes, partIndex: 0, storagePath }];
+
+        if (requiresTemporaryInputs) {
+          try {
+            await Promise.all(sourceParts.map(async (part) => {
+              await bucket.file(part.storagePath).save(part.bytes, {
+                contentType: 'application/pdf',
+                resumable: false,
+              });
+            }));
+          } catch (inputUploadFailure) {
+            let cleanupFailed = false;
+            try {
+              const [files] = await bucket.getFiles({ prefix: inputPrefix });
+              await Promise.all(files.map((file) => file.delete()));
+            } catch {
+              cleanupFailed = true;
+            }
+            if (cleanupFailed) {
+              await manualRef.set({
+                ocrCleanupPending: true,
+                ocrCleanupPrefixes: [inputPrefix],
+                updatedAt: FieldValue.serverTimestamp(),
+              }, { merge: true });
+            }
+            throw inputUploadFailure;
+          }
+        }
+
+        const batchJobs = sourceParts.map((part) => ({
+          partIndex: part.partIndex,
+          sourceGcsUri: `gs://${bucket.name}/${part.storagePath}`,
+          outputPrefix: `${batchRootPrefix}part-${String(part.partIndex + 1).padStart(4, '0')}/`,
+          completed: false,
+        }));
+        await manualRef.set({
+          status: previousStatus === 'indexed' ? 'indexed' : 'processing',
+          indexingStatus: 'ocr_processing',
+          ocrStatus: 'batch_queued',
+          ocrJobId: jobId,
+          ocrBatchJobs: batchJobs,
+          ocrOperationName: FieldValue.delete(),
+          ocrOutputPrefix: FieldValue.delete(),
+          ocrInputPrefix: requiresTemporaryInputs ? inputPrefix : FieldValue.delete(),
+          ocrOutputWaitAttempts: 0,
+          ocrPageCount: pageCount,
+          ocrRequestCount: batchJobs.length,
+          ocrError: null,
+          ocrStartedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+          updatedBy: params.uid,
+        }, { merge: true });
+        return {
+          manualId: params.manualId,
+          chunkCount: 0,
+          errorCodeIndexCount: 0,
+          pageCount,
+          processing: true,
+        };
+      }
+
+      try {
+        const ocrResult = await extractManualOcrText({
+          client: createDocumentAiOcrClient(documentAiOcrLocation.value()),
+          config: documentAiOcrConfig(),
+          pdfBytes,
+          pageCount,
+        });
+        if (!ocrResult.text) {
+          throw new Error('Document OCR did not return readable text.');
+        }
+        text = ocrResult.text;
+        textExtractionMethod = 'document_ai_ocr';
+        ocrStatus = 'completed';
+        ocrPageCount = ocrResult.processedPageCount;
+        ocrRequestCount = ocrResult.requestCount;
+      } catch (ocrFailure) {
+        ocrError = 'Document OCR could not read this manual.';
+        logger.warn('manual_ocr_failed_using_native_text', {
+          organizationId: params.organizationId,
+          manualId: params.manualId,
+          ...safeExternalErrorDetails(ocrFailure),
+        });
+        if (!pdfText) {
+          throw new Error('Unable to read this PDF. Please upload a readable manufacturer manual and try again.');
+        }
+      }
     }
 
-    const [pdfBytes] = await file.download();
-    const parser = new PDFParse({ data: pdfBytes });
-    const parsed = await parser.getText();
-    await parser.destroy();
-    const text = (parsed.text ?? '').trim();
     const chunks = chunkManualText(text);
     if (chunks.length === 0) {
-      throw new Error('Unable to extract text from the provided PDF. Please ensure the PDF contains readable text.');
+      throw new Error('Unable to read this PDF. Please upload a readable manufacturer manual and try again.');
     }
 
     const machineModelKey = normalizeMachineModelKey(machineModel);
@@ -1344,8 +1597,6 @@ async function indexManualRecord(params: {
       uid: params.uid,
       collectionName: errorCodeCollectionName,
     });
-    const pageCount = Number.isFinite(parsed.total) ? parsed.total : null;
-
     await manualRef.set(
       {
         title,
@@ -1357,6 +1608,18 @@ async function indexManualRecord(params: {
         activeChunkCollection: chunkCollectionName,
         activeErrorCodeCollection: errorCodeCollectionName,
         pageCount,
+        textExtractionMethod,
+        ocrStatus,
+        ocrPageCount,
+        ocrRequestCount,
+        ocrError,
+        ocrJobId: FieldValue.delete(),
+        ocrBatchJobs: FieldValue.delete(),
+        ocrOperationName: FieldValue.delete(),
+        ocrOutputPrefix: FieldValue.delete(),
+        ocrInputPrefix: FieldValue.delete(),
+        ocrOutputWaitAttempts: FieldValue.delete(),
+        ocrProcessedAt: ocrStatus === 'completed' ? FieldValue.serverTimestamp() : null,
         chunkCount: chunks.length,
         errorCodeIndexCount,
         linkedMachineCount,
@@ -1377,7 +1640,11 @@ async function indexManualRecord(params: {
         activeErrorCodeCollection: errorCodeCollectionName,
       },
     }).catch((cleanupError) => {
-      console.warn('Manual re-index succeeded but stale index cleanup failed.', cleanupError);
+      logger.warn('manual_reindex_stale_cleanup_failed', {
+        organizationId: params.organizationId,
+        manualId: params.manualId,
+        ...safeExternalErrorDetails(cleanupError),
+      });
     });
 
     return {
@@ -1394,7 +1661,11 @@ async function indexManualRecord(params: {
           continue;
         }
         await deleteCollectionDocumentsInBatches(params.db, manualRef.collection(collectionName)).catch((cleanupError) => {
-          console.warn('Failed to clean up an incomplete manual index collection.', cleanupError);
+          logger.warn('manual_index_incomplete_cleanup_failed', {
+            organizationId: params.organizationId,
+            manualId: params.manualId,
+            ...safeExternalErrorDetails(cleanupError),
+          });
         });
       }
     }
@@ -1412,6 +1683,20 @@ async function indexManualRecord(params: {
       ).catch(() => undefined);
     }
     throw new Error(message);
+  } finally {
+    if (manualIndexLease) {
+      await releaseManualIndexLease({
+        db: params.db,
+        manualRef,
+        token: manualIndexLease.token,
+      }).catch((releaseError) => {
+        logger.warn('manual_index_lease_release_failed', {
+          organizationId: params.organizationId,
+          manualId: params.manualId,
+          ...safeExternalErrorDetails(releaseError),
+        });
+      });
+    }
   }
 }
 
@@ -1518,7 +1803,7 @@ export const createStripeBillingPortalSession = onRequest(
 );
 
 export const indexOrganizationManual = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS },
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 540, concurrency: 1, maxInstances: 2 },
   async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
@@ -1548,6 +1833,7 @@ export const indexOrganizationManual = onRequest(
         chunkCount: result.chunkCount,
         errorCodeIndexCount: result.errorCodeIndexCount,
         pageCount: result.pageCount,
+        processing: Boolean(result.processing),
       });
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Manual indexing failed.');
@@ -1621,6 +1907,36 @@ export const reindexOrganizationManuals = onRequest(
       const message = clientSafeErrorMessage(error, 'Manual bulk re-index failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_bulk_reindex_failed', message);
     }
+  },
+);
+
+export const completeManualOcrJobs = onSchedule(
+  {
+    schedule: 'every 2 minutes',
+    timeZone: 'Etc/UTC',
+    region: 'us-central1',
+    maxInstances: 1,
+    concurrency: 1,
+  },
+  async () => {
+    ensureFirebaseAdmin();
+    const db = getFirestore();
+    await completePendingManualOcrJobs({
+      db,
+      createClient: createDocumentAiOcrClient,
+      projectId: documentAiProjectId(),
+      location: documentAiOcrLocation.value(),
+      processorId: documentAiOcrProcessorId.value(),
+      finalize: async ({ organizationId, manualId, text, pageCount, requestCount }) => {
+        await indexManualRecord({
+          db,
+          organizationId,
+          manualId,
+          uid: 'manual-ocr-worker',
+          ocrTextOverride: { text, pageCount, requestCount },
+        });
+      },
+    });
   },
 );
 

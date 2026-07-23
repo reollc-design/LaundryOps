@@ -32,6 +32,7 @@ interface ManualEndpointResponse {
   skippedCount?: number;
   uploadedManualCount?: number;
   limited?: boolean;
+  processing?: boolean;
   failures?: Array<{
     manualId: string;
     message: string;
@@ -48,6 +49,7 @@ export interface UploadManualInput {
 export interface UploadManualResult {
   manualId: string;
   storagePath: string;
+  processing: boolean;
 }
 
 export interface DeleteManualInput {
@@ -230,7 +232,7 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
     throw error;
   }
 
-  await callManualEndpoint('indexOrganizationManual', {
+  const indexResult = await callManualEndpoint('indexOrganizationManual', {
     organizationId,
     manualId: manualRef.id,
   });
@@ -238,6 +240,7 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
   return {
     manualId: manualRef.id,
     storagePath,
+    processing: Boolean(indexResult.processing),
   };
 }
 

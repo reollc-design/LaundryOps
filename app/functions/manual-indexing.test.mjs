@@ -3,6 +3,8 @@ import {
   buildManualErrorCodeIndex,
   chunkManualText,
   errorCodeAliases,
+  isManualOcrJobActive,
+  isManualIndexLeaseActive,
   manualErrorCodeAliases,
   manualModelMatchesMachine,
   processManualPages,
@@ -107,6 +109,20 @@ test('does not index ordinary prose as an error code', () => {
 test('returns no chunks for unreadable or empty extracted PDF text', () => {
   assert.deepEqual(chunkManualText(''), []);
   assert.deepEqual(chunkManualText('   \u0000\t  '), []);
+});
+
+test('treats a manual indexing lease as active only before its expiration boundary', () => {
+  assert.equal(isManualIndexLeaseActive(1_001, 1_000), true);
+  assert.equal(isManualIndexLeaseActive(1_000, 1_000), false);
+  assert.equal(isManualIndexLeaseActive(999, 1_000), false);
+  assert.equal(isManualIndexLeaseActive(null, 1_000), false);
+});
+
+test('blocks duplicate indexing while background OCR is queued or running', () => {
+  assert.equal(isManualOcrJobActive('batch_queued'), true);
+  assert.equal(isManualOcrJobActive('batch_starting'), true);
+  assert.equal(isManualOcrJobActive('batch_processing'), true);
+  assert.equal(isManualOcrJobActive('completed'), false);
 });
 
 test('matches manual model numbers despite case, spacing, dashes, make, or product-family wording', () => {

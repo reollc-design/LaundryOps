@@ -2902,13 +2902,15 @@ function ManualLibraryScreen({
 
     setUploadBusy(true);
     try {
-      await uploadManualAndIndex({
+      const result = await uploadManualAndIndex({
         organizationId,
         machineModel: machineModel.trim(),
         file: selectedFile,
         linkedMachineCount: 0,
       });
-      setUploadSuccess(`Manual uploaded and indexed for model number ${machineModel.trim()}.`);
+      setUploadSuccess(result.processing
+        ? `Manual uploaded for model number ${machineModel.trim()}. OCR indexing is processing in the background.`
+        : `Manual uploaded and indexed for model number ${machineModel.trim()}.`);
       setMachineModel('');
       setSelectedFile(null);
       setFilePickerKey((value) => value + 1);
