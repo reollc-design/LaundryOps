@@ -1248,6 +1248,8 @@ export function App() {
                   <MachineDetailScreen
                     setActiveScreen={setActiveScreen}
                     machine={selectedMachine}
+                    orgConnected={orgConnected}
+                    organizationId={defaultOrganizationId}
                     onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
                     onOpenMaintenanceRecords={() => setActiveScreen('work-orders')}
@@ -2757,16 +2759,27 @@ function UrgentMachineRow({
 function MachineDetailScreen({
   setActiveScreen,
   machine,
+  orgConnected,
+  organizationId,
   onCreateWorkOrder,
   onOpenAiAssist,
   onOpenMaintenanceRecords,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   machine: UrgentMachine | null;
+  orgConnected: boolean;
+  organizationId: string | null;
   onCreateWorkOrder: () => void;
   onOpenAiAssist: () => void;
   onOpenMaintenanceRecords: () => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [machineNumberInput, setMachineNumberInput] = useState('');
+  const [machineTypeInput, setMachineTypeInput] = useState('Washer');
+  const [machineMakeInput, setMachineMakeInput] = useState('');
+  const [machineModelNumberInput, setMachineModelNumberInput] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const machineStatus = machine ? toOperationalStatus(machine.status) : 'running';
   const machineStatusText = machine ? machineStatusLabel(machineStatus) : 'Operational';
   const machineNumber = machine?.machineNumber ?? 'Machine';
@@ -2779,6 +2792,56 @@ function MachineDetailScreen({
       ? 'Needs repair attention'
       : 'No active issue';
 
+  const closeEdit = () => {
+    setIsEditing(false);
+    setEditBusy(false);
+    setEditError(null);
+  };
+
+  const openEdit = () => {
+    if (!machine) {
+      return;
+    }
+    setMachineNumberInput(machine.machineNumber);
+    setMachineTypeInput(machine.type || 'Washer');
+    setMachineMakeInput(machine.make ?? '');
+    setMachineModelNumberInput(machine.modelNumber ?? '');
+    setEditError(null);
+    setIsEditing(true);
+  };
+
+  const handleSave = async (): Promise<void> => {
+    setEditError(null);
+    if (!machine) {
+      return;
+    }
+    if (!orgConnected || !organizationId) {
+      setEditError('Complete onboarding first before editing machines.');
+      return;
+    }
+    if (!machineNumberInput.trim() || !machineMakeInput.trim() || !machineModelNumberInput.trim()) {
+      setEditError('Machine ID, make, and model number are required.');
+      return;
+    }
+
+    setEditBusy(true);
+    try {
+      await updateMachine({
+        organizationId,
+        machineId: machine.id,
+        machineNumber: machineNumberInput.trim(),
+        type: machineTypeInput.trim(),
+        make: machineMakeInput.trim(),
+        modelNumber: machineModelNumberInput.trim(),
+      });
+      closeEdit();
+    } catch (error) {
+      setEditError(getErrorMessage(error, 'Could not update machine. Try again.'));
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
   return (
     <div className="screen-stack detail-stack">
       <section className="machine-hero">
@@ -2790,6 +2853,11 @@ function MachineDetailScreen({
           <strong>{machineModel}</strong>
           <span>{machine?.type ?? 'Machine type not set'}</span>
           <span>S/N 123456789</span>
+          {machine && (
+            <button className="row-action-button machine-detail-edit" type="button" onClick={openEdit}>
+              <Pencil size={14} /> Edit machine details
+            </button>
+          )}
         </div>
         <MachineIllustration />
       </section>
@@ -2837,6 +2905,38 @@ function MachineDetailScreen({
         </div>
         {machineHistory.length === 0 && <p className="empty-state">No maintenance history recorded yet.</p>}
       </section>
+      {isEditing && (
+        <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Edit machine">
+          <div className="machine-modal-card">
+            <div className="section-heading">
+              <h2>Edit Machine</h2>
+              <button type="button" onClick={closeEdit}>
+                Close
+              </button>
+            </div>
+            <div className="setup-field-grid">
+              <SetupField label="Machine ID" value={machineNumberInput} onChange={setMachineNumberInput} />
+              <SetupSelectField label="Type" value={machineTypeInput} options={['Washer', 'Dryer', 'Other']} onChange={setMachineTypeInput} />
+              <SetupField label="Machine Make" value={machineMakeInput} onChange={setMachineMakeInput} />
+              <SetupField label="Model Number" value={machineModelNumberInput} onChange={setMachineModelNumberInput} />
+            </div>
+            {editError && (
+              <div className="auth-message">
+                <strong>Could not update machine</strong>
+                <span>{editError}</span>
+              </div>
+            )}
+            <div className="machine-modal-actions">
+              <button className="secondary-action" type="button" onClick={closeEdit} disabled={editBusy}>
+                Cancel
+              </button>
+              <button className="primary-action" type="button" onClick={() => void handleSave()} disabled={editBusy}>
+                {editBusy ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
