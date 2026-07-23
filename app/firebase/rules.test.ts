@@ -6,6 +6,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
+import { doc, Timestamp, writeBatch } from 'firebase/firestore';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const PROJECT_ID = 'demo-laundryops-rules';
@@ -21,8 +22,11 @@ const storageFor = (userId: string) => testEnv.authenticatedContext(userId).stor
 async function seedBaseData() {
   await testEnv.withSecurityRulesDisabled(async (context) => {
     const db = context.firestore();
+    const trialStartedAt = Timestamp.now();
+    const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
 
     await db.doc('users/ownerA').set({ displayName: 'Owner A' });
+    await db.doc('users/developerOwner').set({ displayName: 'Developer Owner' });
     await db.doc('users/techA1').set({ displayName: 'Tech A1' });
     await db.doc('users/ownerB').set({ displayName: 'Owner B' });
 
@@ -32,8 +36,8 @@ async function seedBaseData() {
       createdBy: 'ownerA',
       ownerUserId: 'ownerA',
       subscriptionStatus: 'trialing',
-      trialStartedAt: '2026-05-18T00:00:00.000Z',
-      trialEndsAt: '2026-06-01T00:00:00.000Z',
+      trialStartedAt,
+      trialEndsAt,
     });
     await db.doc('organizations/orgB').set({
       name: 'Other Laundry',
@@ -41,6 +45,25 @@ async function seedBaseData() {
       createdBy: 'ownerB',
       ownerUserId: 'ownerB',
       subscriptionStatus: 'trialing',
+    });
+    await db.doc('organizations/orgExpired').set({
+      name: 'Expired Laundry',
+      createdBy: 'ownerA',
+      ownerUserId: 'ownerA',
+      subscriptionStatus: 'trialing',
+      trialStartedAt: Timestamp.fromDate(new Date('2026-01-01T00:00:00.000Z')),
+      trialEndsAt: Timestamp.fromDate(new Date('2026-01-15T00:00:00.000Z')),
+    });
+    await db.doc('organizations/orgDeveloper').set({
+      name: 'Developer Laundry',
+      createdBy: 'developerOwner',
+      ownerUserId: 'developerOwner',
+      subscriptionStatus: 'trialing',
+      trialStartedAt: Timestamp.fromDate(new Date('2026-01-01T00:00:00.000Z')),
+      trialEndsAt: Timestamp.fromDate(new Date('2026-01-15T00:00:00.000Z')),
+      accessEntitlement: 'developer',
+      accessEntitlementGrantedAt: Timestamp.fromDate(new Date('2026-07-21T00:00:00.000Z')),
+      accessEntitlementGrantedBy: 'platform-admin',
     });
 
     await db.doc('organizations/orgA/memberships/ownerA').set({
@@ -78,6 +101,18 @@ async function seedBaseData() {
       status: 'active',
       createdAt: '2026-05-18T00:00:00.000Z',
       createdBy: 'ownerB',
+    });
+    await db.doc('organizations/orgExpired/memberships/ownerA').set({
+      role: 'owner',
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      createdBy: 'ownerA',
+    });
+    await db.doc('organizations/orgDeveloper/memberships/developerOwner').set({
+      role: 'owner',
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      createdBy: 'developerOwner',
     });
 
     await db.doc('organizations/orgA/machines/washerA1').set({
@@ -202,6 +237,17 @@ describe('Firestore organization security', () => {
 
     await assertSucceeds(ownerA.doc('organizations/orgA/machines/washerA1').get());
     await assertSucceeds(ownerA.doc('organizations/orgA').update({ name: 'Sun State Laundry Ops' }));
+    await assertFails(ownerA.doc('organizations/orgA').update({
+      billingProvider: 'stripe',
+      lastStripeBillingEventType: 'customer.subscription.updated',
+      lastStripeBillingEventId: 'evt_client_tamper',
+      lastStripeBillingEventCreated: 9_999_999_999,
+    }));
+    await assertFails(ownerA.doc('organizations/orgA').update({
+      accessEntitlement: 'developer',
+      accessEntitlementGrantedAt: Timestamp.now(),
+      accessEntitlementGrantedBy: 'ownerA',
+    }));
     await assertFails(ownerA.doc('organizations/orgA/subscriptions/current').update({ status: 'active' }));
     await assertFails(ownerA.doc('organizations/orgA/auditLogs/logA2').set({ action: 'manual.clientWrite' }));
   });
@@ -266,6 +312,8 @@ describe('Firestore organization security', () => {
 
   it('allows controlled owner bootstrap org creation and self-membership only', async () => {
     const ownerA = dbFor('ownerA');
+    const trialStartedAt = Timestamp.now();
+    const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
 
     await assertSucceeds(
       ownerA.doc('organizations/orgBootstrap').set({
@@ -277,7 +325,8 @@ describe('Firestore organization security', () => {
         createdBy: 'ownerA',
         createdAt: '2026-05-20T00:00:00.000Z',
         subscriptionStatus: 'trialing',
-        trialStartedAt: '2026-05-20T00:00:00.000Z',
+        trialStartedAt,
+        trialEndsAt,
         onboardingStatus: 'completed',
       }),
     );
@@ -300,6 +349,156 @@ describe('Firestore organization security', () => {
     );
   });
 
+  it('allows atomic onboarding to create the organization, membership, location, and first machine', async () => {
+    const ownerA = dbFor('ownerA');
+    const organizationRef = doc(ownerA, 'organizations/orgAtomic');
+    const membershipRef = doc(ownerA, 'organizations/orgAtomic/memberships/ownerA');
+    const locationRef = doc(ownerA, 'organizations/orgAtomic/locations/locationA');
+    const machineRef = doc(ownerA, 'organizations/orgAtomic/machines/machineA');
+    const batch = writeBatch(ownerA);
+    const trialStartedAt = Timestamp.now();
+    const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
+
+    batch.set(organizationRef, {
+      name: 'Atomic Laundry',
+      operatorName: 'Owner A',
+      businessAddress: '123 Main Street',
+      ownerEmail: 'owner@example.com',
+      ownerUserId: 'ownerA',
+      createdBy: 'ownerA',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      subscriptionStatus: 'trialing',
+      trialStartedAt,
+      trialEndsAt,
+      onboardingStatus: 'completed',
+    });
+    batch.set(membershipRef, {
+      role: 'owner',
+      status: 'active',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+    });
+    batch.set(locationRef, {
+      name: 'Main Store',
+      address: '123 Main Street',
+      status: 'active',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+      updatedAt: '2026-05-20T00:00:00.000Z',
+      updatedBy: 'ownerA',
+    });
+    batch.set(machineRef, {
+      machineNumber: 'W01',
+      type: 'Washer',
+      make: 'Speed Queen',
+      modelNumber: 'SC40',
+      model: 'Speed Queen SC40',
+      locationId: locationRef.id,
+      locationName: 'Main Store',
+      status: 'running',
+      statusLabel: 'Operational',
+      createdAt: '2026-05-20T00:00:00.000Z',
+      createdBy: 'ownerA',
+      updatedAt: '2026-05-20T00:00:00.000Z',
+      updatedBy: 'ownerA',
+    });
+
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/memberships/ownerA').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/locations/locationA').get());
+    await assertSucceeds(ownerA.doc('organizations/orgAtomic/machines/machineA').get());
+  });
+
+  it('requires the exact 14-day trial window and keeps trial fields immutable', async () => {
+    const ownerA = dbFor('ownerA');
+    const trialStartedAt = Timestamp.now();
+    const correctTrialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
+    const incorrectTrialEndsAt = Timestamp.fromMillis(correctTrialEndsAt.toMillis() + 1);
+
+    await assertFails(
+      ownerA.doc('organizations/orgWrongTrial').set({
+        name: 'Wrong Trial Laundry',
+        ownerUserId: 'ownerA',
+        createdBy: 'ownerA',
+        createdAt: trialStartedAt,
+        subscriptionStatus: 'trialing',
+        trialStartedAt,
+        trialEndsAt: incorrectTrialEndsAt,
+        onboardingStatus: 'completed',
+      }),
+    );
+    await assertFails(ownerA.doc('organizations/orgA').update({ trialEndsAt: correctTrialEndsAt }));
+  });
+
+  it('blocks operational writes after the trial end while keeping organization reads available', async () => {
+    const ownerA = dbFor('ownerA');
+
+    await assertSucceeds(ownerA.doc('organizations/orgExpired').get());
+    await assertFails(
+      ownerA.doc('organizations/orgExpired/machines/expiredMachine').set({
+        machineNumber: 'E01',
+        type: 'Washer',
+        make: 'Speed Queen',
+        modelNumber: 'Expired',
+        model: 'Speed Queen Expired',
+        status: 'running',
+        statusLabel: 'Operational',
+      }),
+    );
+    await assertFails(ownerA.doc('organizations/orgExpired/manuals/manualExpired').set({ title: 'Expired manual' }));
+  });
+
+  it('keeps a developer workspace active after its original trial and protects the entitlement', async () => {
+    const developerOwner = dbFor('developerOwner');
+
+    await assertSucceeds(
+      developerOwner.doc('organizations/orgDeveloper/machines/developerMachine').set({
+        machineNumber: 'DEV-01',
+        type: 'Washer',
+        make: 'Speed Queen',
+        modelNumber: 'Developer',
+        model: 'Speed Queen Developer',
+        status: 'running',
+        statusLabel: 'Operational',
+      }),
+    );
+    await assertSucceeds(
+      developerOwner.doc('organizations/orgDeveloper/workOrders/developerRecord').set({
+        number: 'MR-DEV-01',
+        title: 'Developer maintenance record',
+        status: 'planned',
+        statusLabel: 'Planned',
+      }),
+    );
+    await assertFails(
+      developerOwner.doc('organizations/orgDeveloper').update({ accessEntitlement: 'developer-plus' }),
+    );
+    await assertFails(
+      developerOwner.doc('organizations/orgDeveloper').update({ accessEntitlementGrantedBy: 'developerOwner' }),
+    );
+  });
+
+  it('does not allow a client to grant developer access during organization creation', async () => {
+    const ownerA = dbFor('ownerA');
+    const trialStartedAt = Timestamp.now();
+    const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
+
+    await assertFails(
+      ownerA.doc('organizations/orgSelfGrantedDeveloper').set({
+        name: 'Unauthorized Developer Laundry',
+        ownerUserId: 'ownerA',
+        createdBy: 'ownerA',
+        createdAt: trialStartedAt,
+        subscriptionStatus: 'trialing',
+        trialStartedAt,
+        trialEndsAt,
+        onboardingStatus: 'completed',
+        accessEntitlement: 'developer',
+      }),
+    );
+  });
+
   it('blocks bootstrap org creation when owner identity does not match the signer', async () => {
     const ownerB = dbFor('ownerB');
 
@@ -318,20 +517,50 @@ describe('Firestore organization security', () => {
 });
 
 describe('Storage organization security', () => {
-  it('allows only organization leaders to upload manual PDFs to their own user folder', async () => {
+  it('enforces the canonical manual path and upload roles', async () => {
     const signedOutStorage = testEnv.unauthenticatedContext().storage(BUCKET_URL);
     const ownerStorage = storageFor('ownerA');
+    const adminStorage = storageFor('adminA');
+    const managerStorage = storageFor('managerA1');
     const ownerBStorage = storageFor('ownerB');
     const techStorage = storageFor('techA1');
+    const viewerStorage = storageFor('viewerA');
     const pdf = new Blob(['manual'], { type: 'application/pdf' });
     const image = new Blob(['photo'], { type: 'image/png' });
 
     await assertSucceeds(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/manual.pdf').put(pdf));
+    await assertSucceeds(adminStorage.ref('orgs/orgA/manuals/adminA/manualA2/manual.pdf').put(pdf));
+    await assertSucceeds(managerStorage.ref('orgs/orgA/manuals/managerA1/manualA3/manual.pdf').put(pdf));
+
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/manualA1/manual.pdf').put(pdf));
     await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/manual.png').put(image));
     await assertFails(ownerStorage.ref('orgs/orgA/manuals/techA1/manualA1/manual.pdf').put(pdf));
     await assertFails(techStorage.ref('orgs/orgA/manuals/techA1/manualA1/manual.pdf').put(pdf));
+    await assertFails(viewerStorage.ref('orgs/orgA/manuals/viewerA/manualA1/manual.pdf').put(pdf));
     await assertFails(ownerBStorage.ref('orgs/orgA/manuals/ownerB/manualA1/manual.pdf').put(pdf));
     await assertFails(signedOutStorage.ref('orgs/orgA/manuals/signedOut/manualA1/manual.pdf').put(pdf));
+  });
+
+  it('allows company members to read manuals but keeps client deletion backend-only', async () => {
+    const signedOutStorage = testEnv.unauthenticatedContext().storage(BUCKET_URL);
+    const ownerStorage = storageFor('ownerA');
+    const techStorage = storageFor('techA1');
+    const ownerBStorage = storageFor('ownerB');
+    const manualPath = 'orgs/orgA/manuals/ownerA/manualA1/manual.pdf';
+    const pdf = new Blob(['manual'], { type: 'application/pdf' });
+
+    await assertSucceeds(ownerStorage.ref(manualPath).put(pdf));
+    await assertSucceeds(techStorage.ref(manualPath).getDownloadURL());
+    await assertFails(ownerBStorage.ref(manualPath).getDownloadURL());
+    await assertFails(signedOutStorage.ref(manualPath).getDownloadURL());
+    await assertFails(ownerStorage.ref(manualPath).delete());
+  });
+
+  it('rejects manual uploads at the 25 MB limit', async () => {
+    const ownerStorage = storageFor('ownerA');
+    const oversizedPdf = new Blob([new Uint8Array(25 * 1024 * 1024)], { type: 'application/pdf' });
+
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/oversized.pdf').put(oversizedPdf));
   });
 
   it('allows operational uploads for machine photos and work order attachments', async () => {
@@ -351,6 +580,22 @@ describe('Storage organization security', () => {
 
     await assertFails(ownerStorage.ref('orgs/orgA/exports/exportA1/report.pdf').put(pdf));
     await assertFails(ownerStorage.ref('orgs/orgA/backups/backupA1/backup.pdf').put(pdf));
+  });
+
+  it('blocks operational uploads after the organization trial ends', async () => {
+    const ownerStorage = storageFor('ownerA');
+    const pdf = new Blob(['manual'], { type: 'application/pdf' });
+
+    await assertFails(ownerStorage.ref('orgs/orgExpired/manuals/ownerA/manualExpired/manual.pdf').put(pdf));
+  });
+
+  it('allows manual uploads for a developer workspace after its original trial', async () => {
+    const developerStorage = storageFor('developerOwner');
+    const pdf = new Blob(['manual'], { type: 'application/pdf' });
+
+    await assertSucceeds(
+      developerStorage.ref('orgs/orgDeveloper/manuals/developerOwner/manualDeveloper/manual.pdf').put(pdf),
+    );
   });
 });
 

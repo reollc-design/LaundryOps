@@ -11,8 +11,9 @@ import {
   updateProfile,
   type UserCredential,
 } from 'firebase/auth';
-import { collection, doc, serverTimestamp, setDoc, type Firestore } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, setDoc, Timestamp, writeBatch, type Firestore } from 'firebase/firestore';
 import { getFirebaseClient } from './client';
+import { calculateTrialEndsAt } from '../trial';
 
 function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
   const client = getFirebaseClient();
@@ -78,23 +79,12 @@ export async function completeGoogleSignInRedirect(): Promise<UserCredential | n
 }
 
 export async function createOwnerAccount(displayName: string, email: string, password: string): Promise<UserCredential> {
-  const { auth, db } = requireFirebaseAuth();
+  const { auth } = requireFirebaseAuth();
   const credential = await createUserWithEmailAndPassword(auth, email, password);
 
   if (displayName.trim()) {
     await updateProfile(credential.user, { displayName: displayName.trim() });
   }
-
-  await setDoc(
-    doc(db, 'users', credential.user.uid),
-    {
-      displayName: displayName.trim() || null,
-      email: credential.user.email,
-      createdAt: serverTimestamp(),
-      createdFrom: 'mobile-ui',
-    },
-    { merge: true },
-  );
 
   return credential;
 }
@@ -109,10 +99,18 @@ export interface OwnerOnboardingDraft {
   operatorName: string;
   businessAddress: string;
   ownerEmail: string;
+  locationName: string;
+  locationAddress: string;
+  machineNumber: string;
+  machineType: string;
+  machineMake: string;
+  machineModelNumber: string;
 }
 
 export interface OwnerOnboardingResult {
   organizationId: string;
+  locationId: string;
+  machineId: string;
 }
 
 export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Promise<OwnerOnboardingResult> {
@@ -128,15 +126,36 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     operatorName: draft.operatorName.trim(),
     businessAddress: draft.businessAddress.trim(),
     ownerEmail: draft.ownerEmail.trim() || user.email || '',
+    locationName: draft.locationName.trim(),
+    locationAddress: draft.locationAddress.trim(),
+    machineNumber: draft.machineNumber.trim(),
+    machineType: draft.machineType.trim() || 'Washer',
+    machineMake: draft.machineMake.trim(),
+    machineModelNumber: draft.machineModelNumber.trim(),
   };
-  if (!trimmedDraft.businessName || !trimmedDraft.operatorName || !trimmedDraft.businessAddress || !trimmedDraft.ownerEmail) {
-    throw new Error('Business name, operator name, address, and email are required.');
+  if (
+    !trimmedDraft.businessName
+    || !trimmedDraft.operatorName
+    || !trimmedDraft.businessAddress
+    || !trimmedDraft.ownerEmail
+    || !trimmedDraft.locationName
+    || !trimmedDraft.locationAddress
+    || !trimmedDraft.machineNumber
+    || !trimmedDraft.machineMake
+    || !trimmedDraft.machineModelNumber
+  ) {
+    throw new Error('Company, operator, address, email, location, and first machine details are required.');
   }
 
   const organizationRef = doc(collection(db, 'organizations'));
   const membershipRef = doc(db, `organizations/${organizationRef.id}/memberships/${user.uid}`);
+  const locationRef = doc(collection(db, `organizations/${organizationRef.id}/locations`));
+  const machineRef = doc(collection(db, `organizations/${organizationRef.id}/machines`));
+  const batch = writeBatch(db);
+  const trialStartedAt = Timestamp.now();
+  const trialEndsAt = Timestamp.fromMillis(calculateTrialEndsAt(trialStartedAt.toMillis()));
 
-  await setDoc(organizationRef, {
+  batch.set(organizationRef, {
     name: trimmedDraft.businessName,
     operatorName: trimmedDraft.operatorName,
     businessAddress: trimmedDraft.businessAddress,
@@ -145,18 +164,41 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     createdBy: user.uid,
     createdAt: serverTimestamp(),
     subscriptionStatus: 'trialing',
-    trialStartedAt: serverTimestamp(),
+    trialStartedAt,
+    trialEndsAt,
     onboardingStatus: 'completed',
   });
-
-  await setDoc(membershipRef, {
+  batch.set(membershipRef, {
     role: 'owner',
     status: 'active',
     createdAt: serverTimestamp(),
     createdBy: user.uid,
   });
-
-  await setDoc(
+  batch.set(locationRef, {
+    name: trimmedDraft.locationName,
+    address: trimmedDraft.locationAddress,
+    status: 'active',
+    createdAt: serverTimestamp(),
+    createdBy: user.uid,
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
+  });
+  batch.set(machineRef, {
+    machineNumber: trimmedDraft.machineNumber,
+    type: trimmedDraft.machineType,
+    make: trimmedDraft.machineMake,
+    modelNumber: trimmedDraft.machineModelNumber,
+    model: `${trimmedDraft.machineMake} ${trimmedDraft.machineModelNumber}`.trim(),
+    locationId: locationRef.id,
+    locationName: trimmedDraft.locationName,
+    status: 'running',
+    statusLabel: 'Operational',
+    createdAt: serverTimestamp(),
+    createdBy: user.uid,
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
+  });
+  batch.set(
     doc(db, 'users', user.uid),
     {
       displayName: trimmedDraft.operatorName,
@@ -167,8 +209,11 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     },
     { merge: true },
   );
+  await batch.commit();
 
   return {
     organizationId: organizationRef.id,
+    locationId: locationRef.id,
+    machineId: machineRef.id,
   };
 }

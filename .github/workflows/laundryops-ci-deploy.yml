@@ -45,10 +45,74 @@ jobs:
       - name: Build
         run: npm run build
 
-  deploy:
-    name: Deploy hosting
+  validate-functions:
+    name: Validate Functions
     runs-on: ubuntu-latest
-    needs: validate
+    defaults:
+      run:
+        working-directory: app/functions
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/functions/package-lock.json
+
+      - name: Install Functions dependencies
+        run: npm ci
+
+      - name: Type check Functions
+        run: npm run lint
+
+      - name: Build Functions
+        run: npm run build
+
+      - name: Test Functions
+        run: npm test
+
+  validate-rules:
+    name: Validate Firebase rules
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test Firestore and Storage rules
+        run: npx firebase-tools emulators:exec --project demo-laundryops-rules --only firestore,storage "npx vitest run --configLoader runner --config vitest.rules.config.ts"
+
+  deploy:
+    name: Deploy LaundryOps
+    runs-on: ubuntu-latest
+    concurrency:
+      group: laundryops-production
+      cancel-in-progress: false
+    needs:
+      - validate
+      - validate-functions
+      - validate-rules
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
       VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
@@ -70,12 +134,17 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: |
+            app/package-lock.json
+            app/functions/package-lock.json
 
-      - name: Install dependencies
+      - name: Install app dependencies
         run: npm ci
+
+      - name: Install Functions dependencies
+        run: npm ci --prefix functions
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -92,6 +161,8 @@ jobs:
             VITE_FIREBASE_STORAGE_BUCKET
             VITE_FIREBASE_MESSAGING_SENDER_ID
             VITE_FIREBASE_APP_ID
+            VITE_BILLING_API_BASE_URL
+            VITE_FUNCTIONS_API_BASE_URL
           )
 
           for var_name in "${required_vars[@]}"; do
@@ -101,8 +172,30 @@ jobs:
             fi
           done
 
+          expected_functions_url="https://us-central1-laundromat-maintenance-app.cloudfunctions.net"
+          if [ "$VITE_FIREBASE_PROJECT_ID" != "laundromat-maintenance-app" ]; then
+            echo "VITE_FIREBASE_PROJECT_ID does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_AUTH_DOMAIN" != "laundromat-maintenance-app.firebaseapp.com" ]; then
+            echo "VITE_FIREBASE_AUTH_DOMAIN does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_STORAGE_BUCKET" != "laundromat-maintenance-app.firebasestorage.app" ]; then
+            echo "VITE_FIREBASE_STORAGE_BUCKET does not target LaundryOps."
+            exit 1
+          fi
+          if [ "$VITE_BILLING_API_BASE_URL" != "$expected_functions_url" ]; then
+            echo "VITE_BILLING_API_BASE_URL does not target LaundryOps Functions."
+            exit 1
+          fi
+          if [ "$VITE_FUNCTIONS_API_BASE_URL" != "$expected_functions_url" ]; then
+            echo "VITE_FUNCTIONS_API_BASE_URL does not target LaundryOps Functions."
+            exit 1
+          fi
+
       - name: Build
         run: npm run build
 
-      - name: Deploy LaundryOps hosting and Firestore rules
-        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules --project laundromat-maintenance-app --non-interactive
+      - name: Deploy coordinated LaundryOps release
+        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive

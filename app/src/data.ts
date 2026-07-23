@@ -90,7 +90,7 @@ export interface OnboardingStep {
   id: string;
   title: string;
   detail: string;
-  icon: 'account' | 'machine' | 'manual';
+  icon: 'account' | 'location' | 'machine' | 'manual';
 }
 
 export interface TrialFeature {
@@ -189,5 +189,17 @@ export const onboardingSteps: OnboardingStep[] = [
     title: 'Create company account',
     detail: 'Business name / operator / address / email',
     icon: 'account',
+  },
+  {
+    id: 'location',
+    title: 'Add first location',
+    detail: 'Location name / location address',
+    icon: 'location',
+  },
+  {
+    id: 'machine',
+    title: 'Add first machine',
+    detail: 'Machine number / type / make / model number',
+    icon: 'machine',
   },
 ];
