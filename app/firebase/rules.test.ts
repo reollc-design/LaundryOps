@@ -303,6 +303,37 @@ describe('Firestore organization security', () => {
     await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ workOrderId: 'workA1' }));
   });
 
+  it('limits maintenance records to three photo attachments', async () => {
+    const ownerA = dbFor('ownerA');
+    const attachment = (index: number) => ({
+      storagePath: `orgs/orgA/workOrders/workPhoto/attachments/photo-${index}.jpg`,
+      fileName: `photo-${index}.jpg`,
+      contentType: 'image/jpeg',
+      sizeBytes: 1024,
+      source: 'maintenance-record',
+    });
+
+    await assertSucceeds(
+      ownerA.doc('organizations/orgA/workOrders/workPhoto').set({
+        number: 'WO-PHOTO',
+        title: 'Photo limit test',
+        photoAttachments: [attachment(1), attachment(2), attachment(3)],
+      }),
+    );
+    await assertFails(
+      ownerA.doc('organizations/orgA/workOrders/workPhoto').update({
+        photoAttachments: [attachment(1), attachment(2), attachment(3), attachment(4)],
+      }),
+    );
+    await assertFails(
+      ownerA.doc('organizations/orgA/workOrders/workPhotoTooMany').set({
+        number: 'WO-PHOTO-4',
+        title: 'Too many photos',
+        photoAttachments: [attachment(1), attachment(2), attachment(3), attachment(4)],
+      }),
+    );
+  });
+
   it('allows manual metadata edits but blocks direct manual deletes', async () => {
     const ownerA = dbFor('ownerA');
 
@@ -563,15 +594,29 @@ describe('Storage organization security', () => {
     await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/oversized.pdf').put(oversizedPdf));
   });
 
-  it('allows operational uploads for machine photos and work order attachments', async () => {
+  it('allows operational machine photos and operations-lead work order attachments', async () => {
+    const ownerStorage = storageFor('ownerA');
+    const managerStorage = storageFor('managerA1');
     const techStorage = storageFor('techA1');
     const ownerBStorage = storageFor('ownerB');
     const image = new Blob(['photo'], { type: 'image/png' });
+    const svg = new Blob(['<svg></svg>'], { type: 'image/svg+xml' });
+    const oversizedImage = new Blob([new Uint8Array((5 * 1024 * 1024) + 1)], { type: 'image/jpeg' });
 
     await assertSucceeds(techStorage.ref('orgs/orgA/machines/washerA1/photos/photo.png').put(image));
-    await assertSucceeds(techStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').put(image));
+    await assertSucceeds(ownerStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').put(image));
+    await assertSucceeds(managerStorage.ref('orgs/orgA/workOrders/workA1/attachments/manager-photo.png').put(image));
+    await assertFails(techStorage.ref('orgs/orgA/workOrders/workA1/attachments/tech-photo.png').put(image));
+    await assertFails(techStorage.ref('orgs/orgA/workOrders/missingWork/attachments/photo.png').put(image));
+    await assertFails(ownerStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.svg').put(svg));
+    await assertFails(ownerStorage.ref('orgs/orgA/workOrders/workA1/attachments/oversized.jpg').put(oversizedImage));
     await assertFails(ownerBStorage.ref('orgs/orgA/machines/washerA1/photos/photo.png').put(image));
     await assertFails(ownerBStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').put(image));
+
+    await assertFails(techStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').delete());
+    await assertFails(ownerBStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').delete());
+    await assertSucceeds(ownerStorage.ref('orgs/orgA/workOrders/workA1/attachments/photo.png').delete());
+    await assertSucceeds(managerStorage.ref('orgs/orgA/workOrders/workA1/attachments/manager-photo.png').delete());
   });
 
   it('blocks client writes to exports and backups', async () => {

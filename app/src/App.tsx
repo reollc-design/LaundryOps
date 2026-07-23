@@ -26,6 +26,7 @@ import {
   MoreVertical,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -36,6 +37,7 @@ import {
   UserRound,
   UsersRound,
   Wrench,
+  X,
 } from 'lucide-react';
 import {
   accountStats,
@@ -54,7 +56,7 @@ import {
   urgentMachines,
   workOrderQueue,
 } from './data';
-import type { AccountStat, MachineStatus, ManualStatus, OnboardingStep, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
+import type { AccountStat, MachineStatus, ManualStatus, OnboardingStep, RepairAssistSourceEvidence, ReportMetric, ReportRow, ScreenKey, UrgentMachine, WorkOrderPhotoAttachment, WorkOrderPriority, WorkOrderStatus, WorkOrderSummary } from './data';
 import washerImage from './assets/washer.png';
 import { useAuthSession } from './hooks/useAuthSession';
 import {
@@ -68,15 +70,16 @@ import {
   type OwnerOnboardingDraft,
 } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
-import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, uploadManualAndIndex } from './firebase/manuals';
+import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, uploadManualAndIndex, type ManualRepairAssistResult } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
-import { createWorkOrderFromDraft, deleteWorkOrder, updateWorkOrderDetails } from './firebase/workOrders';
+import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWorkOrderPhotoBlob, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOrganizationTrial';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
+import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
@@ -88,6 +91,31 @@ type AssistPreset = {
   machineNumber: string;
   machineModel: string;
 };
+
+interface RepairAssistWorkOrderDraft {
+  machineId: string;
+  symptoms: string;
+  errorCode: string;
+  aiDiagnosis: string;
+  aiSource: RepairAssistSourceEvidence | null;
+  photoFiles: File[];
+}
+
+function repairAssistSourceEvidence(result: ManualRepairAssistResult): RepairAssistSourceEvidence | null {
+  if (!result.manual) {
+    return null;
+  }
+  return {
+    manualId: result.manual.id,
+    manualTitle: result.manual.title,
+    manualMachineModel: result.manual.machineModel,
+    model: result.model,
+    sourceMode: result.sourceMode,
+    answerMode: result.answerMode,
+    analyzedPhotoCount: result.analyzedPhotoCount,
+    citations: result.citations,
+  };
+}
 
 const billingPlans: {
   key: BillingPlanKey;
@@ -121,6 +149,7 @@ const navItems: { key: TabKey; label: string; icon: typeof Home }[] = [
   { key: 'ai-assist', label: 'AI Assist', icon: Sparkles },
   { key: 'reports', label: 'Reports', icon: BarChart3 },
 ];
+const EMPTY_WORK_ORDER_PHOTOS: WorkOrderPhotoAttachment[] = [];
 
 const screenTitles: Record<ScreenKey, string> = {
   welcome: 'LaundryOps',
@@ -458,6 +487,9 @@ interface WorkOrderCostEntry {
   otherCost: number;
   notes: string;
   aiDiagnosis: string;
+  aiSource: RepairAssistSourceEvidence | null;
+  photoFiles: File[];
+  photoSource: WorkOrderPhotoAttachment['source'];
 }
 
 interface WorkOrderDetailsEntry {
@@ -473,6 +505,7 @@ interface WorkOrderDetailsEntry {
   otherCost: number;
   notes: string;
   aiDiagnosis: string;
+  aiSource: RepairAssistSourceEvidence | null;
 }
 
 function parseUsdAmount(value: string): number | null {
@@ -500,6 +533,19 @@ function formatUsdAmount(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function samePhotoFileSelection(left: File[], right: File[]): boolean {
+  if (left.length !== right.length || left.length === 0) {
+    return false;
+  }
+  return left.every((file, index) => {
+    const comparison = right[index];
+    return comparison
+      && file.name === comparison.name
+      && file.size === comparison.size
+      && file.lastModified === comparison.lastModified;
+  });
 }
 
 function editableWorkOrderSignature(entry: WorkOrderDetailsEntry): string {
@@ -567,10 +613,13 @@ export function App() {
   const [createWorkOrderMachineId, setCreateWorkOrderMachineId] = useState<string | null>(null);
   const [machineFilterPreset, setMachineFilterPreset] = useState<MachineFilter | null>(null);
   const [assistPreset, setAssistPreset] = useState<AssistPreset | null>(null);
+  const [repairAssistWorkOrderDraft, setRepairAssistWorkOrderDraft] = useState<RepairAssistWorkOrderDraft | null>(null);
   const [selectedWorkOrderId, setSelectedWorkOrderId] = useState<string | null>(null);
   const [createdFromDraft, setCreatedFromDraft] = useState(false);
   const [workOrderBusy, setWorkOrderBusy] = useState(false);
   const [workOrderError, setWorkOrderError] = useState<string | null>(null);
+  const [workOrderPhotoError, setWorkOrderPhotoError] = useState<string | null>(null);
+  const [workOrderRetryPhotoFiles, setWorkOrderRetryPhotoFiles] = useState<File[]>([]);
   const [workOrderDeleteBusyId, setWorkOrderDeleteBusyId] = useState<string | null>(null);
   const [workOrderDeleteError, setWorkOrderDeleteError] = useState<string | null>(null);
   const [signOutBusy, setSignOutBusy] = useState(false);
@@ -862,14 +911,23 @@ export function App() {
     }
     setActiveScreen('ai-assist');
   };
-  const openCreateWorkOrder = (returnScreen: ScreenKey, machineId: string | null = null) => {
+  const openCreateWorkOrder = (
+    returnScreen: ScreenKey,
+    machineId: string | null = null,
+    assistDraft: RepairAssistWorkOrderDraft | null = null,
+  ) => {
     setWorkOrderError(null);
+    setWorkOrderPhotoError(null);
+    setWorkOrderRetryPhotoFiles([]);
     setWorkOrderReturnScreen(returnScreen);
     setCreateWorkOrderMachineId(machineId);
+    setRepairAssistWorkOrderDraft(assistDraft);
     setActiveScreen('create-work-order');
   };
   const openWorkOrderDetail = (workOrderId: string) => {
     setWorkOrderError(null);
+    setWorkOrderPhotoError(null);
+    setWorkOrderRetryPhotoFiles([]);
     setCreatedFromDraft(false);
     setSelectedWorkOrderId(workOrderId);
     setActiveScreen('work-order-detail');
@@ -962,12 +1020,20 @@ export function App() {
         otherCost: entry.otherCost,
         notes: entry.notes,
         aiDiagnosis: entry.aiDiagnosis,
+        aiSource: entry.aiSource,
         partsCost: entry.partsCost,
         laborCost: entry.laborCost,
         totalCostLabel: formatUsdAmount(totalCost),
+        photoFiles: entry.photoFiles,
+        photoSource: entry.photoSource,
       });
+      setWorkOrderPhotoError(result.photoUploadError
+        ? `The maintenance record was saved, but its photos were not attached: ${result.photoUploadError}`
+        : null);
+      setWorkOrderRetryPhotoFiles(result.photoUploadError ? entry.photoFiles : []);
       setCreatedFromDraft(true);
       setSelectedWorkOrderId(result.workOrderId);
+      setRepairAssistWorkOrderDraft(null);
       setActiveScreen('work-order-detail');
     } catch (error) {
       setWorkOrderError(getErrorMessage(error, 'Could not create maintenance record. Try again.'));
@@ -1007,6 +1073,7 @@ export function App() {
         errorCode: entry.errorCode.trim(),
         notes: entry.notes.trim(),
         aiDiagnosis: entry.aiDiagnosis.trim(),
+        aiSource: entry.aiSource,
         partsCost: entry.partsCost,
         laborCost: entry.laborCost,
         otherCost: entry.otherCost,
@@ -1022,6 +1089,18 @@ export function App() {
     } finally {
       setWorkOrderBusy(false);
     }
+  };
+  const handleAddSelectedWorkOrderPhotos = async (workOrderId: string, files: File[]): Promise<void> => {
+    if (!orgConnected || !defaultOrganizationId) {
+      throw new Error('Complete onboarding first before adding maintenance photos.');
+    }
+    await addWorkOrderPhotos({
+      organizationId: defaultOrganizationId,
+      workOrderId,
+      files,
+    });
+    setWorkOrderPhotoError(null);
+    setWorkOrderRetryPhotoFiles((current) => samePhotoFileSelection(current, files) ? [] : current);
   };
   const handleDeleteWorkOrder = async (workOrderId: string): Promise<void> => {
     if (!orgConnected || !defaultOrganizationId) {
@@ -1206,6 +1285,7 @@ export function App() {
                     availableMachines={machineCatalogData}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
+                    initialAssistDraft={repairAssistWorkOrderDraft}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
                     )}
@@ -1232,11 +1312,14 @@ export function App() {
                     machine={selectedWorkOrderMachine}
                     busy={workOrderBusy}
                     error={workOrderError}
+                    photoExternalError={workOrderPhotoError}
+                    retryPhotoFiles={workOrderRetryPhotoFiles}
                     machineStatusBusy={selectedWorkOrderMachine ? machineStatusBusyId === selectedWorkOrderMachine.id : false}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
                     onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
+                    onAddPhotos={handleAddSelectedWorkOrderPhotos}
                     onSetMachineStatus={handleSetMachineStatus}
                   />
                     )}
@@ -1244,7 +1327,7 @@ export function App() {
                   <RepairAssistScreen
                     assistPreset={assistPreset}
                     onClearAssistPreset={() => setAssistPreset(null)}
-                    onCreateWorkOrder={(machineId) => openCreateWorkOrder('ai-assist', machineId)}
+                    onCreateWorkOrder={(draft) => openCreateWorkOrder('ai-assist', draft.machineId, draft)}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
                     machines={machineCatalogData}
@@ -2695,7 +2778,6 @@ function MachineDetailScreen({
     : machineStatus === 'needs-repair'
       ? 'Needs repair attention'
       : 'No active issue';
-  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
 
   return (
     <div className="screen-stack detail-stack">
@@ -2725,15 +2807,8 @@ function MachineDetailScreen({
       <div className="shortcut-grid">
         <Shortcut icon={Sparkles} label="Ask AI" onClick={onOpenAiAssist} tone="ai" />
         <Shortcut icon={BookOpen} label="Search Manual" onClick={() => setActiveScreen('manuals')} />
-        <Shortcut icon={Camera} label="Add Photo" onClick={() => setPhotoMessage('Photo attachments are queued for the beta attachment workflow.')} />
+        <Shortcut icon={Camera} label="Add Photo" onClick={onCreateWorkOrder} />
       </div>
-
-      {photoMessage && (
-        <div className="auth-message">
-          <strong>Add Photo</strong>
-          <span>{photoMessage}</span>
-        </div>
-      )}
 
       <div className="stat-grid">
         <SmallStat label="Lifetime Repair Cost" value="Not set" tone="teal" />
@@ -3417,6 +3492,7 @@ function CreateWorkOrderScreen({
   machine,
   orgConnected,
   organizationId,
+  initialAssistDraft,
   availableMachines = [],
   onSetMachineStatus,
 }: {
@@ -3426,6 +3502,7 @@ function CreateWorkOrderScreen({
   machine: UrgentMachine | null;
   orgConnected: boolean;
   organizationId: string | null;
+  initialAssistDraft: RepairAssistWorkOrderDraft | null;
   availableMachines?: UrgentMachine[];
   onSetMachineStatus?: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
@@ -3434,8 +3511,8 @@ function CreateWorkOrderScreen({
   const [status, setStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
   const [maintenanceDate, setMaintenanceDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [technicianName, setTechnicianName] = useState(aiWorkOrderDraft.assignee);
-  const [symptoms, setSymptoms] = useState('');
-  const [errorCode, setErrorCode] = useState('');
+  const [symptoms, setSymptoms] = useState(initialAssistDraft?.symptoms ?? '');
+  const [errorCode, setErrorCode] = useState(initialAssistDraft?.errorCode ?? '');
   const [machineStatus, setMachineStatus] = useState<MachineOperationalStatus>('running');
   const [partsCostInput, setPartsCostInput] = useState('');
   const [laborCostInput, setLaborCostInput] = useState('');
@@ -3444,11 +3521,17 @@ function CreateWorkOrderScreen({
   const [techNoteError, setTechNoteError] = useState<string | null>(null);
   const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
   const [assistantLoading, setAssistantLoading] = useState(false);
+  const assistantRequestActiveRef = useRef(false);
   const [assistantError, setAssistantError] = useState<string | null>(null);
-  const [assistantAnswer, setAssistantAnswer] = useState<string | null>(null);
-  const [assistantManualTitle, setAssistantManualTitle] = useState<string | null>(null);
-  const [assistantGrounded, setAssistantGrounded] = useState(false);
+  const [assistantAnswer, setAssistantAnswer] = useState<string | null>(initialAssistDraft?.aiDiagnosis || null);
+  const [assistantSource, setAssistantSource] = useState<RepairAssistSourceEvidence | null>(initialAssistDraft?.aiSource ?? null);
+  const [assistantManualTitle, setAssistantManualTitle] = useState<string | null>(initialAssistDraft?.aiSource?.manualTitle ?? null);
+  const [assistantGrounded, setAssistantGrounded] = useState(Boolean(initialAssistDraft?.aiSource));
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(machine?.id ?? null);
+  const [photoFiles, setPhotoFiles] = useState<File[]>(initialAssistDraft?.photoFiles ?? []);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [photoPreparing, setPhotoPreparing] = useState(false);
+  const createPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
   const selectedMachine = useMemo(() => {
     if (selectedMachineId) {
@@ -3510,6 +3593,7 @@ function CreateWorkOrderScreen({
       || repairType.trim().length > 0
       || errorCode.trim().length > 0
       || notesInput.trim().length > 0
+      || Boolean(assistantAnswer?.trim())
       || finalPartsCost > 0
       || finalLaborCost > 0
       || finalOtherCost > 0;
@@ -3534,11 +3618,14 @@ function CreateWorkOrderScreen({
       otherCost: finalOtherCost,
       notes: notesInput,
       aiDiagnosis: assistantAnswer ?? '',
+      aiSource: assistantSource,
+      photoFiles,
+      photoSource: initialAssistDraft ? 'repair-assist' : 'maintenance-record',
     });
   };
 
   const runAiDiagnosis = async (): Promise<void> => {
-    if (assistantLoading) {
+    if (assistantRequestActiveRef.current) {
       return;
     }
     if (!hasMachineContext) {
@@ -3554,6 +3641,7 @@ function CreateWorkOrderScreen({
       return;
     }
     setAssistantError(null);
+    assistantRequestActiveRef.current = true;
     setAssistantLoading(true);
     try {
       const result = await generateManualRepairAssist({
@@ -3563,14 +3651,32 @@ function CreateWorkOrderScreen({
         errorCode,
         machineId: selectedMachine?.id,
         machineNumber: selectedMachine?.machineNumber,
+        images: await prepareRepairAssistImages(photoFiles),
       });
       setAssistantAnswer(result.answer);
+      setAssistantSource(repairAssistSourceEvidence(result));
       setAssistantGrounded(result.grounded);
       setAssistantManualTitle(result.manual?.title ?? null);
     } catch (diagError) {
       setAssistantError(getErrorMessage(diagError, 'Could not generate AI diagnosis.'));
     } finally {
+      assistantRequestActiveRef.current = false;
       setAssistantLoading(false);
+    }
+  };
+
+  const addCreateRecordPhotos = async (files: File[]): Promise<void> => {
+    if (photoPreparing || files.length === 0) {
+      return;
+    }
+    setPhotoError(null);
+    setPhotoPreparing(true);
+    try {
+      setPhotoFiles(await mergeRepairAssistPhotoFiles(photoFiles, files));
+    } catch (photoSelectionError) {
+      setPhotoError(getErrorMessage(photoSelectionError, 'Could not add the selected photo.'));
+    } finally {
+      setPhotoPreparing(false);
     }
   };
 
@@ -3612,9 +3718,15 @@ function CreateWorkOrderScreen({
             <span>Machine</span>
             <select
               value={selectedMachineId ?? ''}
+              disabled={assistantLoading}
               onChange={(event) => {
                 setSelectedMachineId(event.target.value || null);
                 setMachineStatusError(null);
+                setAssistantAnswer(null);
+                setAssistantSource(null);
+                setAssistantManualTitle(null);
+                setAssistantGrounded(false);
+                setPhotoFiles([]);
               }}
             >
               <option value="" disabled>
@@ -3664,9 +3776,12 @@ function CreateWorkOrderScreen({
               value={symptoms}
               placeholder="Describe what the machine is doing"
               rows={3}
+              disabled={assistantLoading}
               onChange={(event) => {
                 setSymptoms(event.target.value);
                 setAssistantError(null);
+                setAssistantAnswer(null);
+                setAssistantSource(null);
               }}
             />
             <button
@@ -3735,7 +3850,12 @@ function CreateWorkOrderScreen({
           <input
             value={errorCode}
             placeholder="Example: E DL"
-            onChange={(event) => setErrorCode(event.target.value)}
+            disabled={assistantLoading}
+            onChange={(event) => {
+              setErrorCode(event.target.value);
+              setAssistantAnswer(null);
+              setAssistantSource(null);
+            }}
           />
         </label>
         <div className="review-field-grid">
@@ -3769,6 +3889,51 @@ function CreateWorkOrderScreen({
         </div>
       </section>
 
+      <section className="content-section compact">
+        <div className="section-heading">
+          <div>
+            <h2>Photos</h2>
+            <span>Photos are saved to this record and analyzed when you run AI Diagnose.</span>
+          </div>
+        </div>
+        <SelectedPhotoStrip
+          files={photoFiles}
+          disabled={photoPreparing || assistantLoading}
+          onRemove={(index) => {
+            setPhotoFiles((current) => current.filter((_, photoIndex) => photoIndex !== index));
+            setPhotoError(null);
+          }}
+        />
+        <input
+          ref={createPhotoInputRef}
+          className="visually-hidden"
+          type="file"
+          accept="image/*"
+          multiple
+          disabled={photoPreparing || assistantLoading}
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = '';
+            void addCreateRecordPhotos(files);
+          }}
+        />
+        <button
+          className="secondary-action full-width-action"
+          type="button"
+          onClick={() => createPhotoInputRef.current?.click()}
+          disabled={photoFiles.length >= MAX_REPAIR_ASSIST_PHOTOS || photoPreparing || assistantLoading}
+          aria-live="polite"
+        >
+          <Camera size={18} /> {photoPreparing ? 'Preparing Photo...' : photoFiles.length >= MAX_REPAIR_ASSIST_PHOTOS ? '3 Photos Added' : 'Add Photo'}
+        </button>
+        {photoError && (
+          <div className="auth-message" role="alert">
+            <strong>Add Photo</strong>
+            <span>{photoError}</span>
+          </div>
+        )}
+      </section>
+
       {assistantAnswer && (
         <section className="task-card">
           <div className="section-heading">
@@ -3786,7 +3951,7 @@ function CreateWorkOrderScreen({
       )}
 
       {assistantError && (
-        <div className="auth-message">
+        <div className="auth-message" role="alert">
           <strong>AI Diagnose</strong>
           <span>{assistantError}</span>
         </div>
@@ -3849,8 +4014,13 @@ function CreateWorkOrderScreen({
         </div>
       )}
 
-      <button className="primary-action sticky-action" type="button" onClick={() => void submitCreateWorkOrder()} disabled={busy}>
-        <ClipboardCheck size={19} /> {busy ? 'Saving...' : 'Save Maintenance Record'}
+      <button
+        className="primary-action sticky-action"
+        type="button"
+        onClick={() => void submitCreateWorkOrder()}
+        disabled={busy || assistantLoading}
+      >
+        <ClipboardCheck size={19} /> {busy ? 'Saving...' : assistantLoading ? 'Diagnosis in Progress...' : 'Save Maintenance Record'}
       </button>
     </div>
   );
@@ -4059,6 +4229,24 @@ function WorkOrderStatusBadge({ status, children }: { status: WorkOrderStatus; c
   return <span className={`work-status-pill work-status-${status}`}>{children}</span>;
 }
 
+async function prepareStoredRepairAssistImages(
+  attachments: WorkOrderPhotoAttachment[],
+): Promise<Array<{ contentType: string; dataUrl: string }>> {
+  const selectedAttachments = attachments.slice(0, MAX_REPAIR_ASSIST_PHOTOS);
+  const results = await Promise.allSettled(selectedAttachments.map(async (attachment) => {
+    const blob = await loadWorkOrderPhotoBlob(attachment.storagePath);
+    return {
+      contentType: attachment.contentType,
+      dataUrl: await blobToDataUrl(blob),
+    };
+  }));
+  const images = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+  if (selectedAttachments.length > 0 && images.length === 0) {
+    throw new Error('The saved maintenance photos could not be loaded for analysis.');
+  }
+  return images;
+}
+
 function WorkOrderDetailScreen({
   setActiveScreen,
   createdFromDraft,
@@ -4066,11 +4254,14 @@ function WorkOrderDetailScreen({
   machine,
   busy,
   error,
+  photoExternalError,
+  retryPhotoFiles,
   machineStatusBusy,
   machineStatusError,
   orgConnected,
   organizationId,
   onUpdateDetails,
+  onAddPhotos,
   onSetMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
@@ -4079,11 +4270,14 @@ function WorkOrderDetailScreen({
   machine: UrgentMachine | null;
   busy: boolean;
   error: string | null;
+  photoExternalError: string | null;
+  retryPhotoFiles: File[];
   machineStatusBusy: boolean;
   machineStatusError: string | null;
   orgConnected: boolean;
   organizationId: string | null;
   onUpdateDetails: (entry: WorkOrderDetailsEntry) => Promise<void>;
+  onAddPhotos: (workOrderId: string, files: File[]) => Promise<void>;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
 }) {
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
@@ -4093,7 +4287,9 @@ function WorkOrderDetailScreen({
     : order?.status === 'completed'
       ? 'Completed'
       : 'Planned';
-  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const detailPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const [maintenanceDate, setMaintenanceDate] = useState('');
   const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
   const [repairType, setRepairType] = useState('');
@@ -4105,10 +4301,12 @@ function WorkOrderDetailScreen({
   const [otherCostInput, setOtherCostInput] = useState('');
   const [notesInput, setNotesInput] = useState('');
   const [aiDiagnosisInput, setAiDiagnosisInput] = useState('');
+  const [aiSourceInput, setAiSourceInput] = useState<RepairAssistSourceEvidence | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailAssistantError, setDetailAssistantError] = useState<string | null>(null);
   const [detailAssistantMessage, setDetailAssistantMessage] = useState<string | null>(null);
   const [detailAssistantLoading, setDetailAssistantLoading] = useState(false);
+  const detailAssistantRequestActiveRef = useRef(false);
   const [isDetailDirty, setIsDetailDirty] = useState(false);
   const [loadedDetailOrderId, setLoadedDetailOrderId] = useState<string | null>(null);
   const [pendingSavedSignature, setPendingSavedSignature] = useState<string | null>(null);
@@ -4133,9 +4331,11 @@ function WorkOrderDetailScreen({
       setOtherCostInput('');
       setNotesInput('');
       setAiDiagnosisInput('');
+      setAiSourceInput(null);
       setDetailAssistantError(null);
       setDetailAssistantMessage(null);
       setDetailAssistantLoading(false);
+      setPhotoError(null);
       setIsDetailDirty(false);
       setLoadedDetailOrderId(null);
       setPendingSavedSignature(null);
@@ -4164,9 +4364,11 @@ function WorkOrderDetailScreen({
     setOtherCostInput(order.otherCost ?? '');
     setNotesInput(order.notes ?? '');
     setAiDiagnosisInput(order.aiDiagnosis ?? '');
+    setAiSourceInput(order.aiSource ?? null);
     setDetailError(null);
     setDetailAssistantError(null);
     setDetailAssistantMessage(null);
+    setPhotoError(null);
     setLoadedDetailOrderId(order.id);
     setIsDetailDirty(false);
     if (confirmedPendingSave) {
@@ -4176,6 +4378,7 @@ function WorkOrderDetailScreen({
     isDetailDirty,
     loadedDetailOrderId,
     order?.aiDiagnosis,
+    order?.aiSource,
     order?.assignee,
     order?.errorCode,
     order?.id,
@@ -4191,7 +4394,10 @@ function WorkOrderDetailScreen({
     pendingSavedSignature,
   ]);
 
-  const buildSavedDetailsEntry = (aiDiagnosisOverride = aiDiagnosisInput): WorkOrderDetailsEntry | null => {
+  const buildSavedDetailsEntry = (
+    aiDiagnosisOverride = aiDiagnosisInput,
+    aiSourceOverride = aiSourceInput,
+  ): WorkOrderDetailsEntry | null => {
     const partsCost = parseUsdAmount(partsCostInput);
     const laborCost = parseUsdAmount(laborCostInput);
     const otherCost = parseUsdAmount(otherCostInput);
@@ -4218,6 +4424,7 @@ function WorkOrderDetailScreen({
       otherCost: otherCost ?? 0,
       notes: notesInput,
       aiDiagnosis: aiDiagnosisOverride,
+      aiSource: aiSourceOverride,
     };
   };
 
@@ -4239,7 +4446,7 @@ function WorkOrderDetailScreen({
   };
 
   const runDetailAiDiagnosis = async (): Promise<void> => {
-    if (detailAssistantLoading) {
+    if (detailAssistantRequestActiveRef.current) {
       return;
     }
     if (!orgConnected || !organizationId) {
@@ -4270,6 +4477,7 @@ function WorkOrderDetailScreen({
     setDetailError(null);
     setDetailAssistantError(null);
     setDetailAssistantMessage(null);
+    detailAssistantRequestActiveRef.current = true;
     setDetailAssistantLoading(true);
     try {
       const result = await generateManualRepairAssist({
@@ -4279,9 +4487,12 @@ function WorkOrderDetailScreen({
         errorCode,
         machineId: machine.id,
         machineNumber: machine.machineNumber,
+        images: await prepareStoredRepairAssistImages(order.photoAttachments ?? []),
       });
-      const savedEntry = buildSavedDetailsEntry(result.answer);
+      const resultSource = repairAssistSourceEvidence(result);
+      const savedEntry = buildSavedDetailsEntry(result.answer, resultSource);
       setAiDiagnosisInput(result.answer);
+      setAiSourceInput(resultSource);
       if (!savedEntry) {
         setIsDetailDirty(true);
         return;
@@ -4293,7 +4504,30 @@ function WorkOrderDetailScreen({
     } catch (diagError) {
       setDetailAssistantError(getErrorMessage(diagError, 'Could not generate and save AI diagnosis.'));
     } finally {
+      detailAssistantRequestActiveRef.current = false;
       setDetailAssistantLoading(false);
+    }
+  };
+
+  const addDetailPhotos = async (files: File[]): Promise<void> => {
+    if (!order || files.length === 0 || photoBusy) {
+      return;
+    }
+    const existingPhotoCount = order.photoAttachments?.length ?? 0;
+    if (existingPhotoCount + files.length > MAX_REPAIR_ASSIST_PHOTOS) {
+      setPhotoError(`Add up to ${MAX_REPAIR_ASSIST_PHOTOS} photos to a maintenance record.`);
+      return;
+    }
+
+    setPhotoBusy(true);
+    setPhotoError(null);
+    try {
+      const normalizedFiles = await mergeRepairAssistPhotoFiles([], files);
+      await onAddPhotos(order.id, normalizedFiles);
+    } catch (photoUploadError) {
+      setPhotoError(getErrorMessage(photoUploadError, 'Could not attach the selected photo.'));
+    } finally {
+      setPhotoBusy(false);
     }
   };
 
@@ -4437,10 +4671,12 @@ function WorkOrderDetailScreen({
             value={symptoms}
             rows={3}
             placeholder="Describe what the machine is doing"
-            onChange={(event) => {
-              setSymptoms(event.target.value);
-              setIsDetailDirty(true);
-            }}
+              onChange={(event) => {
+                setSymptoms(event.target.value);
+                setAiDiagnosisInput('');
+                setAiSourceInput(null);
+                setIsDetailDirty(true);
+              }}
             disabled={detailInputsDisabled}
           />
         </label>
@@ -4452,6 +4688,8 @@ function WorkOrderDetailScreen({
               placeholder="Example: E DL"
               onChange={(event) => {
                 setErrorCode(event.target.value);
+                setAiDiagnosisInput('');
+                setAiSourceInput(null);
                 setIsDetailDirty(true);
               }}
               disabled={detailInputsDisabled}
@@ -4530,14 +4768,25 @@ function WorkOrderDetailScreen({
             placeholder="AI diagnosis can be saved here when used."
             onChange={(event) => {
               setAiDiagnosisInput(event.target.value);
+              setAiSourceInput(null);
               setIsDetailDirty(true);
             }}
             disabled={detailInputsDisabled}
           />
         </label>
+        {aiSourceInput && (
+          <p className="search-hint">
+            Source: {aiSourceInput.manualTitle}{aiSourceInput.model
+              ? ` via ${aiSourceInput.model}`
+              : ' (manual-only fallback; AI analysis unavailable)'}
+            {aiSourceInput.analyzedPhotoCount > 0
+              ? ` with ${aiSourceInput.analyzedPhotoCount} photo${aiSourceInput.analyzedPhotoCount === 1 ? '' : 's'}`
+              : ''}. {aiSourceInput.citations.length} manual citation{aiSourceInput.citations.length === 1 ? '' : 's'} saved.
+          </p>
+        )}
         {detailAssistantMessage && <p className="search-hint">{detailAssistantMessage}</p>}
         {detailAssistantError && (
-          <div className="auth-message">
+          <div className="auth-message" role="alert">
             <strong>AI Diagnose</strong>
             <span>{detailAssistantError}</span>
           </div>
@@ -4545,19 +4794,56 @@ function WorkOrderDetailScreen({
       </section>
 
       <section className="content-section compact">
-        <h2>Photos</h2>
-        <p className="empty-state">No photos attached yet.</p>
+        <div className="section-heading">
+          <div>
+            <h2>Photos</h2>
+            <span>Private machine photos attached to this maintenance record.</span>
+          </div>
+        </div>
+        <WorkOrderPhotoGallery attachments={order.photoAttachments ?? EMPTY_WORK_ORDER_PHOTOS} />
+        {retryPhotoFiles.length > 0 && (
+          <div className="photo-retry-panel">
+            <strong>{retryPhotoFiles.length} selected photo{retryPhotoFiles.length === 1 ? '' : 's'} ready to retry</strong>
+            <span>The maintenance record was saved. These temporary selections remain until you retry or leave this record.</span>
+            <SelectedPhotoStrip files={retryPhotoFiles} onRemove={() => undefined} hideRemove />
+            <button
+              className="secondary-action full-width-action"
+              type="button"
+              onClick={() => void addDetailPhotos(retryPhotoFiles)}
+              disabled={photoBusy}
+            >
+              <RefreshCw size={18} /> {photoBusy ? 'Retrying Photos...' : 'Retry Photos'}
+            </button>
+          </div>
+        )}
+        <input
+          ref={detailPhotoInputRef}
+          className="visually-hidden"
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = '';
+            void addDetailPhotos(files);
+          }}
+        />
         <button
           className="secondary-action full-width-action"
           type="button"
-          onClick={() => setPhotoMessage('Photo attachments are queued for the beta attachment workflow.')}
+          onClick={() => detailPhotoInputRef.current?.click()}
+          disabled={photoBusy || (order.photoAttachments?.length ?? 0) >= MAX_REPAIR_ASSIST_PHOTOS}
         >
-          <Plus size={18} /> Add Photo
+          <Camera size={18} /> {photoBusy
+            ? 'Adding Photo...'
+            : (order.photoAttachments?.length ?? 0) >= MAX_REPAIR_ASSIST_PHOTOS
+              ? '3 Photos Added'
+              : 'Add Photo'}
         </button>
-        {photoMessage && (
-          <div className="auth-message">
+        {(photoError || photoExternalError) && (
+          <div className="auth-message" role="alert">
             <strong>Add Photo</strong>
-            <span>{photoMessage}</span>
+            <span>{photoError ?? photoExternalError}</span>
           </div>
         )}
       </section>
@@ -4672,7 +4958,7 @@ function RepairAssistScreen({
 }: {
   assistPreset: AssistPreset | null;
   onClearAssistPreset: () => void;
-  onCreateWorkOrder: (machineId?: string | null) => void;
+  onCreateWorkOrder: (draft: RepairAssistWorkOrderDraft) => void;
   orgConnected: boolean;
   organizationId: string | null;
   machines: UrgentMachine[];
@@ -4690,8 +4976,14 @@ function RepairAssistScreen({
   const [assistModel, setAssistModel] = useState<string | null>(null);
   const [assistAnswerMode, setAssistAnswerMode] = useState<'openai' | 'manual-fallback' | null>(null);
   const [assistCitations, setAssistCitations] = useState<Array<{ chunkId: string; preview: string }>>([]);
-  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+  const [assistSource, setAssistSource] = useState<RepairAssistSourceEvidence | null>(null);
+  const [photoFiles, setPhotoFiles] = useState<File[]>([]);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [photoPreparing, setPhotoPreparing] = useState(false);
+  const [assistAnalyzedPhotoCount, setAssistAnalyzedPhotoCount] = useState(0);
+  const assistPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const assistRequestIdRef = useRef(0);
+  const assistRequestActiveRef = useRef(false);
   const selectedMachine = useMemo(
     () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
     [machines, selectedMachineId],
@@ -4716,7 +5008,6 @@ function RepairAssistScreen({
   const clearAssistResult = (invalidateRequest = true): void => {
     if (invalidateRequest) {
       assistRequestIdRef.current += 1;
-      setAssistBusy(false);
     }
     setAssistError(null);
     setAssistAnswer(null);
@@ -4725,7 +5016,8 @@ function RepairAssistScreen({
     setAssistModel(null);
     setAssistAnswerMode(null);
     setAssistCitations([]);
-    setPhotoMessage(null);
+    setAssistSource(null);
+    setAssistAnalyzedPhotoCount(0);
   };
 
   useEffect(() => {
@@ -4733,6 +5025,8 @@ function RepairAssistScreen({
     setSelectedMachineId(assistPreset?.machineId ?? '');
     setSymptoms('');
     setErrorCode('');
+    setPhotoFiles([]);
+    setPhotoError(null);
   }, [assistPreset?.machineId]);
 
   useEffect(() => {
@@ -4743,6 +5037,9 @@ function RepairAssistScreen({
   }, [machines, selectedMachineId]);
 
   const runRepairAssist = async (): Promise<void> => {
+    if (assistRequestActiveRef.current) {
+      return;
+    }
     const requestId = assistRequestIdRef.current + 1;
     assistRequestIdRef.current = requestId;
     clearAssistResult(false);
@@ -4777,10 +5074,11 @@ function RepairAssistScreen({
     }
 
     if (!symptoms.trim() && !errorCode.trim()) {
-      setAssistError('Enter symptoms or an error code before using Repair Assist.');
+      setAssistError('Enter symptoms or an error code before using Repair Assist. Photos help confirm visible conditions.');
       return;
     }
 
+    assistRequestActiveRef.current = true;
     setAssistBusy(true);
     try {
       const result = await generateManualRepairAssist({
@@ -4790,6 +5088,7 @@ function RepairAssistScreen({
         errorCode,
         machineId: selectedMachine.id,
         machineNumber: selectedMachine.machineNumber,
+        images: await prepareRepairAssistImages(photoFiles),
       });
       if (requestId !== assistRequestIdRef.current) {
         return;
@@ -4800,15 +5099,32 @@ function RepairAssistScreen({
       setAssistModel(result.model);
       setAssistAnswerMode(result.answerMode);
       setAssistCitations(result.citations);
+      setAssistSource(repairAssistSourceEvidence(result));
+      setAssistAnalyzedPhotoCount(result.analyzedPhotoCount);
     } catch (error) {
       if (requestId !== assistRequestIdRef.current) {
         return;
       }
       setAssistError(getErrorMessage(error, 'Could not generate manual-grounded guidance.'));
     } finally {
-      if (requestId === assistRequestIdRef.current) {
-        setAssistBusy(false);
-      }
+      assistRequestActiveRef.current = false;
+      setAssistBusy(false);
+    }
+  };
+
+  const addRepairAssistPhotos = async (files: File[]): Promise<void> => {
+    if (photoPreparing || files.length === 0) {
+      return;
+    }
+    setPhotoError(null);
+    setPhotoPreparing(true);
+    try {
+      setPhotoFiles(await mergeRepairAssistPhotoFiles(photoFiles, files));
+      clearAssistResult();
+    } catch (photoSelectionError) {
+      setPhotoError(getErrorMessage(photoSelectionError, 'Could not add the selected photo.'));
+    } finally {
+      setPhotoPreparing(false);
     }
   };
 
@@ -4823,11 +5139,14 @@ function RepairAssistScreen({
         </div>
         <button
           type="button"
+          disabled={assistBusy}
           onClick={() => {
             onClearAssistPreset();
             setSelectedMachineId('');
             setSymptoms('');
             setErrorCode('');
+            setPhotoFiles([]);
+            setPhotoError(null);
             clearAssistResult();
           }}
         >
@@ -4843,9 +5162,11 @@ function RepairAssistScreen({
             onChange={(event) => {
               const nextValue = event.target.value;
               setSelectedMachineId(nextValue);
+              setPhotoFiles([]);
+              setPhotoError(null);
               clearAssistResult();
             }}
-            disabled={machines.length === 0}
+            disabled={machines.length === 0 || assistBusy}
           >
             <option value="" disabled>
               Select machine number
@@ -4864,6 +5185,7 @@ function RepairAssistScreen({
           <span>Symptoms (optional)</span>
           <input
             value={symptoms}
+            disabled={assistBusy}
             onChange={(event) => {
               setSymptoms(event.target.value);
               clearAssistResult();
@@ -4874,6 +5196,7 @@ function RepairAssistScreen({
           <span>Error Code</span>
           <input
             value={errorCode}
+            disabled={assistBusy}
             onChange={(event) => {
               setErrorCode(event.target.value);
               clearAssistResult();
@@ -4881,15 +5204,43 @@ function RepairAssistScreen({
           />
         </label>
         <div className="assist-photos">
-          <PhotoTile variant="pump" large />
-          <button className="attach-photo" type="button" onClick={() => setPhotoMessage('Photo analysis is queued for the beta attachment workflow.')}>
-            <Plus size={22} /> Add Photo
+          <SelectedPhotoStrip
+            files={photoFiles}
+            disabled={photoPreparing || assistBusy}
+            onRemove={(index) => {
+              setPhotoFiles((current) => current.filter((_, photoIndex) => photoIndex !== index));
+              setPhotoError(null);
+              clearAssistResult();
+            }}
+          />
+          <input
+            ref={assistPhotoInputRef}
+            className="visually-hidden"
+            type="file"
+            accept="image/*"
+            multiple
+            disabled={photoPreparing || assistBusy}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = '';
+              void addRepairAssistPhotos(files);
+            }}
+          />
+          <button
+            className="attach-photo"
+            type="button"
+            onClick={() => assistPhotoInputRef.current?.click()}
+            disabled={photoFiles.length >= MAX_REPAIR_ASSIST_PHOTOS || photoPreparing || assistBusy}
+            aria-live="polite"
+          >
+            <Camera size={22} /> {photoPreparing ? 'Preparing...' : photoFiles.length >= MAX_REPAIR_ASSIST_PHOTOS ? '3 Added' : 'Add Photo'}
           </button>
         </div>
-        {photoMessage && (
-          <div className="auth-message">
+        <p className="search-hint">Up to 3 photos. Location metadata is removed before analysis.</p>
+        {photoError && (
+          <div className="auth-message" role="alert">
             <strong>Add Photo</strong>
-            <span>{photoMessage}</span>
+            <span>{photoError}</span>
           </div>
         )}
         <div className="manual-toggle">
@@ -4909,6 +5260,7 @@ function RepairAssistScreen({
             role="switch"
             aria-checked={manualGroundingEnabled}
             aria-label={manualGroundingEnabled ? 'Manual grounding on' : 'Manual grounding off'}
+            disabled={assistBusy}
             onClick={() => {
               setManualGroundingEnabled((value) => !value);
               clearAssistResult();
@@ -4920,7 +5272,7 @@ function RepairAssistScreen({
         </button>
         {!orgConnected && <p className="search-hint">Complete onboarding first to run live Repair Assist.</p>}
         {assistError && (
-          <div className="auth-message">
+          <div className="auth-message" role="alert">
             <strong>Repair Assist failed</strong>
             <span>{assistError}</span>
           </div>
@@ -4984,7 +5336,7 @@ function RepairAssistScreen({
               {assistAnswerMode === 'manual-fallback'
                 ? 'AI response unavailable - grounded manual excerpt shown'
                 : assistGrounded
-                  ? `${assistModel ?? 'GPT-5.5'} explaining uploaded manual`
+                  ? `${assistModel ?? 'GPT-5.5'} explaining uploaded manual${assistAnalyzedPhotoCount > 0 ? ` with ${assistAnalyzedPhotoCount} photo${assistAnalyzedPhotoCount === 1 ? '' : 's'}` : ''}`
                   : 'Manual required'}
             </small>
           </aside>
@@ -4998,12 +5350,20 @@ function RepairAssistScreen({
         <button
           className="ai-action"
           type="button"
+          disabled={assistBusy || !assistAnswer}
           onClick={() => {
             if (!selectedMachine) {
               setAssistError('Select a machine number before saving as a maintenance record.');
               return;
             }
-            onCreateWorkOrder(selectedMachine.id);
+            onCreateWorkOrder({
+              machineId: selectedMachine.id,
+              symptoms,
+              errorCode,
+              aiDiagnosis: assistAnswer ?? '',
+              aiSource: assistSource,
+              photoFiles,
+            });
           }}
         >
           Save as Maintenance Record
@@ -5382,6 +5742,120 @@ function MachineIllustration() {
     <div className="machine-illustration" aria-hidden="true">
       <img src={washerImage} alt="" />
     </div>
+  );
+}
+
+function SelectedPhotoStrip({
+  files,
+  onRemove,
+  disabled = false,
+  hideRemove = false,
+}: {
+  files: File[];
+  onRemove: (index: number) => void;
+  disabled?: boolean;
+  hideRemove?: boolean;
+}) {
+  const previews = useMemo(
+    () => files.map((file) => ({
+      file,
+      url: URL.createObjectURL(file),
+    })),
+    [files],
+  );
+
+  useEffect(() => () => {
+    previews.forEach((preview) => URL.revokeObjectURL(preview.url));
+  }, [previews]);
+
+  if (previews.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="selected-photo-strip" aria-label="Selected machine photos">
+      {previews.map((preview, index) => (
+        <div className="selected-photo-card" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+          <img src={preview.url} alt={`Selected machine photo ${index + 1}`} />
+          {!hideRemove && (
+            <button
+              type="button"
+              onClick={() => onRemove(index)}
+              disabled={disabled}
+              aria-label={`Remove photo ${index + 1}`}
+              title="Remove photo"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WorkOrderPhotoGallery({ attachments }: { attachments: WorkOrderPhotoAttachment[] }) {
+  const [photos, setPhotos] = useState<Array<{ attachment: WorkOrderPhotoAttachment; url: string }>>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrls: string[] = [];
+    setPhotos([]);
+    setLoadError(null);
+    setLoading(attachments.length > 0);
+
+    if (attachments.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    void Promise.allSettled(attachments.map(async (attachment) => {
+      const blob = await loadWorkOrderPhotoBlob(attachment.storagePath);
+      return {
+        attachment,
+        url: URL.createObjectURL(blob),
+      };
+    })).then((results) => {
+      const loadedPhotos = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+      objectUrls = loadedPhotos.map((photo) => photo.url);
+      if (!active) {
+        objectUrls.forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+      setPhotos(loadedPhotos);
+      setLoading(false);
+      if (results.some((result) => result.status === 'rejected')) {
+        setLoadError('One or more maintenance photos could not be loaded.');
+      }
+    });
+
+    return () => {
+      active = false;
+      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [attachments]);
+
+  if (attachments.length === 0) {
+    return <p className="empty-state">No photos attached yet.</p>;
+  }
+
+  return (
+    <>
+      {loading && <p className="search-hint" aria-live="polite">Loading photos...</p>}
+      <div className="work-order-photo-gallery">
+        {photos.map((photo, index) => (
+          <img
+            key={photo.attachment.storagePath}
+            src={photo.url}
+            alt={`Maintenance photo ${index + 1}`}
+          />
+        ))}
+      </div>
+      {loadError && <p className="search-hint" role="alert">{loadError}</p>}
+    </>
   );
 }
 

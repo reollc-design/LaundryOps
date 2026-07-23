@@ -55,6 +55,14 @@ service cloud.firestore {
       return hasRole(orgId, ['technician']);
     }
 
+    function hasValidPhotoAttachmentCount() {
+      return !('photoAttachments' in request.resource.data)
+        || (
+          request.resource.data.photoAttachments is list
+          && request.resource.data.photoAttachments.size() <= 3
+        );
+    }
+
     function isOrganizationActive(orgId) {
       return signedIn()
         && exists(organizationPath(orgId))
@@ -219,10 +227,12 @@ service cloud.firestore {
 
       match /workOrders/{workOrderId} {
         allow read: if isMember(orgId);
-        allow create: if isOrganizationActive(orgId) && isOperationsLead(orgId);
+        allow create: if isOrganizationActive(orgId)
+          && isOperationsLead(orgId)
+          && hasValidPhotoAttachmentCount();
         allow update: if isOrganizationActive(orgId)
           && (
-            isOperationsLead(orgId)
+            (isOperationsLead(orgId) && hasValidPhotoAttachmentCount())
             || (
               isTechnician(orgId)
               && resource.data.assignedUserId == request.auth.uid

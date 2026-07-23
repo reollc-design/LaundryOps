@@ -2,6 +2,7 @@ import type { Auth } from 'firebase/auth';
 import { collection, doc, serverTimestamp, setDoc, type Firestore } from 'firebase/firestore';
 import { ref, uploadBytes, type FirebaseStorage } from 'firebase/storage';
 import { getFirebaseClient } from './client';
+import type { RepairAssistImageInput } from '../repairAssistPhotos';
 
 const MAX_MANUAL_UPLOAD_BYTES = 25 * 1024 * 1024;
 
@@ -16,6 +17,7 @@ interface ManualEndpointResponse {
   model?: string;
   sourceMode?: string;
   answerMode?: 'openai' | 'manual-fallback';
+  analyzedPhotoCount?: number;
   citations?: Array<{
     chunkId: string;
     preview: string;
@@ -76,6 +78,7 @@ export interface ManualRepairAssistInput {
   errorCode?: string;
   machineId?: string;
   machineNumber?: string;
+  images?: RepairAssistImageInput[];
 }
 
 export interface ManualRepairAssistResult {
@@ -93,6 +96,7 @@ export interface ManualRepairAssistResult {
     chunkId: string;
     preview: string;
   }>;
+  analyzedPhotoCount: number;
 }
 
 function requireFirebaseServices(): { auth: Auth; db: Firestore; storage: FirebaseStorage } {
@@ -287,8 +291,9 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
   if (!machineModel) {
     throw new Error('Machine model is required.');
   }
+  const images = Array.isArray(input.images) ? input.images : [];
   if (!symptoms && !errorCode) {
-    throw new Error('Enter symptoms or an error code.');
+    throw new Error('Enter symptoms or an error code before using Repair Assist. Photos help confirm visible conditions.');
   }
 
   const data = await callManualEndpoint('generateRepairAssist', {
@@ -298,6 +303,7 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
     errorCode: errorCode || null,
     machineId: input.machineId?.trim() || null,
     machineNumber: input.machineNumber?.trim() || null,
+    images,
   });
 
   return {
@@ -308,5 +314,6 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
     answerMode: data.answerMode === 'manual-fallback' ? 'manual-fallback' : 'openai',
     manual: data.manual ?? null,
     citations: Array.isArray(data.citations) ? data.citations : [],
+    analyzedPhotoCount: typeof data.analyzedPhotoCount === 'number' ? data.analyzedPhotoCount : 0,
   };
 }

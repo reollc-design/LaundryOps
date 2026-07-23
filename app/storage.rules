@@ -71,38 +71,47 @@ service firebase.storage {
         || fileName.matches('.*\\.PDF');
     }
 
-    function isImage() {
-      return request.resource.contentType.matches('image/.*');
+    function isSupportedImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp)');
     }
 
     function isReasonableUpload() {
       return request.resource.size < 25 * 1024 * 1024;
     }
 
+    function isReasonableImageUpload() {
+      return request.resource.size <= 5 * 1024 * 1024;
+    }
+
     match /orgs/{orgId}/manuals/{userId}/{manualId}/{fileName} {
       allow read: if isMember(orgId);
-      allow write: if signedIn()
+      allow create, update: if signedIn()
         && isOrganizationActive(orgId)
         && request.auth.uid == userId
         && hasRole(orgId, ['owner', 'admin', 'manager'])
         && isReasonableUpload()
         && isPdf(fileName);
+      allow delete: if false;
     }
 
     match /orgs/{orgId}/machines/{machineId}/photos/{fileName=**} {
       allow read: if isMember(orgId);
-      allow write: if isOrganizationActive(orgId)
+      allow create, update: if isOrganizationActive(orgId)
         && isOperationalRole(orgId)
-        && isReasonableUpload()
-        && isImage();
+        && isReasonableImageUpload()
+        && isSupportedImage();
+      allow delete: if false;
     }
 
     match /orgs/{orgId}/workOrders/{workOrderId}/attachments/{fileName=**} {
       allow read: if isMember(orgId);
-      allow write: if isOrganizationActive(orgId)
-        && isOperationalRole(orgId)
-        && isReasonableUpload()
-        && (isImage() || isPdf(fileName));
+      allow create, update: if isOrganizationActive(orgId)
+        && hasRole(orgId, ['owner', 'admin', 'manager'])
+        && firestore.exists(/databases/(default)/documents/organizations/$(orgId)/workOrders/$(workOrderId))
+        && isSupportedImage()
+        && isReasonableImageUpload();
+      allow delete: if isOrganizationActive(orgId)
+        && hasRole(orgId, ['owner', 'admin', 'manager']);
     }
 
     match /orgs/{orgId}/exports/{exportId}/{fileName=**} {

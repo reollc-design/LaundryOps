@@ -1,14 +1,16 @@
 import type { Auth } from 'firebase/auth';
-import { addDoc, collection, deleteDoc, deleteField, doc, serverTimestamp, updateDoc, type Firestore } from 'firebase/firestore';
-import type { WorkOrderStatus } from '../data';
+import { collection, deleteDoc, deleteField, doc, getDoc, runTransaction, serverTimestamp, setDoc, updateDoc, type Firestore } from 'firebase/firestore';
+import { deleteObject, getBlob, ref, uploadBytes, type FirebaseStorage } from 'firebase/storage';
+import type { RepairAssistSourceEvidence, WorkOrderPhotoAttachment, WorkOrderStatus } from '../data';
+import { MAX_REPAIR_ASSIST_PHOTOS, MAX_REPAIR_ASSIST_PHOTO_BYTES } from '../repairAssistPhotos';
 import { getFirebaseClient } from './client';
 
-function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
+function requireFirebaseAuth(): { auth: Auth; db: Firestore; storage: FirebaseStorage } {
   const client = getFirebaseClient();
-  if (!client.auth || !client.db) {
+  if (!client.auth || !client.db || !client.storage) {
     throw new Error('Firebase is not configured. Add VITE_FIREBASE_* values to run work order flows.');
   }
-  return { auth: client.auth, db: client.db };
+  return { auth: client.auth, db: client.db, storage: client.storage };
 }
 
 function statusLabel(status: WorkOrderStatus): string {
@@ -33,6 +35,75 @@ function statusLabel(status: WorkOrderStatus): string {
 function createWorkOrderNumber(): string {
   const suffix = Date.now().toString().slice(-6);
   return `WO-${suffix}`;
+}
+
+function sanitizePhotoFilename(value: string): string {
+  const cleaned = value
+    .replace(/[^a-zA-Z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^\.+/, '')
+    .trim();
+  return cleaned || 'machine-photo.jpg';
+}
+
+function isSupportedPhoto(file: File): boolean {
+  return ['image/jpeg', 'image/png', 'image/webp'].includes(file.type.toLowerCase());
+}
+
+async function uploadWorkOrderPhotos(params: {
+  storage: FirebaseStorage;
+  organizationId: string;
+  workOrderId: string;
+  files: File[];
+  source: WorkOrderPhotoAttachment['source'];
+}): Promise<WorkOrderPhotoAttachment[]> {
+  if (params.files.length > MAX_REPAIR_ASSIST_PHOTOS) {
+    throw new Error(`Add up to ${MAX_REPAIR_ASSIST_PHOTOS} photos at a time.`);
+  }
+
+  const uploadedPaths: string[] = [];
+  const attachments: WorkOrderPhotoAttachment[] = [];
+  try {
+    for (const file of params.files) {
+      if (!isSupportedPhoto(file) || file.size <= 0 || file.size > MAX_REPAIR_ASSIST_PHOTO_BYTES) {
+        throw new Error('Each photo must be a valid JPG, PNG, or WebP image no larger than 5 MB.');
+      }
+      const fileName = sanitizePhotoFilename(file.name);
+      const storagePath = `orgs/${params.organizationId}/workOrders/${params.workOrderId}/attachments/${crypto.randomUUID()}-${fileName}`;
+      await uploadBytes(ref(params.storage, storagePath), file, {
+        contentType: file.type,
+        customMetadata: {
+          source: params.source,
+          workOrderId: params.workOrderId,
+        },
+      });
+      uploadedPaths.push(storagePath);
+      attachments.push({
+        storagePath,
+        fileName,
+        contentType: file.type,
+        sizeBytes: file.size,
+        source: params.source,
+      });
+    }
+    return attachments;
+  } catch (error) {
+    await Promise.allSettled(uploadedPaths.map((storagePath) => deleteObject(ref(params.storage, storagePath))));
+    throw error;
+  }
+}
+
+async function deleteStorageObjectIfPresent(storage: FirebaseStorage, storagePath: string): Promise<void> {
+  try {
+    await deleteObject(ref(storage, storagePath));
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : '';
+    if (code !== 'storage/object-not-found') {
+      throw error;
+    }
+  }
 }
 
 function normalizeMaintenanceDate(value: string): string {
@@ -61,6 +132,9 @@ export interface CreateWorkOrderFromDraftInput {
   otherCost?: number;
   notes?: string;
   aiDiagnosis?: string | null;
+  aiSource?: RepairAssistSourceEvidence | null;
+  photoFiles?: File[];
+  photoSource?: WorkOrderPhotoAttachment['source'];
   partsCost: number;
   laborCost: number;
   totalCostLabel: string;
@@ -68,10 +142,11 @@ export interface CreateWorkOrderFromDraftInput {
 
 export interface CreateWorkOrderFromDraftResult {
   workOrderId: string;
+  photoUploadError: string | null;
 }
 
 export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftInput): Promise<CreateWorkOrderFromDraftResult> {
-  const { auth, db } = requireFirebaseAuth();
+  const { auth, db, storage } = requireFirebaseAuth();
   const user = auth.currentUser;
   if (!user) {
     throw new Error('No authenticated user. Sign in before creating work orders.');
@@ -95,7 +170,8 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     throw new Error('Add symptoms, issue type, notes, an error code, or a cost before saving.');
   }
 
-  const workOrderRef = await addDoc(collection(db, `organizations/${input.organizationId}/workOrders`), {
+  const workOrderRef = doc(collection(db, `organizations/${input.organizationId}/workOrders`));
+  await setDoc(workOrderRef, {
     number: createWorkOrderNumber(),
     machineId: input.machineId ?? null,
     machineNumber: input.machineNumber,
@@ -114,6 +190,8 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     errorCode: input.errorCode ?? null,
     notes: input.notes ?? null,
     aiDiagnosis: input.aiDiagnosis ?? null,
+    aiSource: input.aiSource ?? null,
+    photoAttachments: [],
     source: 'Manual entry',
     partsCost: input.partsCost,
     laborCost: input.laborCost,
@@ -126,7 +204,89 @@ export async function createWorkOrderFromDraft(input: CreateWorkOrderFromDraftIn
     updatedBy: user.uid,
   });
 
-  return { workOrderId: workOrderRef.id };
+  let photoUploadError: string | null = null;
+  const photoFiles = input.photoFiles ?? [];
+  if (photoFiles.length > 0) {
+    let attachments: WorkOrderPhotoAttachment[] = [];
+    try {
+      attachments = await uploadWorkOrderPhotos({
+        storage,
+        organizationId: input.organizationId,
+        workOrderId: workOrderRef.id,
+        files: photoFiles,
+        source: input.photoSource ?? 'maintenance-record',
+      });
+      await updateDoc(workOrderRef, {
+        photoAttachments: attachments,
+        updatedAt: serverTimestamp(),
+        updatedBy: user.uid,
+      });
+    } catch (error) {
+      await Promise.allSettled(attachments.map((attachment) => deleteObject(ref(storage, attachment.storagePath))));
+      photoUploadError = error instanceof Error ? error.message : 'Photos could not be attached.';
+    }
+  }
+
+  return {
+    workOrderId: workOrderRef.id,
+    photoUploadError,
+  };
+}
+
+export interface AddWorkOrderPhotosInput {
+  organizationId: string;
+  workOrderId: string;
+  files: File[];
+}
+
+export async function addWorkOrderPhotos(input: AddWorkOrderPhotosInput): Promise<void> {
+  const { auth, db, storage } = requireFirebaseAuth();
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('No authenticated user. Sign in before adding photos.');
+  }
+  if (input.files.length === 0) {
+    return;
+  }
+
+  const workOrderRef = doc(db, `organizations/${input.organizationId}/workOrders/${input.workOrderId}`);
+  const attachments = await uploadWorkOrderPhotos({
+    storage,
+    organizationId: input.organizationId,
+    workOrderId: input.workOrderId,
+    files: input.files,
+    source: 'maintenance-record',
+  });
+  try {
+    await runTransaction(db, async (transaction) => {
+      const workOrderSnap = await transaction.get(workOrderRef);
+      if (!workOrderSnap.exists()) {
+        throw new Error('Maintenance record not found.');
+      }
+      const existingAttachments = Array.isArray(workOrderSnap.data().photoAttachments)
+        ? workOrderSnap.data().photoAttachments
+        : [];
+      if (existingAttachments.length + attachments.length > MAX_REPAIR_ASSIST_PHOTOS) {
+        throw new Error(`Add up to ${MAX_REPAIR_ASSIST_PHOTOS} photos to a maintenance record.`);
+      }
+      transaction.update(workOrderRef, {
+        photoAttachments: [...existingAttachments, ...attachments],
+        updatedAt: serverTimestamp(),
+        updatedBy: user.uid,
+      });
+    });
+  } catch (error) {
+    await Promise.allSettled(attachments.map((attachment) => deleteObject(ref(storage, attachment.storagePath))));
+    throw error;
+  }
+}
+
+export async function loadWorkOrderPhotoBlob(storagePath: string): Promise<Blob> {
+  const { auth, storage } = requireFirebaseAuth();
+  if (!auth.currentUser) {
+    throw new Error('Sign in before viewing maintenance photos.');
+  }
+  return getBlob(ref(storage, storagePath), MAX_REPAIR_ASSIST_PHOTO_BYTES);
 }
 
 export interface UpdateWorkOrderStatusInput {
@@ -166,6 +326,7 @@ export interface UpdateWorkOrderDetailsInput {
   errorCode?: string;
   notes?: string;
   aiDiagnosis?: string | null;
+  aiSource?: RepairAssistSourceEvidence | null;
   partsCost: number;
   laborCost: number;
   otherCost: number;
@@ -195,6 +356,7 @@ export async function updateWorkOrderDetails(input: UpdateWorkOrderDetailsInput)
     errorCode: input.errorCode ?? null,
     notes: input.notes ?? null,
     aiDiagnosis: input.aiDiagnosis ?? null,
+    aiSource: input.aiSource ?? null,
     partsCost: input.partsCost,
     laborCost: input.laborCost,
     otherCost: input.otherCost,
@@ -212,12 +374,21 @@ export interface DeleteWorkOrderInput {
 }
 
 export async function deleteWorkOrder(input: DeleteWorkOrderInput): Promise<void> {
-  const { auth, db } = requireFirebaseAuth();
+  const { auth, db, storage } = requireFirebaseAuth();
   const user = auth.currentUser;
   if (!user) {
     throw new Error('No authenticated user. Sign in before deleting work orders.');
   }
 
   const workOrderRef = doc(db, `organizations/${input.organizationId}/workOrders/${input.workOrderId}`);
+  const workOrderSnap = await getDoc(workOrderRef);
+  const attachments = workOrderSnap.exists() && Array.isArray(workOrderSnap.data().photoAttachments)
+    ? workOrderSnap.data().photoAttachments as Array<Record<string, unknown>>
+    : [];
+  const storagePaths = attachments
+    .map((attachment) => typeof attachment.storagePath === 'string' ? attachment.storagePath : null)
+    .filter((storagePath): storagePath is string =>
+      Boolean(storagePath?.startsWith(`orgs/${input.organizationId}/workOrders/${input.workOrderId}/attachments/`)));
   await deleteDoc(workOrderRef);
+  await Promise.allSettled(storagePaths.map((storagePath) => deleteStorageObjectIfPresent(storage, storagePath)));
 }

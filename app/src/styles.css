@@ -3509,6 +3509,8 @@ button:focus-visible {
 
 .assist-photos {
   display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -3516,6 +3518,100 @@ button:focus-visible {
 .attach-photo {
   width: 92px;
   color: var(--text);
+}
+
+.attach-photo:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.selected-photo-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.assist-photos .selected-photo-strip {
+  margin-bottom: 0;
+}
+
+.selected-photo-card {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  flex: 0 0 92px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #eef3f7;
+}
+
+.selected-photo-card img,
+.work-order-photo-gallery img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.selected-photo-card button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 50%;
+  background: rgba(8, 21, 38, 0.82);
+  color: #fff;
+}
+
+.selected-photo-card button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.work-order-photo-gallery {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.work-order-photo-gallery img {
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.photo-retry-panel {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 12px;
+  padding: 12px;
+  border: 1px solid #e2b41f;
+  border-radius: 8px;
+  background: #fff9df;
+}
+
+.photo-retry-panel span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .manual-toggle {

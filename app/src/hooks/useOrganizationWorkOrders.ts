@@ -1,7 +1,7 @@
 import { Timestamp, collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { useEffect, useMemo, useState } from 'react';
-import type { WorkOrderStatus, WorkOrderSummary } from '../data';
+import type { RepairAssistSourceEvidence, WorkOrderPhotoAttachment, WorkOrderStatus, WorkOrderSummary } from '../data';
 import { getFirebaseClient } from '../firebase/client';
 
 interface OrganizationWorkOrdersState {
@@ -30,6 +30,82 @@ function asNumber(value: unknown): number | null {
     }
   }
   return null;
+}
+
+function asPhotoAttachments(value: unknown): WorkOrderPhotoAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) {
+      return [];
+    }
+    const data = entry as Record<string, unknown>;
+    const storagePath = asString(data.storagePath);
+    const fileName = asString(data.fileName);
+    const contentType = asString(data.contentType);
+    const sizeBytes = asNumber(data.sizeBytes);
+    const source = asString(data.source);
+    if (
+      !storagePath
+      || !fileName
+      || !contentType
+      || sizeBytes === null
+      || (source !== 'repair-assist' && source !== 'maintenance-record')
+    ) {
+      return [];
+    }
+    return [{
+      storagePath,
+      fileName,
+      contentType,
+      sizeBytes,
+      source,
+    } satisfies WorkOrderPhotoAttachment];
+  });
+}
+
+function asRepairAssistSource(value: unknown): RepairAssistSourceEvidence | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const data = value as Record<string, unknown>;
+  const manualId = asString(data.manualId);
+  const manualTitle = asString(data.manualTitle);
+  const manualMachineModel = asString(data.manualMachineModel);
+  const answerMode = asString(data.answerMode);
+  const analyzedPhotoCount = asNumber(data.analyzedPhotoCount);
+  const citations = Array.isArray(data.citations)
+    ? data.citations.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) {
+        return [];
+      }
+      const citation = entry as Record<string, unknown>;
+      const chunkId = asString(citation.chunkId);
+      const preview = asString(citation.preview);
+      return chunkId && preview ? [{ chunkId, preview }] : [];
+    })
+    : [];
+  if (
+    !manualId
+    || !manualTitle
+    || !manualMachineModel
+    || (answerMode !== 'openai' && answerMode !== 'manual-fallback')
+    || analyzedPhotoCount === null
+  ) {
+    return undefined;
+  }
+  return {
+    manualId,
+    manualTitle,
+    manualMachineModel,
+    model: asString(data.model),
+    sourceMode: asString(data.sourceMode),
+    answerMode,
+    analyzedPhotoCount,
+    citations,
+  };
 }
 
 function toEpochMs(value: unknown): number | null {
@@ -223,6 +299,8 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             errorCode: asString(data.errorCode) ?? undefined,
             notes: asString(data.notes) ?? undefined,
             aiDiagnosis: asString(data.aiDiagnosis) ?? undefined,
+            aiSource: asRepairAssistSource(data.aiSource),
+            photoAttachments: asPhotoAttachments(data.photoAttachments),
             estimate: asString(data.estimate) ?? totalCost,
           } satisfies WorkOrderSummary;
         })

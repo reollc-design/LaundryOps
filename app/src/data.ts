@@ -18,6 +18,28 @@ export type ManualStatus = 'indexed' | 'processing' | 'missing';
 export type WorkOrderStatus = 'planned' | 'open' | 'assigned' | 'in-progress' | 'waiting' | 'completed';
 export type WorkOrderPriority = 'High' | 'Standard' | 'Low';
 
+export interface WorkOrderPhotoAttachment {
+  storagePath: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  source: 'repair-assist' | 'maintenance-record';
+}
+
+export interface RepairAssistSourceEvidence {
+  manualId: string;
+  manualTitle: string;
+  manualMachineModel: string;
+  model: string | null;
+  sourceMode: string | null;
+  answerMode: 'openai' | 'manual-fallback';
+  analyzedPhotoCount: number;
+  citations: Array<{
+    chunkId: string;
+    preview: string;
+  }>;
+}
+
 export interface UrgentMachine {
   id: string;
   machineNumber: string;
@@ -56,6 +78,8 @@ export interface WorkOrderSummary {
   errorCode?: string;
   notes?: string;
   aiDiagnosis?: string;
+  aiSource?: RepairAssistSourceEvidence;
+  photoAttachments?: WorkOrderPhotoAttachment[];
 }
 
 export interface ReportMetric {
