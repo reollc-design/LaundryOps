@@ -66,3 +66,28 @@ export function nextManualOcrOutputWaitAttempt(currentValue: unknown): number {
   const current = positiveInteger(currentValue) ?? 0;
   return current + 1;
 }
+
+export function documentAiBatchStartFailureCategory(errorCode: unknown): string {
+  const code = typeof errorCode === 'string' || typeof errorCode === 'number'
+    ? String(errorCode)
+    : '';
+  switch (code) {
+    case '3':
+    case 'INVALID_ARGUMENT':
+      return 'invalid_request';
+    case '5':
+    case 'NOT_FOUND':
+      return 'processor_or_resource_not_found';
+    case '7':
+    case 'PERMISSION_DENIED':
+      return 'permission_denied';
+    case '8':
+    case 'RESOURCE_EXHAUSTED':
+      return 'provider_quota_exhausted';
+    case '13':
+    case 'INTERNAL':
+      return 'provider_internal_error';
+    default:
+      return 'unknown_provider_error';
+  }
+}

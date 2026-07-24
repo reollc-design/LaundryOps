@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { completePendingManualOcrJobs } from './lib/manual-ocr-worker.js';
 import {
+  documentAiBatchStartFailureCategory,
   manualOcrBatchOperationState,
   nextManualOcrOutputWaitAttempt,
   storedManualOcrBatchJobs,
@@ -247,6 +248,12 @@ test('scheduler starts only one queued Document AI batch and leaves later PDF pa
   assert.equal(completionWrite.ocrBatchJobs[0].outputPrefix, 'output/part-1/');
   assert.equal(completionWrite.ocrBatchJobs[0].operationName, 'operations/one');
   assert.equal(completionWrite.ocrBatchJobs[1].operationName, undefined);
+});
+
+test('classifies batch-start failures without logging provider messages or request data', () => {
+  assert.equal(documentAiBatchStartFailureCategory(7), 'permission_denied');
+  assert.equal(documentAiBatchStartFailureCategory(13), 'provider_internal_error');
+  assert.equal(documentAiBatchStartFailureCategory('INVALID_ARGUMENT'), 'invalid_request');
 });
 
 test('scheduler does not double-prefix a legacy full batch output URI', async () => {

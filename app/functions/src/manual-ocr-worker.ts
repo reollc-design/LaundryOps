@@ -7,7 +7,12 @@ import {
   startManualOcrBatch,
 } from './manual-ocr.js';
 import { safeExternalErrorDetails } from './repair-assist.js';
-import { manualOcrBatchOperationState, nextManualOcrOutputWaitAttempt, storedManualOcrBatchJobs } from './manual-ocr-worker-state.js';
+import {
+  documentAiBatchStartFailureCategory,
+  manualOcrBatchOperationState,
+  nextManualOcrOutputWaitAttempt,
+  storedManualOcrBatchJobs,
+} from './manual-ocr-worker-state.js';
 
 const MAX_OCR_OUTPUT_WAIT_ATTEMPTS = 5;
 const MAX_OCR_WORKER_FAILURE_ATTEMPTS = 3;
@@ -207,7 +212,12 @@ export async function completePendingManualOcrJobs(params: {
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
     } catch (error) {
-      logger.error('manual_ocr_batch_start_failed', { manualId: manualSnap.id, ...safeExternalErrorDetails(error) });
+      const errorDetails = safeExternalErrorDetails(error);
+      logger.error('manual_ocr_batch_start_failed', {
+        manualId: manualSnap.id,
+        providerFailureCategory: documentAiBatchStartFailureCategory(errorDetails.errorCode),
+        ...errorDetails,
+      });
       // Once the provider accepted a job, never retry it blindly. The recorded starting claim
       // blocks duplicate billable work until the worker resolves the ambiguous start safely.
       if (batchStarted) return;
