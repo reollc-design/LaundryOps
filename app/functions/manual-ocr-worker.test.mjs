@@ -221,12 +221,14 @@ test('scheduler starts only one queued Document AI batch and leaves later PDF pa
     ],
   });
   let batchStarts = 0;
+  let batchOutputUri = null;
   await completePendingManualOcrJobs({
     db: fakeDb(manualSnap),
     createClient: () => ({
       processorPath: () => 'processor',
-      batchProcessDocuments: async () => {
+      batchProcessDocuments: async (request) => {
         batchStarts += 1;
+        batchOutputUri = request.documentOutputConfig.gcsOutputConfig.gcsUri;
         return [{ name: 'operations/one' }];
       },
       checkBatchProcessDocumentsProgress: async () => ({ latestResponse: { done: false } }),
@@ -239,10 +241,40 @@ test('scheduler starts only one queued Document AI batch and leaves later PDF pa
   });
 
   assert.equal(batchStarts, 1);
+  assert.equal(batchOutputUri, 'gs://bucket/output/part-1/');
   const completionWrite = manualSnap.writes.at(-1);
   assert.equal(completionWrite.ocrStatus, 'batch_processing');
+  assert.equal(completionWrite.ocrBatchJobs[0].outputPrefix, 'output/part-1/');
   assert.equal(completionWrite.ocrBatchJobs[0].operationName, 'operations/one');
   assert.equal(completionWrite.ocrBatchJobs[1].operationName, undefined);
+});
+
+test('scheduler does not double-prefix a legacy full batch output URI', async () => {
+  const manualSnap = makePendingManual({
+    ocrStatus: 'batch_queued',
+    ocrBatchJobs: [{
+      partIndex: 0,
+      sourceGcsUri: 'gs://bucket/input.pdf',
+      outputPrefix: 'gs://bucket/output/part-1/',
+    }],
+  });
+  let batchOutputUri = null;
+  await completePendingManualOcrJobs({
+    db: fakeDb(manualSnap),
+    createClient: () => ({
+      processorPath: () => 'processor',
+      batchProcessDocuments: async (request) => {
+        batchOutputUri = request.documentOutputConfig.gcsOutputConfig.gcsUri;
+        return [{ name: 'operations/one' }];
+      },
+      checkBatchProcessDocumentsProgress: async () => ({ latestResponse: { done: false } }),
+    }),
+    projectId: 'project', location: 'us', processorId: 'processor',
+    bucket: { getFiles: async () => [[]] },
+    finalize: async () => { throw new Error('should not finalize'); },
+  });
+
+  assert.equal(batchOutputUri, 'gs://bucket/output/part-1/');
 });
 
 test('an uncertain batch start is claimed and never started a second time', async () => {

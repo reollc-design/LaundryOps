@@ -92,6 +92,15 @@ function artifactPrefixes(jobs: Array<{ outputPrefix: string }>, inputPrefix: st
   return [...jobs.map((job) => job.outputPrefix), ...(inputPrefix ? [inputPrefix] : [])];
 }
 
+function batchOutputGcsUri(sourceGcsUri: string, outputPrefix: string): string {
+  if (outputPrefix.startsWith('gs://')) return outputPrefix;
+  const sourceMatch = /^gs:\/\/([^/]+)\//.exec(sourceGcsUri);
+  if (!sourceMatch) {
+    throw new Error('Document OCR job source location is invalid.');
+  }
+  return `gs://${sourceMatch[1]}/${outputPrefix.replace(/^\/+/, '')}`;
+}
+
 async function claimQueuedBatchStart(params: {
   db: Firestore;
   manualSnap: DocumentSnapshot;
@@ -179,7 +188,9 @@ export async function completePendingManualOcrJobs(params: {
         client: params.createClient(params.location),
         config: { projectId: params.projectId, location: params.location, processorId: params.processorId },
         sourceGcsUri,
-        outputPrefix: nextJob.outputPrefix,
+        // Firestore keeps the relative object prefix for cleanup. Document AI requires
+        // the same prefix as a complete Cloud Storage URI for batch output.
+        outputPrefix: batchOutputGcsUri(sourceGcsUri, nextJob.outputPrefix),
       });
       batchStarted = true;
       const updatedJobs = jobs.map((job) => job.partIndex === nextJob.partIndex
