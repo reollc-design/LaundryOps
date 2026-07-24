@@ -70,13 +70,14 @@ import {
   type OwnerOnboardingDraft,
 } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
-import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, uploadManualAndIndex, type ManualRepairAssistResult } from './firebase/manuals';
+import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, retryOrganizationManualOcr, uploadManualAndIndex, type ManualRepairAssistResult } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
 import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWorkOrderPhotoBlob, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOrganizationTrial';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
+import { useOrganizationMembership } from './hooks/useOrganizationMembership';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
 import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
@@ -649,6 +650,7 @@ export function App() {
   const workspaceTrialExpired = orgConnected && organizationTrial.status === 'expired';
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
+  const canManageManuals = useOrganizationMembership(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
   const workspaceLabel = userProfile.profile?.displayName ?? 'Company Account';
   const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
@@ -1263,6 +1265,7 @@ export function App() {
                     orgManualsLoading={orgManuals.loading}
                     orgManualsError={orgManuals.error}
                     orgManualsData={orgManuals.manuals}
+                    canManageManuals={canManageManuals}
                   />
                     )}
                     {activeScreen === 'account' && (
@@ -2948,6 +2951,7 @@ function ManualLibraryScreen({
   orgManualsLoading,
   orgManualsError,
   orgManualsData,
+  canManageManuals,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   orgConnected: boolean;
@@ -2955,6 +2959,7 @@ function ManualLibraryScreen({
   orgManualsLoading: boolean;
   orgManualsError: string | null;
   orgManualsData: ManualLibraryRow[];
+  canManageManuals: boolean;
 }) {
   const [machineModel, setMachineModel] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -2967,17 +2972,22 @@ function ManualLibraryScreen({
   const [reindexBusy, setReindexBusy] = useState(false);
   const [reindexError, setReindexError] = useState<string | null>(null);
   const [reindexSuccess, setReindexSuccess] = useState<string | null>(null);
+  const [retryBusyId, setRetryBusyId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [retrySuccess, setRetrySuccess] = useState<string | null>(null);
   const [filePickerKey, setFilePickerKey] = useState(0);
 
   const fallbackManualRows: ManualLibraryRow[] = manualRows.map((manual) => ({
     ...manual,
     indexError: null,
+    canRetryOcr: false,
   }));
   const manualData = orgConnected ? orgManualsData : fallbackManualRows;
   const indexedCount = manualData.filter((manual) => manual.status === 'indexed').length;
   const missingCount = manualData.filter((manual) => manual.status === 'missing').length;
-  const uploadReady = Boolean(orgConnected && organizationId && machineModel.trim() && selectedFile);
+  const uploadReady = Boolean(orgConnected && organizationId && canManageManuals && machineModel.trim() && selectedFile);
   const reindexReady = Boolean(orgConnected && organizationId && manualData.length > 0);
+  const manualIndexingBusy = reindexBusy || retryBusyId !== null;
 
   const handleUpload = async (): Promise<void> => {
     setUploadError(null);
@@ -2987,8 +2997,8 @@ function ManualLibraryScreen({
     setReindexError(null);
     setReindexSuccess(null);
 
-    if (!orgConnected || !organizationId) {
-      setUploadError('Complete onboarding first to connect manual uploads to your organization account.');
+    if (!orgConnected || !organizationId || !canManageManuals) {
+      setUploadError('Only company owners, admins, and managers can upload manuals.');
       return;
     }
     if (!machineModel.trim()) {
@@ -3029,8 +3039,12 @@ function ManualLibraryScreen({
     setReindexError(null);
     setReindexSuccess(null);
 
-    if (!orgConnected || !organizationId) {
-      setDeleteError('Complete onboarding first before deleting manuals.');
+    if (!orgConnected || !organizationId || !canManageManuals) {
+      setDeleteError('Only company owners, admins, and managers can delete manuals.');
+      return;
+    }
+    if (manualIndexingBusy || manual.status === 'processing') {
+      setDeleteError('Wait for manual indexing to finish before deleting this PDF.');
       return;
     }
 
@@ -3061,7 +3075,7 @@ function ManualLibraryScreen({
     setDeleteError(null);
     setDeleteSuccess(null);
 
-    if (!orgConnected || !organizationId) {
+    if (!orgConnected || !organizationId || !canManageManuals || retryBusyId) {
       setReindexError('Complete onboarding first before re-indexing manuals.');
       return;
     }
@@ -3081,6 +3095,39 @@ function ManualLibraryScreen({
       setReindexError(getErrorMessage(error, 'Could not re-index manuals. Try again.'));
     } finally {
       setReindexBusy(false);
+    }
+  };
+
+  const handleRetryManualOcr = async (manual: ManualLibraryRow): Promise<void> => {
+    setRetryError(null);
+    setRetrySuccess(null);
+    setUploadError(null);
+    setUploadSuccess(null);
+    setReindexError(null);
+    setReindexSuccess(null);
+    setDeleteError(null);
+    setDeleteSuccess(null);
+
+    if (!orgConnected || !organizationId || !canManageManuals || !manual.canRetryOcr || manualIndexingBusy) {
+      setRetryError('This manual is not available for OCR retry.');
+      return;
+    }
+
+    const confirmed = window.confirm(`Retry OCR for ${manual.title}? This reuses the uploaded PDF and may use Document AI processing.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setRetryBusyId(manual.id);
+    try {
+      const result = await retryOrganizationManualOcr({ organizationId, manualId: manual.id });
+      setRetrySuccess(result.processing
+        ? `OCR retry started for ${manual.title}. It will finish in the background.`
+        : `Manual re-indexed for ${manual.model}.`);
+    } catch (error) {
+      setRetryError(getErrorMessage(error, 'Could not retry OCR. Try again.'));
+    } finally {
+      setRetryBusyId(null);
     }
   };
 
@@ -3114,7 +3161,7 @@ function ManualLibraryScreen({
               value={machineModel}
               placeholder="Ex: SFNNCASG113TN01"
               onChange={(event) => setMachineModel(event.target.value)}
-              disabled={uploadBusy}
+              disabled={uploadBusy || !canManageManuals}
             />
           </label>
           <label>
@@ -3124,7 +3171,7 @@ function ManualLibraryScreen({
               type="file"
               accept="application/pdf,.pdf"
               onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-              disabled={uploadBusy}
+              disabled={uploadBusy || !canManageManuals}
             />
           </label>
           {selectedFile && (
@@ -3138,7 +3185,7 @@ function ManualLibraryScreen({
           className={uploadBusy ? 'secondary-action full-width-action' : 'primary-action'}
           type="button"
           onClick={() => void handleUpload()}
-          disabled={uploadBusy}
+          disabled={uploadBusy || !uploadReady}
         >
           {uploadBusy ? 'Processing Manual...' : 'Upload & Index Manual'}
         </button>
@@ -3150,6 +3197,9 @@ function ManualLibraryScreen({
         )}
         {!orgConnected && (
           <p className="search-hint">Complete onboarding first to connect manual uploads to your organization account.</p>
+        )}
+        {orgConnected && !canManageManuals && (
+          <p className="search-hint">Only company owners, admins, and managers can upload or manage manuals.</p>
         )}
         {uploadError && (
           <div className="auth-message">
@@ -3170,12 +3220,12 @@ function ManualLibraryScreen({
           <h2>Manual Library</h2>
           <span>{manualData.length} models</span>
         </div>
-        {orgConnected && (
+        {canManageManuals && (
           <button
             className="secondary-action full-width-action"
             type="button"
             onClick={() => void handleReindexManuals()}
-            disabled={!reindexReady || reindexBusy}
+            disabled={!reindexReady || manualIndexingBusy}
           >
             {reindexBusy ? 'Re-indexing Manuals...' : 'Re-index Uploaded Manuals'}
           </button>
@@ -3199,12 +3249,28 @@ function ManualLibraryScreen({
             <ManualRow
               key={manual.id}
               manual={manual}
-              canDelete={orgConnected}
+              canDelete={canManageManuals}
               deleting={deleteBusyId === manual.id}
+              deleteDisabled={manualIndexingBusy || manual.status === 'processing'}
+              retrying={retryBusyId === manual.id}
+              retryDisabled={manualIndexingBusy}
               onDelete={() => void handleDeleteManual(manual)}
+              onRetryOcr={() => void handleRetryManualOcr(manual)}
             />
           ))}
         </div>
+        {retryError && (
+          <div className="auth-message">
+            <strong>Manual OCR retry failed</strong>
+            <span>{retryError}</span>
+          </div>
+        )}
+        {retrySuccess && (
+          <div className="profile-status-line">
+            <Check size={16} />
+            <span>{retrySuccess}</span>
+          </div>
+        )}
         {deleteError && (
           <div className="auth-message">
             <strong>Manual delete failed</strong>
@@ -3238,12 +3304,20 @@ function ManualRow({
   manual,
   canDelete,
   deleting,
+  deleteDisabled,
+  retrying,
+  retryDisabled,
   onDelete,
+  onRetryOcr,
 }: {
   manual: ManualLibraryRow;
   canDelete: boolean;
   deleting: boolean;
+  deleteDisabled: boolean;
+  retrying: boolean;
+  retryDisabled: boolean;
   onDelete: () => void;
+  onRetryOcr: () => void;
 }) {
   const status: ManualStatus = manual.status;
   const statusLabel: Record<ManualStatus, string> = {
@@ -3265,12 +3339,23 @@ function ManualRow({
         <StatusBadge status={status === 'indexed' ? 'running' : status === 'processing' ? 'waiting' : 'down'}>{statusLabel[status]}</StatusBadge>
         <span>{manual.coverage}</span>
         <small>{manual.pages}</small>
+        {canDelete && manual.canRetryOcr && (
+          <button
+            className="manual-retry-action"
+            type="button"
+            onClick={onRetryOcr}
+            disabled={retryDisabled}
+            aria-label={`Retry OCR for ${manual.model}`}
+          >
+            {retrying ? 'Retrying...' : 'Retry OCR'}
+          </button>
+        )}
         {canDelete && (
           <button
             className="manual-delete-action"
             type="button"
             onClick={onDelete}
-            disabled={deleting}
+            disabled={deleting || deleteDisabled}
             aria-label={`Delete manual for ${manual.model}`}
           >
             <Trash2 size={13} /> {deleting ? 'Deleting...' : 'Delete'}

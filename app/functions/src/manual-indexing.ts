@@ -37,6 +37,10 @@ export function isManualOcrJobActive(status: unknown): boolean {
   return status === 'batch_queued' || status === 'batch_starting' || status === 'batch_processing';
 }
 
+export function isManualDeletionReserved(reservationExpiresAtMs: number | null, nowMs: number): boolean {
+  return reservationExpiresAtMs !== null && reservationExpiresAtMs > nowMs;
+}
+
 function compactKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }

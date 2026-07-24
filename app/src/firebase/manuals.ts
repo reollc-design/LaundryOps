@@ -57,6 +57,15 @@ export interface DeleteManualInput {
   manualId: string;
 }
 
+export interface RetryManualOcrInput {
+  organizationId: string;
+  manualId: string;
+}
+
+export interface RetryManualOcrResult {
+  processing: boolean;
+}
+
 export interface ReindexManualsInput {
   organizationId: string;
 }
@@ -259,6 +268,26 @@ export async function deleteOrganizationManual(input: DeleteManualInput): Promis
     organizationId,
     manualId,
   });
+}
+
+export async function retryOrganizationManualOcr(input: RetryManualOcrInput): Promise<RetryManualOcrResult> {
+  const organizationId = input.organizationId.trim();
+  const manualId = input.manualId.trim();
+  if (!organizationId) {
+    throw new Error('Missing organization ID.');
+  }
+  if (!manualId) {
+    throw new Error('Missing manual ID.');
+  }
+
+  const data = await callManualEndpoint('indexOrganizationManual', {
+    organizationId,
+    manualId,
+  });
+
+  return {
+    processing: Boolean(data.processing),
+  };
 }
 
 export async function reindexOrganizationManuals(input: ReindexManualsInput): Promise<ReindexManualsResult> {

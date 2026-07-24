@@ -17,6 +17,7 @@ import {
   chunkManualText,
   errorCodeAliases,
   isManualIndexLeaseActive,
+  isManualDeletionReserved,
   isManualOcrJobActive,
   manualModelMatchesMachine,
   processManualPages,
@@ -104,6 +105,7 @@ const MAX_MACHINE_MODEL_LENGTH = 500;
 const MANUAL_REINDEX_PAGE_SIZE = 100;
 const FIRESTORE_BATCH_WRITE_LIMIT = 450;
 const MANUAL_INDEX_LEASE_DURATION_MS = 10 * 60 * 1000;
+const MANUAL_DELETION_RESERVATION_DURATION_MS = 10 * 60 * 1000;
 const MANUAL_OCR_OUTPUT_PREFIX = '__laundryops/manual-ocr';
 const MANUAL_OCR_INPUT_PREFIX = '__laundryops/manual-ocr-input';
 const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
@@ -657,12 +659,17 @@ async function acquireManualIndexLease(params: {
       throw new Error('Manual record not found.');
     }
     const manualData = manualSnap.data() ?? {};
+    if (isManualDeletionReserved(timestampMilliseconds(manualData.manualDeletionReservationExpiresAt), nowMs)) {
+      throw new Error('Manual is being deleted. Please wait for that operation to finish.');
+    }
     const leaseExpiresAtMs = timestampMilliseconds(manualData.indexingLeaseExpiresAt);
     if (isManualIndexLeaseActive(leaseExpiresAtMs, nowMs)) {
       throw new Error('Manual is already being indexed. Please wait for it to finish.');
     }
 
     transaction.set(params.manualRef, {
+      manualDeletionReservationToken: FieldValue.delete(),
+      manualDeletionReservationExpiresAt: FieldValue.delete(),
       indexingLeaseToken: token,
       indexingLeaseExpiresAt: leaseExpiresAt,
       indexingLeaseStartedAt: FieldValue.serverTimestamp(),
@@ -1963,23 +1970,63 @@ export const deleteOrganizationManual = onRequest(
         throw new Error('Manual record not found.');
       }
 
-      const manualData = manualSnap.data() ?? {};
-      const storagePath = optionalManualStoragePath(manualData.storagePath, organizationId, manualId);
-      if (storagePath) {
-        await getStorage().bucket().file(storagePath).delete().catch((error: unknown) => {
-          const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : null;
-          if (code !== 404 && code !== '404') {
-            throw error;
-          }
-        });
-      }
-
-      const deletedIndexCount = await deleteManualIndexCollections({
-        db,
-        manualRef,
-        manualData,
+      const deletionReservationToken = randomUUID();
+      const manualData = await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(manualRef);
+        if (!current.exists) {
+          throw new Error('Manual record not found.');
+        }
+        const currentData = current.data() ?? {};
+        const nowMs = Date.now();
+        if (isManualDeletionReserved(timestampMilliseconds(currentData.manualDeletionReservationExpiresAt), nowMs)) {
+          throw new Error('Manual deletion is already in progress.');
+        }
+        const activeLease = isManualIndexLeaseActive(
+          timestampMilliseconds(currentData.indexingLeaseExpiresAt),
+          nowMs,
+        );
+        const activeOcr = isManualOcrJobActive(currentData.ocrStatus);
+        const indexingStatus = optionalString(currentData.indexingStatus);
+        if (activeLease || activeOcr || indexingStatus === 'processing' || indexingStatus === 'ocr_processing') {
+          throw new Error('Manual indexing is still in progress. Wait for it to finish before deleting this PDF.');
+        }
+        transaction.set(manualRef, {
+          manualDeletionReservationToken: deletionReservationToken,
+          manualDeletionReservationExpiresAt: Timestamp.fromMillis(nowMs + MANUAL_DELETION_RESERVATION_DURATION_MS),
+        }, { merge: true });
+        return currentData;
       });
-      await manualRef.delete();
+      const storagePath = optionalManualStoragePath(manualData.storagePath, organizationId, manualId);
+      let deletedIndexCount = 0;
+      try {
+        if (storagePath) {
+          await getStorage().bucket().file(storagePath).delete().catch((error: unknown) => {
+            const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : null;
+            if (code !== 404 && code !== '404') {
+              throw error;
+            }
+          });
+        }
+
+        deletedIndexCount = await deleteManualIndexCollections({
+          db,
+          manualRef,
+          manualData,
+        });
+        await manualRef.delete();
+      } catch (deleteFailure) {
+        await db.runTransaction(async (transaction) => {
+          const current = await transaction.get(manualRef);
+          if (!current.exists || current.data()?.manualDeletionReservationToken !== deletionReservationToken) {
+            return;
+          }
+          transaction.set(manualRef, {
+            manualDeletionReservationToken: FieldValue.delete(),
+            manualDeletionReservationExpiresAt: FieldValue.delete(),
+          }, { merge: true });
+        }).catch(() => undefined);
+        throw deleteFailure;
+      }
 
       addRateLimitHeaders(response);
       response.status(200).json({

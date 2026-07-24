@@ -3080,6 +3080,24 @@ button:focus-visible {
   font-weight: 900;
 }
 
+.manual-retry-action {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 9px;
+  border: 1px solid var(--primary);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.manual-retry-action:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .manual-delete-action:disabled {
   cursor: wait;
   opacity: 0.68;

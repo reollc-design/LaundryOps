@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "tsc --noEmit",
-    "test": "npm run build && node --experimental-strip-types manual-indexing.test.mjs && node --experimental-strip-types manual-ocr.test.mjs && node --experimental-strip-types manual-ocr-worker.test.mjs && node --experimental-strip-types repair-assist.test.mjs && node --experimental-strip-types request-protection.test.mjs && node --experimental-strip-types stripe-webhook-state.test.mjs && node --experimental-strip-types trial.test.mjs"
+    "test": "npm run build && node --experimental-strip-types manual-indexing.test.mjs && node --experimental-strip-types manual-deletion-reservation.test.mjs && node --experimental-strip-types manual-ocr.test.mjs && node --experimental-strip-types manual-ocr-worker.test.mjs && node --experimental-strip-types repair-assist.test.mjs && node --experimental-strip-types request-protection.test.mjs && node --experimental-strip-types stripe-webhook-state.test.mjs && node --experimental-strip-types trial.test.mjs"
   },
   "dependencies": {
     "@google-cloud/documentai": "^9.6.2",

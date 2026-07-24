@@ -14,6 +14,7 @@ export interface ManualLibraryRow {
   updated: string;
   source: string;
   indexError: string | null;
+  canRetryOcr: boolean;
 }
 
 interface OrganizationManualsState {
@@ -149,6 +150,8 @@ export function useOrganizationManuals(user: User | null, organizationId: string
           const pageCount = asNumber(data.pageCount);
           const indexError = asString(data.indexError);
           const source = asString(data.source);
+          const storagePath = asString(data.storagePath);
+          const ocrStatus = asString(data.ocrStatus);
           const updatedAt = asDate(data.updatedAt) ?? asDate(data.indexedAt) ?? asDate(data.createdAt);
 
           return {
@@ -161,6 +164,7 @@ export function useOrganizationManuals(user: User | null, organizationId: string
             updated: updatedLabel(status, updatedAt),
             source: sourceLabel(status, indexError, source),
             indexError,
+            canRetryOcr: Boolean(storagePath && ocrStatus === 'failed'),
           } satisfies ManualLibraryRow;
         });
 
