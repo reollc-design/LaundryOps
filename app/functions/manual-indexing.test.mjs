@@ -5,7 +5,9 @@ import {
   errorCodeAliases,
   isManualOcrJobActive,
   isManualIndexLeaseActive,
+  machineManualLinkFieldsChanged,
   manualErrorCodeAliases,
+  manualMachineCoverageUpdates,
   manualModelMatchesMachine,
   processManualPages,
 } from './src/manual-indexing.ts';
@@ -131,6 +133,7 @@ test('matches manual model numbers despite case, spacing, dashes, make, or produ
     { modelNumber: 'SFNNCASG113TN01' },
     { modelNumber: 'sfnncasg113tn01' },
     { modelNumber: 'SFN-NCASG-113TN01' },
+    { modelNumber: 'Speed Queen Horizon SFNNCASG113TN01' },
     { model: 'Speed Queen Horizon SFNNCASG113TN01' },
   ];
 
@@ -228,6 +231,53 @@ test('counts all eight machines that share the same normalized model number', ()
     machines.filter((machine) => manualModelMatchesMachine('SFNNCASG113TN01', machine)).length,
     8,
   );
+});
+
+test('refreshes only affected manual coverage after a machine create, edit, or delete', () => {
+  const manuals = [
+    { id: 'speed-queen', machineModel: 'SCN30LCFXU3001' },
+    { id: 'adc', machineModel: 'ADC285' },
+  ];
+  const sixSpeedQueenMachines = Array.from({ length: 6 }, () => ({
+    make: 'Speed Queen',
+    modelNumber: 'SCN30LCFXU3001',
+  }));
+  const seventhSpeedQueen = {
+    make: 'Speed Queen',
+    modelNumber: 'Speed Queen Triple SCN-30LCFXU3001',
+  };
+
+  const afterCreate = manualMachineCoverageUpdates({
+    manuals,
+    machines: [...sixSpeedQueenMachines, seventhSpeedQueen],
+    after: seventhSpeedQueen,
+  });
+  assert.deepEqual(afterCreate, [{ manualId: 'speed-queen', linkedMachineCount: 7 }]);
+
+  const afterEdit = manualMachineCoverageUpdates({
+    manuals,
+    machines: [...sixSpeedQueenMachines, { make: 'ADC', modelNumber: '285' }],
+    before: seventhSpeedQueen,
+    after: { make: 'ADC', modelNumber: '285' },
+  });
+  assert.deepEqual(afterEdit, [
+    { manualId: 'speed-queen', linkedMachineCount: 6 },
+    { manualId: 'adc', linkedMachineCount: 1 },
+  ]);
+
+  const afterDelete = manualMachineCoverageUpdates({
+    manuals,
+    machines: sixSpeedQueenMachines,
+    before: seventhSpeedQueen,
+  });
+  assert.deepEqual(afterDelete, [{ manualId: 'speed-queen', linkedMachineCount: 6 }]);
+});
+
+test('does not refresh manual coverage for status-only machine updates', () => {
+  const before = { make: 'Speed Queen', modelNumber: 'SCN30LCFXU3001', model: 'Speed Queen SCN30LCFXU3001' };
+  const after = { ...before };
+
+  assert.equal(machineManualLinkFieldsChanged(before, after), false);
 });
 
 test('processes every page beyond the first 100 and reports skipped manuals', async () => {

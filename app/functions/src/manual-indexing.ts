@@ -29,6 +29,17 @@ export interface ManualPageProcessResult<R> {
   failures: Array<{ itemId: string; message: string }>;
 }
 
+export interface MachineManualLinkFields {
+  make?: string;
+  modelNumber?: string;
+  model?: string;
+}
+
+export interface ManualMachineCoverageRecord {
+  id: string;
+  machineModel?: string;
+}
+
 export function isManualIndexLeaseActive(leaseExpiresAtMs: number | null, nowMs: number): boolean {
   return leaseExpiresAtMs !== null && leaseExpiresAtMs > nowMs;
 }
@@ -58,7 +69,7 @@ function modelCandidates(value: string): string[] {
 
 export function manualModelMatchesMachine(
   manualModel: string,
-  machine: { make?: string; modelNumber?: string; model?: string },
+  machine: MachineManualLinkFields,
 ): boolean {
   const manualModels = modelCandidates(manualModel);
   if (manualModels.length === 0) {
@@ -70,15 +81,56 @@ export function manualModelMatchesMachine(
   if (modelNumberKey) {
     const makeModelKey = compactKey([machine.make, modelNumber].filter(Boolean).join(' '));
     const requiresManufacturer = /^\d+$/.test(modelNumberKey) || modelNumberKey.length < 4;
+    const embeddedSpecificModelKeys = modelCandidates(modelNumber)
+      .filter((candidate) => candidate.length >= 4 && /[a-z]/.test(candidate) && /\d/.test(candidate));
     const authoritativeMachineModels = uniqueStrings([
       ...(requiresManufacturer ? [] : [modelNumberKey]),
       makeModelKey === modelNumberKey ? '' : makeModelKey,
+      ...embeddedSpecificModelKeys,
     ]);
     return manualModels.some((candidate) => authoritativeMachineModels.includes(candidate));
   }
 
   const legacyMachineModels = modelCandidates(machine.model ?? '');
   return manualModels.some((candidate) => legacyMachineModels.includes(candidate));
+}
+
+export function machineManualLinkFieldsChanged(
+  before: MachineManualLinkFields | undefined,
+  after: MachineManualLinkFields | undefined,
+): boolean {
+  if (!before || !after) {
+    return true;
+  }
+
+  return before.make !== after.make
+    || before.modelNumber !== after.modelNumber
+    || before.model !== after.model;
+}
+
+export function manualMachineCoverageUpdates(params: {
+  manuals: ManualMachineCoverageRecord[];
+  machines: MachineManualLinkFields[];
+  before?: MachineManualLinkFields;
+  after?: MachineManualLinkFields;
+}): Array<{ manualId: string; linkedMachineCount: number }> {
+  return params.manuals.flatMap((manual) => {
+    const machineModel = manual.machineModel?.trim();
+    if (!machineModel) {
+      return [];
+    }
+
+    const affected = [params.before, params.after]
+      .some((machine) => machine && manualModelMatchesMachine(machineModel, machine));
+    if (!affected) {
+      return [];
+    }
+
+    return [{
+      manualId: manual.id,
+      linkedMachineCount: params.machines.filter((machine) => manualModelMatchesMachine(machineModel, machine)).length,
+    }];
+  });
 }
 
 export function chunkManualText(text: string, maxLength: number = MAX_MANUAL_CHUNK_LENGTH): string[] {

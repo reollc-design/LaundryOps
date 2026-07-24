@@ -9,6 +9,7 @@ import { logger } from 'firebase-functions';
 import { onRequest, type Request } from 'firebase-functions/v2/https';
 import { setGlobalOptions } from 'firebase-functions/v2/options';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import OpenAI from 'openai';
 import { PDFParse } from 'pdf-parse';
 import Stripe from 'stripe';
@@ -19,6 +20,8 @@ import {
   isManualIndexLeaseActive,
   isManualDeletionReserved,
   isManualOcrJobActive,
+  machineManualLinkFieldsChanged,
+  manualMachineCoverageUpdates,
   manualModelMatchesMachine,
   processManualPages,
   type ManualChunkText,
@@ -376,6 +379,18 @@ function machineContextFromDoc(id: string, data: Record<string, unknown>): Machi
     make,
     modelNumber,
     model,
+  };
+}
+
+function machineManualLinkFields(data: Record<string, unknown>): {
+  make?: string;
+  modelNumber?: string;
+  model?: string;
+} {
+  return {
+    make: optionalString(data.make),
+    modelNumber: optionalString(data.modelNumber),
+    model: optionalString(data.model),
   };
 }
 
@@ -1914,6 +1929,68 @@ export const reindexOrganizationManuals = onRequest(
       const message = clientSafeErrorMessage(error, 'Manual bulk re-index failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_bulk_reindex_failed', message);
     }
+  },
+);
+
+export const refreshManualMachineCoverage = onDocumentWritten(
+  {
+    document: 'organizations/{organizationId}/machines/{machineId}',
+    region: 'us-central1',
+    maxInstances: 1,
+    concurrency: 1,
+  },
+  async (event) => {
+    const beforeData = event.data?.before.exists
+      ? event.data.before.data()
+      : undefined;
+    const afterData = event.data?.after.exists
+      ? event.data.after.data()
+      : undefined;
+    const before = beforeData ? machineManualLinkFields(beforeData) : undefined;
+    const after = afterData ? machineManualLinkFields(afterData) : undefined;
+
+    // Status-only edits must not cause unrelated manual coverage writes.
+    if (!machineManualLinkFieldsChanged(before, after)) {
+      return;
+    }
+
+    ensureFirebaseAdmin();
+    const db = getFirestore();
+    const organizationId = event.params.organizationId;
+    const [manualsSnap, machinesSnap] = await Promise.all([
+      db.collection(`organizations/${organizationId}/manuals`).get(),
+      db.collection(`organizations/${organizationId}/machines`).get(),
+    ]);
+    const updates = manualMachineCoverageUpdates({
+      manuals: manualsSnap.docs.map((manualSnap) => ({
+        id: manualSnap.id,
+        machineModel: optionalString(manualSnap.data().machineModel),
+      })),
+      machines: machinesSnap.docs.map((machineSnap) => machineManualLinkFields(machineSnap.data())),
+      before,
+      after,
+    });
+
+    for (let index = 0; index < updates.length; index += FIRESTORE_BATCH_WRITE_LIMIT) {
+      const batch = db.batch();
+      for (const update of updates.slice(index, index + FIRESTORE_BATCH_WRITE_LIMIT)) {
+        batch.set(
+          db.doc(`organizations/${organizationId}/manuals/${update.manualId}`),
+          {
+            linkedMachineCount: update.linkedMachineCount,
+            manualCoverageUpdatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+      await batch.commit();
+    }
+
+    logger.info('manual_machine_coverage_refreshed', {
+      organizationId,
+      machineId: event.params.machineId,
+      manualCount: updates.length,
+    });
   },
 );
 
