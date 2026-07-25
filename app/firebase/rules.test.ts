@@ -170,6 +170,17 @@ async function seedBaseData() {
       createdBy: 'ownerA',
       status: 'processing',
     });
+    await db.doc('organizations/orgA/manuals/manualAutomaticA1').set({
+      title: 'Approved automatic washer manual',
+      manufacturer: 'Sample',
+      status: 'indexed',
+      automaticDocumentation: true,
+      documentationCandidateId: 'candidateA1',
+      documentationMachineId: 'washerA1',
+      aiRetrievalEnabled: true,
+      automaticClassification: 'service_manual',
+      automaticVerificationLevel: 'exact',
+    });
     await db.doc('organizations/orgA/manuals/manualA1/chunks/chunkA1').set({
       section: 'Door lock',
       text: 'Check latch continuity.',
@@ -364,7 +375,30 @@ describe('Firestore organization security', () => {
   it('allows manual metadata edits but blocks direct manual deletes', async () => {
     const ownerA = dbFor('ownerA');
 
+    await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualClientUploaded').set({
+      title: 'Customer uploaded manual',
+      machineModel: 'Sample W100',
+      status: 'processing',
+      indexError: null,
+    }));
+    await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualClientUploaded').update({
+      status: 'missing',
+      indexError: 'Upload did not finish.',
+    }));
     await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualA1').update({ title: 'Updated Washer Manual' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1').update({ aiRetrievalEnabled: true }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualClientCreated').set({
+      title: 'Unverified automatic manual',
+      automaticDocumentation: true,
+      aiRetrievalEnabled: true,
+    }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ aiRetrievalEnabled: false }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ automaticClassification: 'parts_manual' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ documentationCandidateId: 'candidateB1' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ documentationMachineId: 'dryerB1' }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ automaticClassificationConfidence: 0.99 }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ automaticVerificationEvidence: ['unverified'] }));
+    await assertFails(ownerA.doc('organizations/orgA/manuals/manualAutomaticA1').update({ automaticVerificationLevel: null }));
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1').delete());
   });
 

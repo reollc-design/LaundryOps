@@ -110,6 +110,32 @@ service cloud.firestore {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys);
     }
 
+    function hasNoAutomaticDocumentationFields() {
+      return !request.resource.data.keys().hasAny([
+        'automaticDocumentation',
+        'documentationCandidateId',
+        'documentationMachineId',
+        'aiRetrievalEnabled',
+        'automaticClassification',
+        'automaticClassificationConfidence',
+        'automaticVerificationLevel',
+        'automaticVerificationEvidence'
+      ]);
+    }
+
+    function keepsAutomaticDocumentationFieldsUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'automaticDocumentation',
+        'documentationCandidateId',
+        'documentationMachineId',
+        'aiRetrievalEnabled',
+        'automaticClassification',
+        'automaticClassificationConfidence',
+        'automaticVerificationLevel',
+        'automaticVerificationEvidence'
+      ]);
+    }
+
     match /users/{userId} {
       allow read: if signedIn() && request.auth.uid == userId;
       allow create, update: if signedIn()
@@ -256,7 +282,12 @@ service cloud.firestore {
 
       match /manuals/{manualId} {
         allow read: if isMember(orgId);
-        allow create, update: if isOrganizationActive(orgId) && hasRole(orgId, ['owner', 'admin', 'manager']);
+        allow create: if isOrganizationActive(orgId)
+          && hasRole(orgId, ['owner', 'admin', 'manager'])
+          && hasNoAutomaticDocumentationFields();
+        allow update: if isOrganizationActive(orgId)
+          && hasRole(orgId, ['owner', 'admin', 'manager'])
+          && keepsAutomaticDocumentationFieldsUnchanged();
         allow delete: if false;
 
         match /{chunkCollection}/{chunkId} {

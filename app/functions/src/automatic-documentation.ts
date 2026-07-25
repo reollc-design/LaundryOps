@@ -16,6 +16,23 @@ export function isRepairDocumentationType(value: unknown): boolean {
   ].includes(String(value));
 }
 
+export function isAutomaticManualAttachedToMachine(params: {
+  manual: Record<string, unknown>;
+  machineId?: string | null;
+  attachment?: Record<string, unknown> | null;
+}): boolean {
+  if (params.manual.automaticDocumentation !== true) return true;
+  if (!params.manual.aiRetrievalEnabled || !params.machineId || !params.attachment) return false;
+  return params.attachment.state === 'attached'
+    && params.attachment.aiRetrievalEnabled === true
+    && params.attachment.machineId === params.machineId
+    && params.attachment.manualId === params.manual.id;
+}
+
+export function hasSerialDependentApplicability(text: string): boolean {
+  return /\b(?:serial(?:\s+(?:number|no\.?|range)|[- ]dependent)?|s\s*\/\s*n)\b/i.test(text);
+}
+
 export interface DocumentationSettings {
   automaticDocumentationEnabled?: unknown;
   mode?: unknown;
@@ -128,8 +145,11 @@ export function verifyDocumentationCompatibility(machine: DocumentationMachineId
   const hasExact = exactModels.includes(model)
     || new RegExp(`(^|[^a-z0-9])${modelPattern}(?![a-z0-9])`, 'i').test(corpus);
   if (hasExact) {
-    return candidate.serialRangesMentioned && !text(machine.serialNumber)
-      ? { level: 'serial_required' as const, evidence: ['Exact model found, but the document has serial-dependent applicability.'] }
+    // A serial number on the machine is not proof that it falls within the
+    // document's applicable serial range. Keep these candidates in review
+    // until the range itself can be verified.
+    return candidate.serialRangesMentioned
+      ? { level: 'serial_required' as const, evidence: ['Exact model found, but the document has serial-dependent applicability that still needs verification.'] }
       : { level: 'exact' as const, evidence: ['Exact model number appears in the candidate evidence.'] };
   }
   const family = compactDocumentationKey(text(machine.productFamily));
@@ -175,7 +195,7 @@ export function canRecoverStaleAutomaticAttachment(params: {
   ocrActive: boolean;
 }): boolean {
   if (!params.manualExists || params.indexingLeaseActive || params.ocrActive) return false;
-  return ['processing', 'failed'].includes(String(params.manualStatus ?? ''));
+  return ['processing', 'failed', 'indexed'].includes(String(params.manualStatus ?? ''));
 }
 
 export function safeDocumentationUrl(value: unknown, allowedDomains: string[]): URL | null {

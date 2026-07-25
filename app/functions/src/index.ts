@@ -70,6 +70,8 @@ import {
   canTransitionCandidate,
   classifyDocumentation,
   effectiveDocumentationSettings,
+  hasSerialDependentApplicability,
+  isAutomaticManualAttachedToMachine,
   isRepairDocumentationType,
   isDocumentationJobReviewable,
   safeDocumentationUrl,
@@ -500,7 +502,7 @@ async function resolveMachineContext(params: {
   return machines.find((machine) => machineMatchesText(machine, lookupText, params.machineNumber)) ?? null;
 }
 
-async function findIndexedManualForModel(params: {
+export async function findIndexedManualForModel(params: {
   db: Firestore;
   organizationId: string;
   machineModel: string;
@@ -528,9 +530,9 @@ async function findIndexedManualForModel(params: {
     const exactSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
       .where('machineModelKey', '==', modelKey)
       .where('status', '==', 'indexed')
-      .limit(1)
+      .limit(MANUAL_REINDEX_PAGE_SIZE)
       .get();
-    const eligibleExact = exactSnap.docs.find((docSnap) => isAutomaticManualAiEligible(docSnap.data()));
+    const eligibleExact = await firstManualEligibleForRepairAssist(params, exactSnap.docs);
     if (eligibleExact) {
       return eligibleExact;
     }
@@ -543,9 +545,9 @@ async function findIndexedManualForModel(params: {
     const compactSnap = await params.db.collection(`organizations/${params.organizationId}/manuals`)
       .where('machineModelCompactKey', '==', compactModelKey)
       .where('status', '==', 'indexed')
-      .limit(1)
+      .limit(MANUAL_REINDEX_PAGE_SIZE)
       .get();
-    const eligibleCompact = compactSnap.docs.find((docSnap) => isAutomaticManualAiEligible(docSnap.data()));
+    const eligibleCompact = await firstManualEligibleForRepairAssist(params, compactSnap.docs);
     if (eligibleCompact) {
       return eligibleCompact;
     }
@@ -562,7 +564,11 @@ async function findIndexedManualForModel(params: {
     }
 
     const indexedPage = await indexedQuery.get();
-    indexedDocs.push(...indexedPage.docs.filter((docSnap) => docSnap.data().status === 'indexed' && isAutomaticManualAiEligible(docSnap.data())));
+    for (const docSnap of indexedPage.docs) {
+      if (docSnap.data().status === 'indexed' && await isManualEligibleForRepairAssist(params, docSnap)) {
+        indexedDocs.push(docSnap);
+      }
+    }
     const nextCursor = indexedPage.docs[indexedPage.docs.length - 1]?.id;
     if (indexedPage.empty || indexedPage.size < MANUAL_REINDEX_PAGE_SIZE || !nextCursor || nextCursor === indexedCursor) {
       break;
@@ -615,6 +621,32 @@ async function findIndexedManualForModel(params: {
     .sort((a, b) => b.score - a.score || a.docSnap.id.localeCompare(b.docSnap.id));
 
   return candidates[0]?.docSnap ?? null;
+}
+
+async function firstManualEligibleForRepairAssist(
+  params: { db: Firestore; organizationId: string; machine?: MachineContext | null },
+  manuals: FirebaseFirestore.QueryDocumentSnapshot[],
+): Promise<FirebaseFirestore.QueryDocumentSnapshot | undefined> {
+  for (const manual of manuals) {
+    if (await isManualEligibleForRepairAssist(params, manual)) return manual;
+  }
+  return undefined;
+}
+
+async function isManualEligibleForRepairAssist(
+  params: { db: Firestore; organizationId: string; machine?: MachineContext | null },
+  manualSnap: FirebaseFirestore.QueryDocumentSnapshot,
+): Promise<boolean> {
+  const manual = manualSnap.data();
+  if (!isAutomaticManualAiEligible(manual)) return false;
+  if (manual.automaticDocumentation !== true) return true;
+  if (!params.machine) return false;
+  const attachmentSnap = await params.db.doc(`organizations/${params.organizationId}/machineDocuments/${manualSnap.id}`).get();
+  return isAutomaticManualAttachedToMachine({
+    manual: { ...manual, id: manualSnap.id },
+    machineId: params.machine.id,
+    attachment: attachmentSnap.exists ? attachmentSnap.data() ?? null : null,
+  });
 }
 
 function manualStatusFromValue(value: unknown): ManualStatus {
@@ -2049,7 +2081,8 @@ async function finalizeAutomaticManualAttachment(params: {
       return 'review_required';
     }
   }
-  const evidenceText = chunks.map((chunk) => chunk.text).join('\n').slice(0, 250_000);
+  const fullEvidenceText = chunks.map((chunk) => chunk.text).join('\n');
+  const evidenceText = fullEvidenceText.slice(0, 250_000);
   const classification = classifyDocumentation({
     title: optionalString(manual.title),
     fileName: optionalString(manual.title),
@@ -2067,7 +2100,7 @@ async function finalizeAutomaticManualAttachment(params: {
     extractedText: evidenceText,
     sourceDomain: optionalString(candidate.sourceDomain),
     sourceUrl: optionalString(candidate.sourceUrl),
-    serialRangesMentioned: /\bserial(?:\s+number|\s+range|[- ]dependent)?\b/i.test(evidenceText),
+    serialRangesMentioned: hasSerialDependentApplicability(fullEvidenceText),
   });
   const exact = compatibility.level === 'exact' && isRepairDocumentationType(classification.primary);
   await manualRef.set({

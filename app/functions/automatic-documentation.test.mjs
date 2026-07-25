@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canTransitionCandidate, classifyDocumentation, effectiveDocumentationSettings, isRepairDocumentationType,
-  isDocumentationJobReviewable, canStartDocumentationAttachment, canRecoverStaleAutomaticAttachment, safeDocumentationUrl, verifyDocumentationCompatibility,
+  hasSerialDependentApplicability, isDocumentationJobReviewable, canStartDocumentationAttachment, canRecoverStaleAutomaticAttachment, isAutomaticManualAttachedToMachine, safeDocumentationUrl, verifyDocumentationCompatibility,
 } from './src/automatic-documentation.ts';
 
 test('documentation is disabled unless both global and organization flags are enabled', () => {
@@ -18,10 +18,15 @@ test('classification does not call a generic service mention a service manual', 
 });
 test('exact model and serial dependency are distinguished from family matches', () => {
   assert.equal(verifyDocumentationCompatibility({ modelNumber: 'ABC-123', serialNumber: '12' }, { exactModels: ['ABC123'] }).level, 'exact');
+  assert.equal(verifyDocumentationCompatibility({ modelNumber: 'ABC-123', serialNumber: '12' }, { exactModels: ['ABC123'], serialRangesMentioned: true }).level, 'serial_required');
   assert.equal(verifyDocumentationCompatibility({ modelNumber: 'ABC-123' }, { exactModels: ['ABC123'], serialRangesMentioned: true }).level, 'serial_required');
   assert.equal(verifyDocumentationCompatibility({ modelNumber: 'ABC-123', productFamily: 'Horizon' }, { modelFamilies: ['Horizon'] }).level, 'family');
   assert.equal(verifyDocumentationCompatibility({ modelNumber: 'SFNNCASG113TN01' }, { title: 'Speed Queen Horizon SFNNCASG113TN01 service manual' }).level, 'exact');
   assert.equal(verifyDocumentationCompatibility({ modelNumber: 'ABC123' }, { title: 'Model ABC1234 service manual' }).level, 'rejected');
+});
+test('serial applicability is detected across a full large manual', () => {
+  assert.equal(hasSerialDependentApplicability(`${'x'.repeat(250_001)} S/N 1000 and later`), true);
+  assert.equal(hasSerialDependentApplicability('Model ABC123 standard service procedure'), false);
 });
 test('candidate lifecycle does not permit attachment without approval', () => {
   assert.equal(canTransitionCandidate('review', 'attached'), false);
@@ -43,6 +48,14 @@ test('only repair documentation classifications may be used for AI retrieval', (
   assert.equal(isRepairDocumentationType('sales_brochure'), false);
   assert.equal(isRepairDocumentationType('warranty'), false);
 });
+test('automatic manuals are eligible only for their approved machine attachment', () => {
+  const manual = { id: 'manualA', automaticDocumentation: true, aiRetrievalEnabled: true };
+  const attachment = { manualId: 'manualA', machineId: 'machineA', state: 'attached', aiRetrievalEnabled: true };
+  assert.equal(isAutomaticManualAttachedToMachine({ manual, machineId: 'machineA', attachment }), true);
+  assert.equal(isAutomaticManualAttachedToMachine({ manual, machineId: 'machineB', attachment }), false);
+  assert.equal(isAutomaticManualAttachedToMachine({ manual, machineId: 'machineA', attachment: { ...attachment, state: 'review' } }), false);
+  assert.equal(isAutomaticManualAttachedToMachine({ manual: { id: 'uploadedManual' }, machineId: 'machineB' }), true);
+});
 test('attachment reservations recover after expiry but never duplicate an existing completed manual', () => {
   const nowMs = 1_000;
   assert.equal(canStartDocumentationAttachment({ candidateState: 'approved', reservationToken: 'active', reservationExpiresAtMs: nowMs + 1, manualExists: false, nowMs }), false);
@@ -54,5 +67,5 @@ test('only an idle incomplete automatic manual can be recovered after a stale re
   assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: false, ocrActive: false }), true);
   assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: true, ocrActive: false }), false);
   assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: false, ocrActive: true }), false);
-  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'indexed', indexingLeaseActive: false, ocrActive: false }), false);
+  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'indexed', indexingLeaseActive: false, ocrActive: false }), true);
 });
