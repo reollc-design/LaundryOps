@@ -8,6 +8,14 @@ export type DocumentationType =
   | 'electrical_schematic' | 'service_bulletin' | 'technical_bulletin' | 'specification_sheet'
   | 'sales_brochure' | 'warranty' | 'unknown' | 'other';
 
+export function isRepairDocumentationType(value: unknown): boolean {
+  return [
+    'service_manual', 'technical_manual', 'diagnostic_guide', 'troubleshooting_manual',
+    'error_code_guide', 'wiring_diagram', 'electrical_schematic', 'service_bulletin',
+    'technical_bulletin', 'maintenance_manual', 'parts_manual', 'illustrated_parts_catalog',
+  ].includes(String(value));
+}
+
 export interface DocumentationSettings {
   automaticDocumentationEnabled?: unknown;
   mode?: unknown;
@@ -139,6 +147,35 @@ export function canTransitionCandidate(from: DocumentationCandidateState, to: Do
 
 export function isDocumentationJobReviewable(status: unknown): boolean {
   return typeof status === 'string' && !['cancelled', 'completed', 'failed'].includes(status);
+}
+
+// A reservation is deliberately short-lived so a stopped attachment can be retried,
+// but a completed manual must always block a second automatic download.
+export function canStartDocumentationAttachment(params: {
+  candidateState: unknown;
+  reservationToken?: unknown;
+  reservationExpiresAtMs?: number | null;
+  manualExists: boolean;
+  attachmentStatus?: unknown;
+  nowMs: number;
+}): boolean {
+  if (params.candidateState !== 'approved') return false;
+  const activeReservation = typeof params.reservationToken === 'string'
+    && typeof params.reservationExpiresAtMs === 'number'
+    && params.reservationExpiresAtMs > params.nowMs;
+  if (activeReservation) return false;
+  if (!params.manualExists) return true;
+  return ['failed', 'review_required', 'cancelled'].includes(String(params.attachmentStatus ?? ''));
+}
+
+export function canRecoverStaleAutomaticAttachment(params: {
+  manualExists: boolean;
+  manualStatus?: unknown;
+  indexingLeaseActive: boolean;
+  ocrActive: boolean;
+}): boolean {
+  if (!params.manualExists || params.indexingLeaseActive || params.ocrActive) return false;
+  return ['processing', 'failed'].includes(String(params.manualStatus ?? ''));
 }
 
 export function safeDocumentationUrl(value: unknown, allowedDomains: string[]): URL | null {

@@ -71,6 +71,14 @@ import {
 } from './firebase/auth';
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, retryOrganizationManualOcr, uploadManualAndIndex, type ManualRepairAssistResult } from './firebase/manuals';
+import {
+  attachApprovedDocumentationCandidate,
+  loadMachineDocumentationCandidates,
+  reviewDocumentationCandidate,
+  startDocumentationDiscovery,
+  updateOrganizationDocumentationSettings,
+  type DocumentationCandidate,
+} from './firebase/documentation';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
 import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWorkOrderPhotoBlob, updateWorkOrderDetails } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
@@ -1252,6 +1260,7 @@ export function App() {
                     machine={selectedMachine}
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
+                    canManageDocumentation={canManageManuals}
                     onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
                     onOpenMaintenanceRecords={() => setActiveScreen('work-orders')}
@@ -2764,6 +2773,7 @@ function MachineDetailScreen({
   machine,
   orgConnected,
   organizationId,
+  canManageDocumentation,
   onCreateWorkOrder,
   onOpenAiAssist,
   onOpenMaintenanceRecords,
@@ -2772,6 +2782,7 @@ function MachineDetailScreen({
   machine: UrgentMachine | null;
   orgConnected: boolean;
   organizationId: string | null;
+  canManageDocumentation: boolean;
   onCreateWorkOrder: () => void;
   onOpenAiAssist: () => void;
   onOpenMaintenanceRecords: () => void;
@@ -2783,6 +2794,10 @@ function MachineDetailScreen({
   const [machineModelNumberInput, setMachineModelNumberInput] = useState('');
   const [editBusy, setEditBusy] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const [documentationCandidates, setDocumentationCandidates] = useState<DocumentationCandidate[]>([]);
+  const [documentationBusy, setDocumentationBusy] = useState(false);
+  const [documentationError, setDocumentationError] = useState<string | null>(null);
+  const [documentationMessage, setDocumentationMessage] = useState<string | null>(null);
   const machineStatus = machine ? toOperationalStatus(machine.status) : 'running';
   const machineStatusText = machine ? machineStatusLabel(machineStatus) : 'Operational';
   const machineNumber = machine?.machineNumber ?? 'Machine';
@@ -2794,6 +2809,37 @@ function MachineDetailScreen({
     : machineStatus === 'needs-repair'
       ? 'Needs repair attention'
       : 'No active issue';
+
+  const refreshDocumentationCandidates = async (): Promise<void> => {
+    if (!organizationId || !machine) {
+      setDocumentationCandidates([]);
+      return;
+    }
+    try {
+      setDocumentationCandidates(await loadMachineDocumentationCandidates(organizationId, machine.id));
+    } catch (error) {
+      setDocumentationError(getErrorMessage(error, 'Could not load documentation candidates.'));
+    }
+  };
+
+  useEffect(() => {
+    void refreshDocumentationCandidates();
+  }, [organizationId, machine?.id]);
+
+  const runDocumentationAction = async (action: () => Promise<void>, success: string): Promise<void> => {
+    setDocumentationBusy(true);
+    setDocumentationError(null);
+    setDocumentationMessage(null);
+    try {
+      await action();
+      await refreshDocumentationCandidates();
+      setDocumentationMessage(success);
+    } catch (error) {
+      setDocumentationError(getErrorMessage(error, 'Documentation action failed.'));
+    } finally {
+      setDocumentationBusy(false);
+    }
+  };
 
   const closeEdit = () => {
     setIsEditing(false);
@@ -2886,7 +2932,46 @@ function MachineDetailScreen({
           <h2>Documentation</h2>
           <button type="button" onClick={() => setActiveScreen('manuals')}>Manuals <ChevronRight size={14} /></button>
         </div>
-        <p className="empty-state">Manufacturer manual upload is available now. Automatic documentation discovery is off until an administrator enables it for this company.</p>
+        <p className="empty-state">Manual upload remains available. Discovery only searches approved manufacturer sources and never adds a document to AI until it is reviewed and verified for this model.</p>
+        {orgConnected && organizationId && machine && canManageDocumentation && (
+          <div className="machine-modal-actions">
+            <button
+              className="secondary-action"
+              type="button"
+              disabled={documentationBusy || !machine.make?.trim() || !machine.modelNumber?.trim()}
+              onClick={() => void runDocumentationAction(
+                async () => { await updateOrganizationDocumentationSettings(organizationId, true, 'approval'); },
+                'Approval mode is enabled for this company. Platform discovery must also be enabled by the app administrator.',
+              )}
+            >Use Approval Mode</button>
+            <button
+              className="secondary-action"
+              type="button"
+              disabled={documentationBusy || !machine.make?.trim() || !machine.modelNumber?.trim()}
+              onClick={() => void runDocumentationAction(
+                async () => { await startDocumentationDiscovery(organizationId, machine.id); },
+                'Documentation search started. Review the approved-source candidates below.',
+              )}
+            >{documentationBusy ? 'Working...' : 'Find Manufacturer Documents'}</button>
+          </div>
+        )}
+        {documentationError && <p className="empty-state">{documentationError}</p>}
+        {documentationMessage && <p className="search-hint">{documentationMessage}</p>}
+        {documentationCandidates.map((candidate) => (
+          <div className="timeline-row" key={candidate.id}>
+            <span className="timeline-dot teal"><BookOpen size={13} /></span>
+            <div>
+              <strong>{candidate.title}</strong>
+              <span>{candidate.sourceDomain} / {candidate.state}{candidate.verificationLevel ? ` / ${candidate.verificationLevel}` : ''}</span>
+            </div>
+            {canManageDocumentation && candidate.state === 'review' && (
+              <button className="row-action-button" type="button" disabled={documentationBusy} onClick={() => void runDocumentationAction(async () => { await reviewDocumentationCandidate(organizationId!, candidate.id, 'approved'); }, 'Candidate approved. Attach it when you are ready to index and verify it.')}>Approve</button>
+            )}
+            {canManageDocumentation && candidate.state === 'approved' && (
+              <button className="row-action-button row-action-primary" type="button" disabled={documentationBusy} onClick={() => void runDocumentationAction(async () => { await attachApprovedDocumentationCandidate(organizationId!, candidate.id); }, 'Approved document is downloading, indexing, and verifying before AI can use it.')}>Attach</button>
+            )}
+          </div>
+        ))}
       </section>
 
       <div className="stat-grid">

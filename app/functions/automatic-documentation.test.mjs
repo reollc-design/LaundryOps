@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  canTransitionCandidate, classifyDocumentation, effectiveDocumentationSettings,
-  isDocumentationJobReviewable, safeDocumentationUrl, verifyDocumentationCompatibility,
+  canTransitionCandidate, classifyDocumentation, effectiveDocumentationSettings, isRepairDocumentationType,
+  isDocumentationJobReviewable, canStartDocumentationAttachment, canRecoverStaleAutomaticAttachment, safeDocumentationUrl, verifyDocumentationCompatibility,
 } from './src/automatic-documentation.ts';
 
 test('documentation is disabled unless both global and organization flags are enabled', () => {
@@ -36,4 +36,23 @@ test('only allowed HTTPS document URLs are accepted', () => {
   assert.equal(safeDocumentationUrl('http://speedqueen.com/manual.pdf', ['speedqueen.com']), null);
   assert.equal(safeDocumentationUrl('https://speedqueen.com.evil.example/manual.pdf', ['speedqueen.com']), null);
   assert.equal(safeDocumentationUrl('https://speedqueen.com/manual.pdf?token=secret#section', ['speedqueen.com'])?.toString(), 'https://speedqueen.com/manual.pdf');
+});
+test('only repair documentation classifications may be used for AI retrieval', () => {
+  assert.equal(isRepairDocumentationType('service_manual'), true);
+  assert.equal(isRepairDocumentationType('error_code_guide'), true);
+  assert.equal(isRepairDocumentationType('sales_brochure'), false);
+  assert.equal(isRepairDocumentationType('warranty'), false);
+});
+test('attachment reservations recover after expiry but never duplicate an existing completed manual', () => {
+  const nowMs = 1_000;
+  assert.equal(canStartDocumentationAttachment({ candidateState: 'approved', reservationToken: 'active', reservationExpiresAtMs: nowMs + 1, manualExists: false, nowMs }), false);
+  assert.equal(canStartDocumentationAttachment({ candidateState: 'approved', reservationToken: 'expired', reservationExpiresAtMs: nowMs, manualExists: false, nowMs }), true);
+  assert.equal(canStartDocumentationAttachment({ candidateState: 'approved', manualExists: true, attachmentStatus: 'attached', nowMs }), false);
+  assert.equal(canStartDocumentationAttachment({ candidateState: 'approved', manualExists: true, attachmentStatus: 'failed', nowMs }), true);
+});
+test('only an idle incomplete automatic manual can be recovered after a stale reservation', () => {
+  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: false, ocrActive: false }), true);
+  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: true, ocrActive: false }), false);
+  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'processing', indexingLeaseActive: false, ocrActive: true }), false);
+  assert.equal(canRecoverStaleAutomaticAttachment({ manualExists: true, manualStatus: 'indexed', indexingLeaseActive: false, ocrActive: false }), false);
 });

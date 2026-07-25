@@ -10,10 +10,20 @@ on:
   push:
     branches:
       - main
+      - feature/automatic-machine-documentation
     paths:
       - 'app/**'
       - '.github/workflows/laundryops-ci-deploy.yml'
   workflow_dispatch:
+    inputs:
+      deployment_target:
+        description: 'Optional deployment target. Staging is the only non-production option.'
+        required: false
+        default: 'validate-only'
+        type: choice
+        options:
+          - validate-only
+          - staging
 
 permissions:
   contents: read
@@ -206,3 +216,113 @@ jobs:
 
       - name: Deploy coordinated LaundryOps release
         run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,firestore:indexes,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+
+  deploy-staging:
+    name: Deploy LaundryOps staging
+    runs-on: ubuntu-latest
+    concurrency:
+      group: laundryops-staging
+      cancel-in-progress: false
+    needs:
+      - validate
+      - validate-functions
+      - validate-rules
+    if: github.event_name == 'workflow_dispatch' && inputs.deployment_target == 'staging'
+    env:
+      VITE_FIREBASE_API_KEY: ${{ secrets.STAGING_VITE_FIREBASE_API_KEY }}
+      VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.STAGING_VITE_FIREBASE_AUTH_DOMAIN }}
+      VITE_FIREBASE_PROJECT_ID: ${{ secrets.STAGING_VITE_FIREBASE_PROJECT_ID }}
+      VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.STAGING_VITE_FIREBASE_STORAGE_BUCKET }}
+      VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.STAGING_VITE_FIREBASE_MESSAGING_SENDER_ID }}
+      VITE_FIREBASE_APP_ID: ${{ secrets.STAGING_VITE_FIREBASE_APP_ID }}
+      VITE_BILLING_API_BASE_URL: ${{ secrets.STAGING_VITE_BILLING_API_BASE_URL }}
+      VITE_FUNCTIONS_API_BASE_URL: ${{ secrets.STAGING_VITE_FUNCTIONS_API_BASE_URL }}
+      DOCUMENT_AI_OCR_PROCESSOR_ID: ${{ secrets.STAGING_DOCUMENT_AI_OCR_PROCESSOR_ID }}
+      DOCUMENT_AI_OCR_LOCATION: us
+      VITE_USE_FIREBASE_EMULATORS: 'false'
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/functions/package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Install Functions dependencies
+        run: npm ci --prefix functions
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_LAUNDRYOPS_STAGING }}'
+
+      - name: Verify staging Firebase config
+        shell: bash
+        run: |
+          required_vars=(
+            VITE_FIREBASE_API_KEY
+            VITE_FIREBASE_AUTH_DOMAIN
+            VITE_FIREBASE_PROJECT_ID
+            VITE_FIREBASE_STORAGE_BUCKET
+            VITE_FIREBASE_MESSAGING_SENDER_ID
+            VITE_FIREBASE_APP_ID
+            VITE_BILLING_API_BASE_URL
+            VITE_FUNCTIONS_API_BASE_URL
+            DOCUMENT_AI_OCR_PROCESSOR_ID
+          )
+
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name}" ]; then
+              echo "$var_name is missing. Add the required staging GitHub secret before deploying."
+              exit 1
+            fi
+          done
+
+          expected_functions_url="https://us-central1-laundryops-staging.cloudfunctions.net"
+          if [ "$VITE_FIREBASE_PROJECT_ID" != "laundryops-staging" ]; then
+            echo "VITE_FIREBASE_PROJECT_ID must target laundryops-staging."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_AUTH_DOMAIN" != "laundryops-staging.firebaseapp.com" ]; then
+            echo "VITE_FIREBASE_AUTH_DOMAIN must target laundryops-staging."
+            exit 1
+          fi
+          if [ "$VITE_FIREBASE_STORAGE_BUCKET" != "laundryops-staging.firebasestorage.app" ]; then
+            echo "VITE_FIREBASE_STORAGE_BUCKET must target laundryops-staging."
+            exit 1
+          fi
+          if [ "$VITE_BILLING_API_BASE_URL" != "$expected_functions_url" ] || [ "$VITE_FUNCTIONS_API_BASE_URL" != "$expected_functions_url" ]; then
+            echo "The staging Functions URLs must target laundryops-staging."
+            exit 1
+          fi
+
+      - name: Verify required staging Function secret names
+        shell: bash
+        run: |
+          for secret_name in OPENAI_API_KEY TAVILY_API_KEY; do
+            gcloud secrets describe "$secret_name" --project laundryops-staging --quiet >/dev/null
+          done
+
+      - name: Build staging web app
+        run: npm run build:staging
+
+      - name: Provide Document AI deployment parameters
+        shell: bash
+        run: printf 'DOCUMENT_AI_OCR_PROCESSOR_ID=%s\nDOCUMENT_AI_OCR_LOCATION=%s\n' "$DOCUMENT_AI_OCR_PROCESSOR_ID" "$DOCUMENT_AI_OCR_LOCATION" > functions/.env.laundryops-staging
+
+      - name: Deploy reviewed staging release
+        shell: bash
+        run: |
+          only_targets="hosting,firestore:rules,firestore:indexes,storage,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:generateRepairAssist,functions:completeManualOcrJobs,functions:requestDocumentationDiscovery,functions:submitDocumentationCandidateUrl,functions:reviewDocumentationCandidate,functions:attachApprovedDocumentationCandidate,functions:updateOrganizationDocumentationSettings,functions:cancelDocumentationDiscovery,functions:updateGlobalDocumentationSettings"
+          npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --non-interactive --only "$only_targets"

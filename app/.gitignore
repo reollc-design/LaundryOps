@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.firebase/
+dist/
+node_modules/
+functions/lib/
+functions/node_modules/
+*.pem
+service-account*.json
+old-key.json
+new-key.json

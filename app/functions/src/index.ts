@@ -65,13 +65,19 @@ import {
   timestampToMilliseconds,
 } from './trial.js';
 import {
+  canRecoverStaleAutomaticAttachment,
+  canStartDocumentationAttachment,
   canTransitionCandidate,
+  classifyDocumentation,
   effectiveDocumentationSettings,
+  isRepairDocumentationType,
   isDocumentationJobReviewable,
   safeDocumentationUrl,
+  verifyDocumentationCompatibility,
   type DocumentationCandidateState,
 } from './automatic-documentation.js';
 import { createTavilyDocumentationSearch } from './documentation-search.js';
+import { downloadApprovedPdf } from './external-document-download.js';
 import {
   buildStripeBillingEventState,
   decideStripeBillingEvent,
@@ -99,14 +105,17 @@ const PRODUCTION_CORS_ORIGINS = [
   DEFAULT_APP_URL,
   'https://laundryops-maintenance-app.firebaseapp.com',
 ];
+const STAGING_CORS_ORIGINS = process.env.GCLOUD_PROJECT === 'laundryops-staging'
+  ? ['https://laundryops-staging.web.app', 'https://laundryops-staging.firebaseapp.com']
+  : [];
 const LOCAL_CORS_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
 const ALLOWED_CORS_ORIGINS = process.env.FUNCTIONS_EMULATOR === 'true'
-  ? [...PRODUCTION_CORS_ORIGINS, ...LOCAL_CORS_ORIGINS]
-  : PRODUCTION_CORS_ORIGINS;
+  ? [...PRODUCTION_CORS_ORIGINS, ...STAGING_CORS_ORIGINS, ...LOCAL_CORS_ORIGINS]
+  : [...PRODUCTION_CORS_ORIGINS, ...STAGING_CORS_ORIGINS];
 const DEFAULT_MANUAL_MODEL = 'gpt-5.5';
 const MAX_REPAIR_ASSIST_CHUNKS = 8;
 const MAX_CODE_ALIAS_PARTS = 5;
@@ -521,8 +530,9 @@ async function findIndexedManualForModel(params: {
       .where('status', '==', 'indexed')
       .limit(1)
       .get();
-    if (!exactSnap.empty) {
-      return exactSnap.docs[0];
+    const eligibleExact = exactSnap.docs.find((docSnap) => isAutomaticManualAiEligible(docSnap.data()));
+    if (eligibleExact) {
+      return eligibleExact;
     }
   }
 
@@ -535,8 +545,9 @@ async function findIndexedManualForModel(params: {
       .where('status', '==', 'indexed')
       .limit(1)
       .get();
-    if (!compactSnap.empty) {
-      return compactSnap.docs[0];
+    const eligibleCompact = compactSnap.docs.find((docSnap) => isAutomaticManualAiEligible(docSnap.data()));
+    if (eligibleCompact) {
+      return eligibleCompact;
     }
   }
 
@@ -551,7 +562,7 @@ async function findIndexedManualForModel(params: {
     }
 
     const indexedPage = await indexedQuery.get();
-    indexedDocs.push(...indexedPage.docs.filter((docSnap) => docSnap.data().status === 'indexed'));
+    indexedDocs.push(...indexedPage.docs.filter((docSnap) => docSnap.data().status === 'indexed' && isAutomaticManualAiEligible(docSnap.data())));
     const nextCursor = indexedPage.docs[indexedPage.docs.length - 1]?.id;
     if (indexedPage.empty || indexedPage.size < MANUAL_REINDEX_PAGE_SIZE || !nextCursor || nextCursor === indexedCursor) {
       break;
@@ -1880,6 +1891,9 @@ export const indexOrganizationManual = onRequest(
         manualId,
         uid: caller.uid,
       });
+      if (!result.processing) {
+        await finalizeAutomaticManualAttachment({ db, organizationId, manualId });
+      }
 
       addRateLimitHeaders(response);
       response.status(200).json({
@@ -1987,6 +2001,121 @@ async function documentationAutomationConfig(db: Firestore, organizationId: stri
     ? platform.approvedDomains.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean)
     : [];
   return { ...effective, approvedDomains };
+}
+
+function isAutomaticManualAiEligible(data: Record<string, unknown>): boolean {
+  return data.automaticDocumentation !== true || data.aiRetrievalEnabled === true;
+}
+
+async function finalizeAutomaticManualAttachment(params: {
+  db: Firestore;
+  organizationId: string;
+  manualId: string;
+}): Promise<'attached' | 'review_required' | 'not_automatic'> {
+  const manualRef = params.db.doc(`organizations/${params.organizationId}/manuals/${params.manualId}`);
+  const manualSnap = await manualRef.get();
+  if (!manualSnap.exists) return 'not_automatic';
+  const manual = manualSnap.data() ?? {};
+  if (manual.automaticDocumentation !== true) return 'not_automatic';
+  const candidateId = optionalString(manual.documentationCandidateId);
+  const machineId = optionalString(manual.documentationMachineId);
+  if (!candidateId || !machineId || manual.status !== 'indexed') return 'review_required';
+
+  const [candidateSnap, machineSnap, chunks] = await Promise.all([
+    params.db.doc(`organizations/${params.organizationId}/documentCandidates/${candidateId}`).get(),
+    params.db.doc(`organizations/${params.organizationId}/machines/${machineId}`).get(),
+    readManualChunks({ manualRef, manualData: manual }),
+  ]);
+  if (!candidateSnap.exists || !machineSnap.exists) return 'review_required';
+  const candidate = candidateSnap.data() ?? {};
+  const machine = machineSnap.data() ?? {};
+  const removeCancelledManual = async (): Promise<void> => {
+    const storagePath = optionalManualStoragePath(manual.storagePath, params.organizationId, params.manualId);
+    if (storagePath) await getStorage().bucket().file(storagePath).delete().catch(() => undefined);
+    await deleteManualIndexCollections({ db: params.db, manualRef, manualData: manual }).catch(() => undefined);
+    await manualRef.delete().catch(() => undefined);
+  };
+  const jobId = optionalString(candidate.jobId);
+  if (candidate.state !== 'approved') {
+    await removeCancelledManual();
+    await candidateSnap.ref.set({ attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(), attachmentStatus: 'cancelled', updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return 'review_required';
+  }
+  if (jobId) {
+    const jobSnap = await params.db.doc(`organizations/${params.organizationId}/documentationJobs/${jobId}`).get();
+    if (!jobSnap.exists || !isDocumentationJobReviewable(jobSnap.data()?.status)) {
+      await removeCancelledManual();
+      await candidateSnap.ref.set({ attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(), attachmentStatus: 'cancelled', updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      return 'review_required';
+    }
+  }
+  const evidenceText = chunks.map((chunk) => chunk.text).join('\n').slice(0, 250_000);
+  const classification = classifyDocumentation({
+    title: optionalString(manual.title),
+    fileName: optionalString(manual.title),
+    extractedText: evidenceText,
+  });
+  const compatibility = verifyDocumentationCompatibility({
+    make: optionalString(machine.make),
+    modelNumber: optionalString(machine.modelNumber),
+    serialNumber: optionalString(machine.serialNumber),
+    productFamily: optionalString(machine.productFamily),
+    category: optionalString(machine.category),
+  }, {
+    title: optionalString(candidate.title) ?? optionalString(manual.title),
+    fileName: optionalString(manual.title),
+    extractedText: evidenceText,
+    sourceDomain: optionalString(candidate.sourceDomain),
+    sourceUrl: optionalString(candidate.sourceUrl),
+    serialRangesMentioned: /\bserial(?:\s+number|\s+range|[- ]dependent)?\b/i.test(evidenceText),
+  });
+  const exact = compatibility.level === 'exact' && isRepairDocumentationType(classification.primary);
+  await manualRef.set({
+    automaticClassification: classification.primary,
+    automaticClassificationConfidence: classification.confidence,
+    automaticVerificationLevel: compatibility.level,
+    automaticVerificationEvidence: [...classification.evidence, ...compatibility.evidence, ...(isRepairDocumentationType(classification.primary) ? [] : ['Document type is not approved for repair guidance.'])].slice(0, 20),
+    aiRetrievalEnabled: exact,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  await candidateSnap.ref.set({
+    state: exact ? 'attached' : 'review',
+    classification: classification.primary,
+    classificationConfidence: classification.confidence,
+    verificationLevel: compatibility.level,
+    verificationEvidence: [...classification.evidence, ...compatibility.evidence, ...(isRepairDocumentationType(classification.primary) ? [] : ['Document type is not approved for repair guidance.'])].slice(0, 20),
+    manualId: params.manualId,
+    aiRetrievalEnabled: exact,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  if (!exact) {
+    await candidateSnap.ref.set({ attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(), attachmentStatus: 'review_required', updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await writeDocumentationAudit({
+      db: params.db, organizationId: params.organizationId, machineId, candidateId,
+      previousState: 'approved', newState: 'review', actor: 'automatic-documentation-verifier',
+      evidence: ['Downloaded document was indexed but did not establish an exact machine-model match.', ...compatibility.evidence], reversible: true,
+    });
+    return 'review_required';
+  }
+  await params.db.doc(`organizations/${params.organizationId}/machineDocuments/${params.manualId}`).set({
+    machineId, manualId: params.manualId, candidateId, sourceUrl: optionalString(candidate.sourceUrl) ?? null,
+    sourceDomain: optionalString(candidate.sourceDomain) ?? null, state: 'attached', aiRetrievalEnabled: true,
+    machineModelCompactKey: compactKey(optionalString(machine.modelNumber) ?? ''),
+    verificationLevel: compatibility.level, verificationEvidence: compatibility.evidence,
+    attachedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  await candidateSnap.ref.set({ attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(), attachmentStatus: 'attached', updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  if (jobId) {
+    await params.db.doc(`organizations/${params.organizationId}/documentationJobs/${jobId}`).set({
+      status: 'completed', completedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
+  await writeDocumentationAudit({
+    db: params.db, organizationId: params.organizationId, machineId, candidateId,
+    previousState: 'approved', newState: 'attached', actor: 'automatic-documentation-verifier',
+    evidence: ['Exact machine model verified after indexing.', ...compatibility.evidence], reversible: true,
+  });
+  return 'attached';
 }
 
 async function writeDocumentationAudit(params: {
@@ -2159,6 +2288,174 @@ export const reviewDocumentationCandidate = onRequest(
   },
 );
 
+export const attachApprovedDocumentationCandidate = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 540, concurrency: 1, maxInstances: 2 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const candidateId = requirePathSafeDocumentId(request.body?.candidateId, 'candidateId');
+      await assertOwnerOrAdmin(organizationId, caller.uid);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const candidateRef = db.doc(`organizations/${organizationId}/documentCandidates/${candidateId}`);
+      const manualRef = db.doc(`organizations/${organizationId}/manuals/auto-${candidateId}`);
+      const attachmentReservationToken = randomUUID();
+      const candidate = await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(candidateRef);
+        if (!current.exists) throw new Error('Document candidate not found.');
+        const data = current.data() ?? {};
+        if (data.state !== 'approved') throw new Error('Approve this document candidate before attaching it.');
+        const reservationExpiresAt = timestampMilliseconds(data.attachmentReservationExpiresAt);
+        const attachmentStatus = optionalString(data.attachmentStatus);
+        const existingManual = await transaction.get(manualRef);
+        const existingManualData = existingManual.data() ?? {};
+        const recoverStaleManual = canRecoverStaleAutomaticAttachment({
+          manualExists: existingManual.exists,
+          manualStatus: existingManualData.status,
+          indexingLeaseActive: isManualIndexLeaseActive(timestampMilliseconds(existingManualData.indexingLeaseExpiresAt), Date.now()),
+          ocrActive: isManualOcrJobActive(existingManualData.ocrStatus),
+        });
+        if (!recoverStaleManual && !canStartDocumentationAttachment({
+          candidateState: data.state,
+          reservationToken: data.attachmentReservationToken,
+          reservationExpiresAtMs: reservationExpiresAt,
+          manualExists: existingManual.exists,
+          attachmentStatus,
+          nowMs: Date.now(),
+        })) {
+          throw new Error('This document candidate already has an attachment in progress or completed.');
+        }
+        const jobId = optionalString(data.jobId);
+        if (jobId) {
+          const jobSnap = await transaction.get(db.doc(`organizations/${organizationId}/documentationJobs/${jobId}`));
+          if (!jobSnap.exists || !isDocumentationJobReviewable(jobSnap.data()?.status)) {
+            throw new Error('This documentation job is no longer active.');
+          }
+        }
+        if (recoverStaleManual) {
+          // Remove the stale record in this transaction. That prevents another
+          // worker from acquiring an indexing lease between the recovery check
+          // and the subsequent storage/chunk cleanup.
+          transaction.delete(manualRef);
+        }
+        transaction.set(candidateRef, {
+          attachmentReservationToken,
+          attachmentReservationExpiresAt: Timestamp.fromMillis(Date.now() + 10 * 60 * 1000),
+          manualId: manualRef.id,
+          attachmentStatus: 'downloading',
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return {
+          ...data,
+          recoverStaleManual,
+          staleManualData: recoverStaleManual ? existingManualData : null,
+        } as Record<string, unknown> & { recoverStaleManual: boolean; staleManualData: Record<string, unknown> | null };
+      });
+      if (candidate.recoverStaleManual && candidate.staleManualData) {
+        const staleStoragePath = optionalManualStoragePath(candidate.staleManualData.storagePath, organizationId, manualRef.id);
+        if (staleStoragePath) await getStorage().bucket().file(staleStoragePath).delete();
+        await deleteManualIndexCollections({ db, manualRef, manualData: candidate.staleManualData });
+      }
+      const machineId = requirePathSafeDocumentId(candidate.machineId, 'candidate machineId');
+      const machineSnap = await db.doc(`organizations/${organizationId}/machines/${machineId}`).get();
+      if (!machineSnap.exists) throw new Error('The candidate machine no longer exists.');
+      const machine = machineSnap.data() ?? {};
+      const make = optionalString(machine.make);
+      const modelNumber = optionalString(machine.modelNumber);
+      if (!make || !modelNumber || !isSpecificMachineModel(modelNumber)) {
+        throw new Error('This machine needs a complete make and model number before a document can be attached.');
+      }
+      const config = await documentationAutomationConfig(db, organizationId, machineId, optionalString(machine.locationId));
+      if (!config.enabled) throw new Error('Automatic documentation discovery is disabled for this machine.');
+      const sourceUrl = optionalString(candidate.sourceUrl);
+      if (!sourceUrl) throw new Error('This candidate does not have an approved document URL.');
+      let storagePath: string | null = null;
+      try {
+        const downloaded = await downloadApprovedPdf({ sourceUrl, approvedDomains: config.approvedDomains });
+        const latestCandidate = await candidateRef.get();
+        const latest = latestCandidate.data() ?? {};
+        const latestJobId = optionalString(latest.jobId);
+        const latestJob = latestJobId
+          ? await db.doc(`organizations/${organizationId}/documentationJobs/${latestJobId}`).get()
+          : null;
+        if (!latestCandidate.exists || latest.state !== 'approved' || latest.attachmentReservationToken !== attachmentReservationToken
+          || (latestJob && !isDocumentationJobReviewable(latestJob.data()?.status))) {
+          throw new Error('This documentation job was cancelled or changed before the document could be attached.');
+        }
+        storagePath = `orgs/${organizationId}/manuals/automatic-documentation/${manualRef.id}/${downloaded.fileName}`;
+        await getStorage().bucket().file(storagePath).save(downloaded.bytes, {
+          contentType: 'application/pdf', resumable: false,
+          metadata: { cacheControl: 'private, max-age=0, no-store' },
+        });
+        // A cancellation can arrive while the document is downloading. Recheck
+        // after the storage write so it cannot leave a new manual behind.
+        const postSaveCandidate = await candidateRef.get();
+        const postSave = postSaveCandidate.data() ?? {};
+        const postSaveJobId = optionalString(postSave.jobId);
+        const postSaveJob = postSaveJobId
+          ? await db.doc(`organizations/${organizationId}/documentationJobs/${postSaveJobId}`).get()
+          : null;
+        if (!postSaveCandidate.exists || postSave.state !== 'approved'
+          || postSave.attachmentReservationToken !== attachmentReservationToken
+          || (postSaveJob && !isDocumentationJobReviewable(postSaveJob.data()?.status))) {
+          throw new Error('This documentation job was cancelled or changed before its manual record was created.');
+        }
+        const machineModel = `${make} ${modelNumber}`;
+        await manualRef.set({
+        title: downloaded.fileName, machineModel,
+        machineModelKey: normalizeMachineModelKey(machineModel),
+        machineModelCompactKey: compactKey(machineModel),
+        status: 'processing', indexingStatus: 'processing', indexError: null,
+        storagePath, source: 'Approved automatic documentation candidate',
+        sourceUrl: downloaded.sourceUrl, sourceSha256: downloaded.sha256,
+        automaticDocumentation: true, documentationCandidateId: candidateId, documentationMachineId: machineId,
+        aiRetrievalEnabled: false, linkedMachineCount: 0,
+        createdAt: FieldValue.serverTimestamp(), createdBy: caller.uid,
+        updatedAt: FieldValue.serverTimestamp(), updatedBy: caller.uid,
+        });
+        await candidateRef.set({ manualId: manualRef.id, attachmentStatus: 'indexing', downloadedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        const indexResult = await indexManualRecord({ db, organizationId, manualId: manualRef.id, uid: caller.uid });
+        const attachmentState = indexResult.processing
+          ? 'processing'
+          : await finalizeAutomaticManualAttachment({ db, organizationId, manualId: manualRef.id });
+        if (indexResult.processing) {
+          await candidateRef.set({ attachmentStatus: attachmentState, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        }
+        await writeDocumentationAudit({
+        db, organizationId, machineId, candidateId, previousState: 'approved', newState: attachmentState,
+        actor: caller.uid,
+        evidence: ['Downloaded only from an approved HTTPS domain.', 'PDF signature, redirect, and 25 MB size checks passed.'],
+        reversible: true,
+        });
+        addRateLimitHeaders(response);
+        response.status(200).json({ ok: true, candidateId, manualId: manualRef.id, status: attachmentState, processing: Boolean(indexResult.processing) });
+      } catch (error) {
+        if (storagePath) await getStorage().bucket().file(storagePath).delete().catch(() => undefined);
+        const partial = await manualRef.get();
+        if (partial.exists) {
+          await deleteManualIndexCollections({ db, manualRef, manualData: partial.data() ?? {} }).catch(() => undefined);
+          await manualRef.delete().catch(() => undefined);
+        }
+        await candidateRef.set({
+          attachmentStatus: 'failed',
+          attachmentError: clientSafeErrorMessage(error, 'Manual attachment failed.'),
+          attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_attach_failed', clientSafeErrorMessage(error, 'Could not attach the approved document.'));
+    }
+  },
+);
+
 export const updateOrganizationDocumentationSettings = onRequest(
   { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2 },
   async (request: Request, response: Response) => {
@@ -2208,6 +2505,16 @@ export const cancelDocumentationDiscovery = onRequest(
       const prior = optionalString(jobSnap.data()?.status) ?? 'unknown';
       if (['completed', 'cancelled'].includes(prior)) throw new Error('This documentation job can no longer be cancelled.');
       await jobRef.set({ status: 'cancelled', cancelledBy: caller.uid, cancelledAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      const candidates = await db.collection(`organizations/${organizationId}/documentCandidates`).where('jobId', '==', jobId).get();
+      await Promise.all(candidates.docs.map(async (candidate) => {
+        const state = optionalString(candidate.data().state);
+        if (state === 'attached') return;
+        await candidate.ref.set({
+          state: 'cancelled', aiRetrievalEnabled: false, attachmentStatus: 'cancelled',
+          attachmentReservationToken: FieldValue.delete(), attachmentReservationExpiresAt: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }));
       await writeDocumentationAudit({ db, organizationId, jobId, machineId: optionalString(jobSnap.data()?.machineId), previousState: prior,
         newState: 'cancelled', actor: caller.uid, evidence: ['Administrator cancelled the discovery job before attachment.'], reversible: true });
       response.status(200).json({ ok: true, jobId, status: 'cancelled' });
@@ -2324,6 +2631,7 @@ export const completeManualOcrJobs = onSchedule(
           uid: 'manual-ocr-worker',
           ocrTextOverride: { text, pageCount, requestCount },
         });
+        await finalizeAutomaticManualAttachment({ db, organizationId, manualId });
       },
     });
   },
