@@ -290,6 +290,32 @@ service cloud.firestore {
         allow read: if isOwnerOrAdmin(orgId);
         allow create, update, delete: if false;
       }
+
+      // Documentation discovery state is written only by protected Functions.
+      match /documentationSettings/{settingId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /documentationJobs/{jobId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /documentCandidates/{candidateId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /machineDocuments/{attachmentId} {
+        allow read: if isMember(orgId);
+        allow create, update, delete: if false;
+      }
+
+      match /documentationAuditLogs/{auditId} {
+        allow read: if isOwnerOrAdmin(orgId);
+        allow create, update, delete: if false;
+      }
     }
 
     match /{document=**} {

@@ -191,6 +191,14 @@ async function seedBaseData() {
       action: 'organization.created',
       actorId: 'ownerA',
     });
+    await db.doc('organizations/orgA/documentationSettings/default').set({
+      automaticDocumentationEnabled: true,
+      mode: 'approval',
+    });
+    await db.doc('organizations/orgA/documentationJobs/jobA1').set({ machineId: 'washerA1', status: 'review' });
+    await db.doc('organizations/orgA/documentCandidates/candidateA1').set({ machineId: 'washerA1', state: 'review' });
+    await db.doc('organizations/orgA/machineDocuments/attachmentA1').set({ machineId: 'washerA1', aiRetrievalEnabled: false });
+    await db.doc('organizations/orgA/documentationAuditLogs/auditA1').set({ newState: 'review' });
   });
 }
 
@@ -301,6 +309,25 @@ describe('Firestore organization security', () => {
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1/chunks/chunkA2').set({ text: 'client write' }));
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1/chunks_vm6g7xk_ab12cd/chunkA2').set({ text: 'client write' }));
     await assertFails(ownerA.doc('organizations/orgA/aiDiagnoses/diagnosisA2').set({ workOrderId: 'workA1' }));
+  });
+
+  it('keeps documentation automation records backend-only and admin-visible only', async () => {
+    const ownerA = dbFor('ownerA');
+    const managerA1 = dbFor('managerA1');
+    const techA1 = dbFor('techA1');
+    const ownerB = dbFor('ownerB');
+
+    await assertSucceeds(ownerA.doc('organizations/orgA/documentationSettings/default').get());
+    await assertSucceeds(ownerA.doc('organizations/orgA/documentationJobs/jobA1').get());
+    await assertSucceeds(ownerA.doc('organizations/orgA/documentCandidates/candidateA1').get());
+    await assertSucceeds(ownerA.doc('organizations/orgA/documentationAuditLogs/auditA1').get());
+    await assertSucceeds(techA1.doc('organizations/orgA/machineDocuments/attachmentA1').get());
+
+    await assertFails(managerA1.doc('organizations/orgA/documentationJobs/jobA1').get());
+    await assertFails(techA1.doc('organizations/orgA/documentCandidates/candidateA1').get());
+    await assertFails(ownerB.doc('organizations/orgA/documentationAuditLogs/auditA1').get());
+    await assertFails(ownerA.doc('organizations/orgA/documentationJobs/jobA2').set({ machineId: 'washerA1' }));
+    await assertFails(ownerA.doc('organizations/orgA/documentCandidates/candidateA1').update({ state: 'approved' }));
   });
 
   it('limits maintenance records to three photo attachments', async () => {

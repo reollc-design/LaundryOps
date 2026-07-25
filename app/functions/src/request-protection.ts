@@ -6,7 +6,8 @@ export type RequestRateLimitOperation =
   | 'reindexManuals'
   | 'deleteManual'
   | 'stripeCheckout'
-  | 'billingPortal';
+  | 'billingPortal'
+  | 'documentationDiscovery';
 
 export interface RateLimitPolicy {
   limit: number;
@@ -20,6 +21,7 @@ export const REQUEST_RATE_LIMIT_POLICIES: Record<RequestRateLimitOperation, Rate
   deleteManual: { limit: 10, windowSeconds: 60 },
   stripeCheckout: { limit: 5, windowSeconds: 300 },
   billingPortal: { limit: 10, windowSeconds: 60 },
+  documentationDiscovery: { limit: 5, windowSeconds: 300 },
 };
 
 export interface RateLimitRecord {

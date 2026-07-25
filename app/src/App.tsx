@@ -2881,6 +2881,14 @@ function MachineDetailScreen({
         <Shortcut icon={Camera} label="Add Photo" onClick={onCreateWorkOrder} />
       </div>
 
+      <section className="content-section documentation-summary">
+        <div className="section-heading">
+          <h2>Documentation</h2>
+          <button type="button" onClick={() => setActiveScreen('manuals')}>Manuals <ChevronRight size={14} /></button>
+        </div>
+        <p className="empty-state">Manufacturer manual upload is available now. Automatic documentation discovery is off until an administrator enables it for this company.</p>
+      </section>
+
       <div className="stat-grid">
         <SmallStat label="Lifetime Repair Cost" value="Not set" tone="teal" />
         <SmallStat label="Last Service" value="Not set" />

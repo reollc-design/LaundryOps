@@ -65,6 +65,14 @@ import {
   timestampToMilliseconds,
 } from './trial.js';
 import {
+  canTransitionCandidate,
+  effectiveDocumentationSettings,
+  isDocumentationJobReviewable,
+  safeDocumentationUrl,
+  type DocumentationCandidateState,
+} from './automatic-documentation.js';
+import { createTavilyDocumentationSearch } from './documentation-search.js';
+import {
   buildStripeBillingEventState,
   decideStripeBillingEvent,
   shouldUpdateOrganizationBillingState,
@@ -81,6 +89,7 @@ const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const openAiApiKey = defineSecret('OPENAI_API_KEY');
 const documentAiOcrProcessorId = defineString('DOCUMENT_AI_OCR_PROCESSOR_ID');
 const documentAiOcrLocation = defineString('DOCUMENT_AI_OCR_LOCATION', { default: 'us' });
+const tavilyApiKey = defineSecret('TAVILY_API_KEY');
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
 const DEFAULT_MONTHLY_PRICE_ID = 'price_1TaMpBJkHhybNz7F4VtKJ5Na';
@@ -380,6 +389,30 @@ function machineContextFromDoc(id: string, data: Record<string, unknown>): Machi
     modelNumber,
     model,
   };
+}
+
+async function requirePlatformDocumentationAdmin(request: Request): Promise<{ uid: string }> {
+  ensureFirebaseAdmin();
+  const idToken = bearerTokenFromHeader(request.headers.authorization);
+  const decoded = await getAuth().verifyIdToken(idToken);
+  if (decoded.platformDocumentationAdmin !== true) {
+    throw new OrganizationAccessError('Platform documentation administrator access is required.');
+  }
+  return { uid: decoded.uid };
+}
+
+function safeDocumentationDomains(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 100) throw new Error('Provide up to 100 approved domains.');
+  const domains = value.map((item) => typeof item === 'string' ? item.trim().toLowerCase().replace(/^\./, '') : '');
+  if (domains.some((domain) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain))) {
+    throw new Error('One approved domain is invalid.');
+  }
+  return Array.from(new Set(domains));
+}
+
+function safeDocumentationIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 500) throw new Error('Provide up to 500 identifiers.');
+  return Array.from(new Set(value.map((item) => requirePathSafeDocumentId(item, 'documentation identifier'))));
 }
 
 function machineManualLinkFields(data: Record<string, unknown>): {
@@ -1928,6 +1961,278 @@ export const reindexOrganizationManuals = onRequest(
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Manual bulk re-index failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_bulk_reindex_failed', message);
+    }
+  },
+);
+
+async function documentationAutomationConfig(db: Firestore, organizationId: string, machineId: string, locationId?: string): Promise<{
+  enabled: boolean;
+  mode: 'observation' | 'approval' | 'automatic';
+  reason: string;
+  approvedDomains: string[];
+}> {
+  const [platformSnap, settingsSnap] = await Promise.all([
+    db.doc('platformConfig/automaticDocumentation').get(),
+    db.doc(`organizations/${organizationId}/documentationSettings/default`).get(),
+  ]);
+  const platform = platformSnap.data() ?? {};
+  const settings = settingsSnap.data() ?? {};
+  const effective = effectiveDocumentationSettings({
+    globalEnabled: platform.enabled === true,
+    organization: settings,
+    machineId,
+    locationId,
+  });
+  const approvedDomains = Array.isArray(platform.approvedDomains)
+    ? platform.approvedDomains.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean)
+    : [];
+  return { ...effective, approvedDomains };
+}
+
+async function writeDocumentationAudit(params: {
+  db: Firestore;
+  organizationId: string;
+  jobId?: string;
+  machineId?: string;
+  candidateId?: string;
+  previousState?: string | null;
+  newState: string;
+  actor: string;
+  evidence: string[];
+  reversible: boolean;
+}): Promise<void> {
+  await params.db.collection(`organizations/${params.organizationId}/documentationAuditLogs`).add({
+    jobId: params.jobId ?? null,
+    machineId: params.machineId ?? null,
+    candidateId: params.candidateId ?? null,
+    previousState: params.previousState ?? null,
+    newState: params.newState,
+    actor: params.actor,
+    evidence: params.evidence.slice(0, 20),
+    reversible: params.reversible,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
+
+export const requestDocumentationDiscovery = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2, secrets: [tavilyApiKey] },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const machineId = requirePathSafeDocumentId(request.body?.machineId, 'machineId');
+      await assertManualManager(organizationId, caller.uid);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const machineSnap = await db.doc(`organizations/${organizationId}/machines/${machineId}`).get();
+      if (!machineSnap.exists) throw new Error('Machine not found.');
+      const machine = machineSnap.data() ?? {};
+      const modelNumber = optionalString(machine.modelNumber);
+      const make = optionalString(machine.make);
+      if (!make || !modelNumber || !isSpecificMachineModel(modelNumber)) {
+        throw new Error('Enter a complete machine make and model number before searching for documentation.');
+      }
+      const config = await documentationAutomationConfig(db, organizationId, machineId, optionalString(machine.locationId));
+      if (!config.enabled) {
+        throw new Error('Automatic documentation discovery is disabled for this machine. Manual upload remains available.');
+      }
+      const jobRef = db.collection(`organizations/${organizationId}/documentationJobs`).doc();
+      const searchQuery = `${make} ${modelNumber} service manual`;
+      const hasProvider = Boolean(tavilyApiKey.value()?.trim());
+      const searchResults = hasProvider
+        ? await createTavilyDocumentationSearch({ apiKey: tavilyApiKey.value() }).search(searchQuery, config.approvedDomains)
+        : [];
+      const status = config.mode === 'observation'
+        ? (hasProvider ? 'observed_candidates' : 'observed_no_provider')
+        : (hasProvider ? 'candidates_pending_review' : 'manual_input_required');
+      await jobRef.set({
+        machineId, make, modelNumber, serialNumber: optionalString(machine.serialNumber) ?? null,
+        mode: config.mode, status, sourceProvider: hasProvider ? 'tavily' : null, searchQueries: [searchQuery],
+        sourcesChecked: ['globalDocumentLibrary', ...(hasProvider ? ['tavily-approved-domains'] : [])], candidateCount: searchResults.length, createdBy: caller.uid,
+        createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+        errorMessage: hasProvider ? null : 'No configured search provider. Submit an approved source URL or upload the manufacturer PDF.',
+      });
+      if (config.mode !== 'observation') {
+        await Promise.all(searchResults.map(async (result) => {
+          const candidateRef = db.collection(`organizations/${organizationId}/documentCandidates`).doc();
+          await candidateRef.set({
+            jobId: jobRef.id, machineId, sourceUrl: result.url, sourceDomain: new URL(result.url).hostname,
+            title: result.title, discoveryScore: result.score, state: 'review', verificationLevel: 'review',
+            classification: 'unknown', aiRetrievalEnabled: false, createdBy: 'documentation-search',
+            createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+          });
+          await writeDocumentationAudit({ db, organizationId, jobId: jobRef.id, machineId, candidateId: candidateRef.id,
+            newState: 'review', actor: 'documentation-search', evidence: ['Found through approved-domain search.', 'Not downloaded, attached, indexed, or AI-eligible.'], reversible: true });
+        }));
+      }
+      await writeDocumentationAudit({ db, organizationId, jobId: jobRef.id, machineId, newState: status, actor: caller.uid,
+        evidence: hasProvider ? ['Feature enabled in controlled mode.', `${searchResults.length} approved-domain candidates found.`] : ['Feature enabled in controlled mode.', 'No web search provider is configured.'], reversible: true });
+      addRateLimitHeaders(response);
+      response.status(200).json({ ok: true, jobId: jobRef.id, status, mode: config.mode });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_discovery_failed', clientSafeErrorMessage(error, 'Could not start documentation discovery.'));
+    }
+  },
+);
+
+export const submitDocumentationCandidateUrl = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const machineId = requirePathSafeDocumentId(request.body?.machineId, 'machineId');
+      await assertManualManager(organizationId, caller.uid);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const machineSnap = await db.doc(`organizations/${organizationId}/machines/${machineId}`).get();
+      if (!machineSnap.exists) throw new Error('Machine not found.');
+      const config = await documentationAutomationConfig(db, organizationId, machineId, optionalString(machineSnap.data()?.locationId));
+      if (!config.enabled) throw new Error('Automatic documentation discovery is disabled for this machine.');
+      const sourceUrl = safeDocumentationUrl(request.body?.sourceUrl, config.approvedDomains);
+      if (!sourceUrl) throw new Error('Use an HTTPS document URL from an approved manufacturer or distributor domain.');
+      const candidateRef = db.collection(`organizations/${organizationId}/documentCandidates`).doc();
+      await candidateRef.set({
+        machineId, sourceUrl: sourceUrl.toString(), sourceDomain: sourceUrl.hostname, state: 'review',
+        verificationLevel: 'review', classification: 'unknown', aiRetrievalEnabled: false,
+        createdBy: caller.uid, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+      });
+      await writeDocumentationAudit({ db, organizationId, machineId, candidateId: candidateRef.id, newState: 'review', actor: caller.uid,
+        evidence: ['Candidate URL submitted from approved domain.', 'Download and classification are pending backend provider configuration.'], reversible: true });
+      addRateLimitHeaders(response);
+      response.status(200).json({ ok: true, candidateId: candidateRef.id, state: 'review' });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_candidate_failed', clientSafeErrorMessage(error, 'Could not submit document candidate.'));
+    }
+  },
+);
+
+export const reviewDocumentationCandidate = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const candidateId = requirePathSafeDocumentId(request.body?.candidateId, 'candidateId');
+      const requestedState = request.body?.state;
+      if (requestedState !== 'approved' && requestedState !== 'rejected') {
+        throw new Error('Choose approved or rejected when reviewing a document candidate.');
+      }
+      const nextState: DocumentationCandidateState = requestedState;
+      await assertOwnerOrAdmin(organizationId, caller.uid);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const candidateRef = db.doc(`organizations/${organizationId}/documentCandidates/${candidateId}`);
+      const candidateSnap = await candidateRef.get();
+      if (!candidateSnap.exists) throw new Error('Document candidate not found.');
+      const previousState = optionalString(candidateSnap.data()?.state) as DocumentationCandidateState | undefined;
+      if (!previousState || !canTransitionCandidate(previousState, nextState)) throw new Error('This candidate cannot be moved to the requested state.');
+      const jobId = optionalString(candidateSnap.data()?.jobId);
+      if (jobId) {
+        const jobSnap = await db.doc(`organizations/${organizationId}/documentationJobs/${jobId}`).get();
+        if (!jobSnap.exists || !isDocumentationJobReviewable(jobSnap.data()?.status)) {
+          throw new Error('This candidate cannot be reviewed because its documentation job is no longer active.');
+        }
+      }
+      await candidateRef.set({ state: nextState, reviewedBy: caller.uid, reviewedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      await writeDocumentationAudit({ db, organizationId, machineId: optionalString(candidateSnap.data()?.machineId), candidateId,
+        previousState, newState: nextState, actor: caller.uid, evidence: ['Administrator review recorded.'], reversible: true });
+      response.status(200).json({ ok: true, candidateId, state: nextState, aiRetrievalEnabled: false });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_review_failed', clientSafeErrorMessage(error, 'Could not review document candidate.'));
+    }
+  },
+);
+
+export const updateOrganizationDocumentationSettings = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') { writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.'); return; }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      await assertOwnerOrAdmin(organizationId, caller.uid);
+      const enabled = request.body?.automaticDocumentationEnabled;
+      const mode = request.body?.mode;
+      if (typeof enabled !== 'boolean' || !['observation', 'approval', 'automatic'].includes(String(mode))) {
+        throw new Error('Choose whether discovery is enabled and select observation, approval, or automatic mode.');
+      }
+      const disabledForLocationIds = safeDocumentationIds(request.body?.disabledForLocationIds ?? []);
+      const disabledForMachineIds = safeDocumentationIds(request.body?.disabledForMachineIds ?? []);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      await db.doc(`organizations/${organizationId}/documentationSettings/default`).set({
+        automaticDocumentationEnabled: enabled, mode, disabledForLocationIds, disabledForMachineIds,
+        updatedBy: caller.uid, updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await writeDocumentationAudit({ db, organizationId, newState: enabled ? `settings_${mode}` : 'settings_disabled', actor: caller.uid,
+        evidence: ['Organization documentation settings updated through protected endpoint.'], reversible: true });
+      response.status(200).json({ ok: true, automaticDocumentationEnabled: enabled, mode });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_settings_failed', clientSafeErrorMessage(error, 'Could not update documentation settings.'));
+    }
+  },
+);
+
+export const cancelDocumentationDiscovery = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 4, maxInstances: 2 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') { writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.'); return; }
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'documentationDiscovery', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const jobId = requirePathSafeDocumentId(request.body?.jobId, 'jobId');
+      await assertOwnerOrAdmin(organizationId, caller.uid);
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const jobRef = db.doc(`organizations/${organizationId}/documentationJobs/${jobId}`);
+      const jobSnap = await jobRef.get();
+      if (!jobSnap.exists) throw new Error('Documentation job not found.');
+      const prior = optionalString(jobSnap.data()?.status) ?? 'unknown';
+      if (['completed', 'cancelled'].includes(prior)) throw new Error('This documentation job can no longer be cancelled.');
+      await jobRef.set({ status: 'cancelled', cancelledBy: caller.uid, cancelledAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      await writeDocumentationAudit({ db, organizationId, jobId, machineId: optionalString(jobSnap.data()?.machineId), previousState: prior,
+        newState: 'cancelled', actor: caller.uid, evidence: ['Administrator cancelled the discovery job before attachment.'], reversible: true });
+      response.status(200).json({ ok: true, jobId, status: 'cancelled' });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'documentation_cancel_failed', clientSafeErrorMessage(error, 'Could not cancel documentation discovery.'));
+    }
+  },
+);
+
+export const updateGlobalDocumentationSettings = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 60, concurrency: 2, maxInstances: 1 },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') { writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.'); return; }
+    try {
+      const admin = await requirePlatformDocumentationAdmin(request);
+      const enabled = request.body?.enabled;
+      if (typeof enabled !== 'boolean') throw new Error('Choose whether global documentation discovery is enabled.');
+      const approvedDomains = safeDocumentationDomains(request.body?.approvedDomains ?? []);
+      ensureFirebaseAdmin();
+      await getFirestore().doc('platformConfig/automaticDocumentation').set({
+        enabled, approvedDomains, updatedBy: admin.uid, updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      response.status(200).json({ ok: true, enabled, approvedDomainCount: approvedDomains.length });
+    } catch (error) {
+      writeError(response, httpStatusForError(error, 400), 'global_documentation_settings_failed', clientSafeErrorMessage(error, 'Could not update global documentation settings.'));
     }
   },
 );
