@@ -49,7 +49,6 @@ The `Deploy LaundryOps staging` workflow is manual-only. It can run only when
 
 Configure these GitHub repository secrets before running it:
 
-- `FIREBASE_SERVICE_ACCOUNT_LAUNDRYOPS_STAGING`
 - `STAGING_VITE_FIREBASE_API_KEY`
 - `STAGING_VITE_FIREBASE_AUTH_DOMAIN`
 - `STAGING_VITE_FIREBASE_PROJECT_ID`
@@ -60,8 +59,14 @@ Configure these GitHub repository secrets before running it:
 - `STAGING_VITE_FUNCTIONS_API_BASE_URL`
 - `STAGING_DOCUMENT_AI_OCR_PROCESSOR_ID`
 
-The GitHub credential must be scoped to the `laundryops-staging` project only.
-Never reuse the production Firebase credential for this job.
-It also needs read-only metadata access to confirm the staging Function secret
-names `OPENAI_API_KEY` and `TAVILY_API_KEY`; the workflow never reads their
-values.
+Configure these GitHub repository variables, which are identifiers rather than
+secrets:
+
+- `LAUNDRYOPS_STAGING_WIF_PROVIDER`
+- `LAUNDRYOPS_STAGING_DEPLOY_SA`
+
+The GitHub identity connection and deployer service account must be scoped to
+the `laundryops-staging` project only. Never reuse the production credential
+or a downloadable private key. The deployer also needs read-only metadata
+access to confirm the staging Function secret names `OPENAI_API_KEY` and
+`TAVILY_API_KEY`; the workflow never reads their values.

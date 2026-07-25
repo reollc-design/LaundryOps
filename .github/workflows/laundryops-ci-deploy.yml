@@ -220,6 +220,9 @@ jobs:
   deploy-staging:
     name: Deploy LaundryOps staging
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     concurrency:
       group: laundryops-staging
       cancel-in-progress: false
@@ -265,7 +268,8 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_LAUNDRYOPS_STAGING }}'
+          workload_identity_provider: '${{ vars.LAUNDRYOPS_STAGING_WIF_PROVIDER }}'
+          service_account: '${{ vars.LAUNDRYOPS_STAGING_DEPLOY_SA }}'
 
       - name: Verify staging Firebase config
         shell: bash
