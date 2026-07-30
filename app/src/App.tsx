@@ -642,9 +642,18 @@ export function App() {
     machineMake: '',
     machineModelNumber: '',
   });
+  const [pendingOnboardingOrganization, setPendingOnboardingOrganization] = useState<{
+    userId: string;
+    organizationId: string;
+  } | null>(null);
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
-  const defaultOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
+  const profileOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
+  const pendingOrganizationId =
+    authSession.user && pendingOnboardingOrganization?.userId === authSession.user.uid
+      ? pendingOnboardingOrganization.organizationId
+      : null;
+  const defaultOrganizationId = profileOrganizationId ?? pendingOrganizationId;
   const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
   const organizationTrial = useOrganizationTrial(authSession.user, defaultOrganizationId);
   const workspaceTrialExpired = orgConnected && organizationTrial.status === 'expired';
@@ -718,6 +727,22 @@ export function App() {
       setActiveScreen('sign-in');
     }
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
+  useEffect(() => {
+    const authenticatedUserId = authSession.user?.uid ?? null;
+    if (
+      !authenticatedUserId
+      || (
+        pendingOnboardingOrganization
+        && pendingOnboardingOrganization.userId !== authenticatedUserId
+      )
+      || (
+        profileOrganizationId
+        && pendingOnboardingOrganization?.userId === authenticatedUserId
+      )
+    ) {
+      setPendingOnboardingOrganization(null);
+    }
+  }, [authSession.user?.uid, pendingOnboardingOrganization, profileOrganizationId]);
   useEffect(() => {
     if (authSession.loading || !authSession.configured) {
       return;
@@ -837,8 +862,17 @@ export function App() {
     }
   };
   const handleOwnerOnboardingFinish = async (draft: OwnerOnboardingDraft): Promise<string | null> => {
+    const submittingUserId = authSession.user?.uid;
+    if (!submittingUserId) {
+      return 'Your sign-in session ended before setup finished. Sign in and try again.';
+    }
+
     try {
-      await completeOwnerOnboarding(draft);
+      const result = await completeOwnerOnboarding(draft);
+      setPendingOnboardingOrganization({
+        userId: submittingUserId,
+        organizationId: result.organizationId,
+      });
       setActiveScreen('home');
       return null;
     } catch (error) {
