@@ -735,14 +735,10 @@ export function App() {
         pendingOnboardingOrganization
         && pendingOnboardingOrganization.userId !== authenticatedUserId
       )
-      || (
-        profileOrganizationId
-        && pendingOnboardingOrganization?.userId === authenticatedUserId
-      )
     ) {
       setPendingOnboardingOrganization(null);
     }
-  }, [authSession.user?.uid, pendingOnboardingOrganization, profileOrganizationId]);
+  }, [authSession.user?.uid, pendingOnboardingOrganization]);
   useEffect(() => {
     if (authSession.loading || !authSession.configured) {
       return;
