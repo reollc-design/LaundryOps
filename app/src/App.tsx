@@ -1444,8 +1444,8 @@ function WelcomeScreen({
       <section className="welcome-hero">
         <div>
           <span className="trial-badge"><Star size={15} fill="currentColor" /> 14-Day Free Trial</span>
-          <h1>More <span className="uptime-word">uptime</span>. <br />More <span className="revenue-word">revenue</span>.</h1>
-          <p>Track machines, maintenance records, manuals, repair spend, and manual-grounded AI from one Android-first app.</p>
+          <h1>More <span className="uptime-word">uptime</span> <br />More <span className="revenue-word">revenue</span></h1>
+          <p>Track machines, maintenance records, manuals, and repair spend. Diagnose machine problems with built-in AI that uses your machine manuals.</p>
         </div>
         <div className="welcome-machine">
           <MachineIllustration />
