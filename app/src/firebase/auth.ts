@@ -54,11 +54,22 @@ async function upsertGoogleUserProfile(credential: UserCredential, db: Firestore
   );
 }
 
+async function upsertGoogleUserProfileAfterSignIn(credential: UserCredential, db: Firestore): Promise<void> {
+  try {
+    await upsertGoogleUserProfile(credential, db);
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code ?? 'unknown')
+      : 'unknown';
+    console.warn('Google authentication succeeded; profile setup will continue during onboarding.', { code });
+  }
+}
+
 export async function signInWithGoogle(): Promise<UserCredential> {
   const { auth, db } = requireFirebaseAuth();
   const provider = getGoogleAuthProvider();
   const credential = await signInWithPopup(auth, provider);
-  await upsertGoogleUserProfile(credential, db);
+  await upsertGoogleUserProfileAfterSignIn(credential, db);
   return credential;
 }
 
@@ -74,7 +85,7 @@ export async function completeGoogleSignInRedirect(): Promise<UserCredential | n
   if (!credential) {
     return null;
   }
-  await upsertGoogleUserProfile(credential, db);
+  await upsertGoogleUserProfileAfterSignIn(credential, db);
   return credential;
 }
 

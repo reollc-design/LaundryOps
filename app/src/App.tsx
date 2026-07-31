@@ -302,6 +302,46 @@ function getAuthErrorMessage(error: unknown): string {
   return maybeError.message ?? 'Authentication failed. Try again.';
 }
 
+function getGoogleSignInErrorMessage(error: unknown): string {
+  if (typeof error !== 'object' || error === null) {
+    return 'Google sign-in failed. Try again.';
+  }
+
+  const maybeError = error as { code?: string; message?: string };
+  const code = maybeError.code ?? '';
+
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return 'Google sign-in was closed before it finished.';
+  }
+  if (code === 'auth/popup-blocked') {
+    return 'Your browser blocked the Google sign-in window. Allow popups for LaundryOps and try again.';
+  }
+  if (code === 'auth/operation-not-supported-in-this-environment') {
+    return 'Google sign-in is not available in this browser environment.';
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return 'Google sign-in is not enabled for LaundryOps yet.';
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return 'This website is not authorized for Google sign-in yet.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Google sign-in could not reach Firebase. Check your connection and try again.';
+  }
+  if (code === 'auth/account-exists-with-different-credential') {
+    return 'This email is already associated with another sign-in method.';
+  }
+  if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
+    return 'Google sign-in failed to complete. Check Google sign-in is enabled and try again.';
+  }
+  if (code === 'auth/redirect-cancelled-by-user') {
+    return 'Google redirect sign-in was canceled.';
+  }
+
+  // Keep Google flow failures from leaking into email/password copy.
+  return 'Google sign-in failed. Try again.';
+}
+
 function shouldFallbackToGoogleRedirect(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) {
     return false;
@@ -828,11 +868,10 @@ export function App() {
           await signInWithGoogleRedirect();
           return null;
         } catch (redirectError) {
-          return getAuthErrorMessage(redirectError);
+          return getGoogleSignInErrorMessage(redirectError);
         }
       }
-
-      return getAuthErrorMessage(error);
+      return getGoogleSignInErrorMessage(error);
     }
   };
   const handleOwnerCreate = async (draft: OwnerOnboardingDraft, password: string): Promise<string | null> => {
