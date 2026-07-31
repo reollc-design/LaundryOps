@@ -81,6 +81,7 @@ import { useOrganizationMembership } from './hooks/useOrganizationMembership';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
 import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
+import { logOnboardingRedirect, logOnboardingWrite } from './onboardingDebug';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
@@ -234,7 +235,12 @@ function trialDaysRemaining(milliseconds: number | null): number {
 
 function getInitialScreen(): ScreenKey {
   const requestedScreen = new URLSearchParams(window.location.search).get('screen');
-  return requestedScreen && requestedScreen in screenTitles ? (requestedScreen as ScreenKey) : 'welcome';
+  const initialScreen = requestedScreen && requestedScreen in screenTitles ? (requestedScreen as ScreenKey) : 'welcome';
+  logOnboardingRedirect('initial-screen-selected', {
+    requestedScreen,
+    selectedScreen: initialScreen,
+  });
+  return initialScreen;
 }
 
 const protectedScreens: ScreenKey[] = [
@@ -686,6 +692,7 @@ export function App() {
     userId: string;
     organizationId: string;
   } | null>(null);
+  const previousOnboardingStateSnapshot = useRef<string | null>(null);
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
   const profileOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
@@ -754,18 +761,79 @@ export function App() {
   const title = screenTitles[activeScreen];
 
   useEffect(() => {
+    const snapshot = {
+      activeScreen,
+      authConfigured: authSession.configured,
+      authLoading: authSession.loading,
+      authenticated: Boolean(authSession.user),
+      profileLoading: userProfile.loading,
+      profileLoaded: userProfile.loaded,
+      profileErrorPresent: Boolean(userProfile.error),
+      hasProfileOrganization: Boolean(profileOrganizationId),
+      hasPendingOrganization: Boolean(pendingOrganizationId),
+      pendingOrganizationMatchesUser: Boolean(
+        authSession.user
+        && pendingOnboardingOrganization?.userId === authSession.user.uid
+      ),
+      hasEffectiveOrganization: Boolean(defaultOrganizationId),
+      organizationConnected: orgConnected,
+      machineListenerLoading: orgMachines.loading,
+      machineCount: orgMachines.machines.length,
+    };
+    const serializedSnapshot = JSON.stringify(snapshot);
+    if (previousOnboardingStateSnapshot.current !== serializedSnapshot) {
+      previousOnboardingStateSnapshot.current = serializedSnapshot;
+      logOnboardingRedirect('app-state-snapshot', snapshot);
+    }
+  }, [
+    activeScreen,
+    authSession.configured,
+    authSession.loading,
+    authSession.user,
+    defaultOrganizationId,
+    orgConnected,
+    orgMachines.loading,
+    orgMachines.machines.length,
+    pendingOnboardingOrganization?.userId,
+    pendingOrganizationId,
+    profileOrganizationId,
+    userProfile.error,
+    userProfile.loaded,
+    userProfile.loading,
+  ]);
+
+  useEffect(() => {
     if (authSession.loading || !authSession.configured) {
+      logOnboardingRedirect('auth-route-guard-waiting', {
+        activeScreen,
+        authLoading: authSession.loading,
+        authConfigured: authSession.configured,
+      });
       return;
     }
 
     if (!authSession.user && activeScreen === 'owner-onboarding') {
+      logOnboardingRedirect('route-to-create-account', {
+        from: activeScreen,
+        reason: 'owner-onboarding-requires-authenticated-user',
+      });
       setActiveScreen('create-account');
       return;
     }
 
     if (!authSession.user && protectedScreens.includes(activeScreen)) {
+      logOnboardingRedirect('route-to-sign-in', {
+        from: activeScreen,
+        reason: 'protected-screen-requires-authenticated-user',
+      });
       setActiveScreen('sign-in');
+      return;
     }
+
+    logOnboardingRedirect('auth-route-guard-no-redirect', {
+      activeScreen,
+      authenticated: Boolean(authSession.user),
+    });
   }, [activeScreen, authSession.configured, authSession.loading, authSession.user]);
   useEffect(() => {
     const authenticatedUserId = authSession.user?.uid ?? null;
@@ -776,35 +844,98 @@ export function App() {
         && pendingOnboardingOrganization.userId !== authenticatedUserId
       )
     ) {
+      logOnboardingRedirect('pending-organization-cleared', {
+        authenticated: Boolean(authenticatedUserId),
+        hasPendingOrganization: Boolean(pendingOnboardingOrganization),
+        pendingOrganizationMatchesUser: Boolean(
+          authenticatedUserId
+          && pendingOnboardingOrganization?.userId === authenticatedUserId
+        ),
+        reason: !authenticatedUserId ? 'no-authenticated-user' : 'pending-user-does-not-match-authenticated-user',
+      });
       setPendingOnboardingOrganization(null);
+      return;
     }
+    logOnboardingRedirect('pending-organization-retained', {
+      authenticated: Boolean(authenticatedUserId),
+      hasPendingOrganization: Boolean(pendingOnboardingOrganization),
+      pendingOrganizationMatchesUser: Boolean(
+        authenticatedUserId
+        && pendingOnboardingOrganization?.userId === authenticatedUserId
+      ),
+    });
   }, [authSession.user?.uid, pendingOnboardingOrganization]);
   useEffect(() => {
     if (authSession.loading || !authSession.configured) {
+      logOnboardingRedirect('google-redirect-check-waiting', {
+        authLoading: authSession.loading,
+        authConfigured: authSession.configured,
+      });
       return;
     }
 
     void (async () => {
       try {
-        await completeGoogleSignInRedirect();
+        logOnboardingRedirect('google-redirect-check-started');
+        const credential = await completeGoogleSignInRedirect();
+        logOnboardingRedirect('google-redirect-check-finished', {
+          credentialFound: Boolean(credential),
+        });
       } catch (error) {
-        console.error('Unable to complete Google redirect sign-in.', error);
+        logOnboardingRedirect('google-redirect-check-failed', {
+          code: typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code?: unknown }).code ?? 'unknown')
+            : 'unknown',
+          name: error instanceof Error ? error.name : 'unknown',
+        });
+        console.error('Unable to complete Google redirect sign-in.');
       }
     })();
   }, [authSession.configured, authSession.loading]);
   useEffect(() => {
     if (authSession.loading || userProfile.loading || !userProfile.loaded || !authSession.configured || !authSession.user) {
+      logOnboardingRedirect('organization-route-guard-waiting', {
+        activeScreen,
+        authLoading: authSession.loading,
+        profileLoading: userProfile.loading,
+        profileLoaded: userProfile.loaded,
+        authConfigured: authSession.configured,
+        authenticated: Boolean(authSession.user),
+        hasProfileOrganization: Boolean(profileOrganizationId),
+        hasPendingOrganization: Boolean(pendingOrganizationId),
+      });
       return;
     }
 
     if (defaultOrganizationId && accountSetupScreens.includes(activeScreen)) {
+      logOnboardingRedirect('route-to-home', {
+        from: activeScreen,
+        reason: profileOrganizationId ? 'profile-organization-found' : 'confirmed-pending-organization-found',
+        hasEffectiveOrganization: Boolean(defaultOrganizationId),
+        hasProfileOrganization: Boolean(profileOrganizationId),
+        hasPendingOrganization: Boolean(pendingOrganizationId),
+      });
       setActiveScreen('home');
       return;
     }
 
     if (!defaultOrganizationId && protectedScreens.includes(activeScreen)) {
+      logOnboardingRedirect('route-to-owner-onboarding', {
+        from: activeScreen,
+        reason: 'protected-screen-has-no-profile-or-pending-organization',
+        hasProfileOrganization: Boolean(profileOrganizationId),
+        hasPendingOrganization: Boolean(pendingOrganizationId),
+      });
       setActiveScreen('owner-onboarding');
+      return;
     }
+
+    logOnboardingRedirect('organization-route-guard-no-redirect', {
+      activeScreen,
+      hasEffectiveOrganization: Boolean(defaultOrganizationId),
+      hasProfileOrganization: Boolean(profileOrganizationId),
+      hasPendingOrganization: Boolean(pendingOrganizationId),
+    });
   }, [
     activeScreen,
     authSession.configured,
@@ -851,6 +982,10 @@ export function App() {
   const handleEmailSignIn = async (email: string, password: string): Promise<string | null> => {
     try {
       await signInWithEmail(email, password);
+      logOnboardingRedirect('email-sign-in-requested-home', {
+        from: activeScreen,
+        reason: 'email-authentication-succeeded',
+      });
       setActiveScreen('home');
       return null;
     } catch (error) {
@@ -860,11 +995,19 @@ export function App() {
   const handleGoogleSignIn = async (): Promise<string | null> => {
     try {
       await signInWithGoogle();
+      logOnboardingRedirect('google-sign-in-requested-home', {
+        from: activeScreen,
+        reason: 'google-popup-authentication-succeeded',
+      });
       setActiveScreen('home');
       return null;
     } catch (error) {
       if (shouldFallbackToGoogleRedirect(error)) {
         try {
+          logOnboardingRedirect('google-sign-in-requested-redirect', {
+            from: activeScreen,
+            reason: 'google-popup-unavailable',
+          });
           await signInWithGoogleRedirect();
           return null;
         } catch (redirectError) {
@@ -878,6 +1021,10 @@ export function App() {
     try {
       await createOwnerAccount(draft.operatorName, draft.ownerEmail, password);
       setOnboardingDraft(draft);
+      logOnboardingRedirect('owner-account-requested-onboarding', {
+        from: activeScreen,
+        reason: 'owner-account-created',
+      });
       setActiveScreen('owner-onboarding');
       return null;
     } catch (error) {
@@ -889,6 +1036,10 @@ export function App() {
     setSignOutBusy(true);
     try {
       await signOutCurrentUser();
+      logOnboardingRedirect('sign-out-requested-sign-in', {
+        from: activeScreen,
+        reason: 'firebase-sign-out-succeeded',
+      });
       setActiveScreen('sign-in');
     } catch (error) {
       setSignOutError(getAuthErrorMessage(error));
@@ -898,19 +1049,49 @@ export function App() {
   };
   const handleOwnerOnboardingFinish = async (draft: OwnerOnboardingDraft): Promise<string | null> => {
     const submittingUserId = authSession.user?.uid;
+    logOnboardingWrite('step-3-submit-handler-entered', {
+      authenticated: Boolean(submittingUserId),
+      activeScreen,
+      hasProfileOrganization: Boolean(profileOrganizationId),
+      hasPendingOrganization: Boolean(pendingOrganizationId),
+    });
     if (!submittingUserId) {
+      logOnboardingWrite('step-3-submit-handler-blocked', {
+        reason: 'no-authenticated-user',
+      });
       return 'Your sign-in session ended before setup finished. Sign in and try again.';
     }
 
     try {
       const result = await completeOwnerOnboarding(draft);
+      logOnboardingWrite('step-3-onboarding-write-returned', {
+        organizationCreated: Boolean(result.organizationId),
+        locationCreated: Boolean(result.locationId),
+        machineCreated: Boolean(result.machineId),
+      });
       setPendingOnboardingOrganization({
         userId: submittingUserId,
         organizationId: result.organizationId,
       });
+      logOnboardingRedirect('pending-organization-state-update-requested', {
+        reason: 'atomic-onboarding-batch-confirmed',
+        hasPendingOrganization: true,
+      });
+      logOnboardingRedirect('step-3-requested-home', {
+        from: activeScreen,
+        reason: 'atomic-onboarding-batch-confirmed',
+        hasPendingOrganization: true,
+      });
       setActiveScreen('home');
       return null;
     } catch (error) {
+      logOnboardingWrite('step-3-submit-handler-failed', {
+        authenticated: Boolean(submittingUserId),
+        code: typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code ?? 'unknown')
+          : 'unknown',
+        name: error instanceof Error ? error.name : 'unknown',
+      });
       return getAuthErrorMessage(error);
     }
   };
@@ -1202,16 +1383,32 @@ export function App() {
   };
   const handleBack = () => {
     if (activeScreen === 'create-work-order') {
+      logOnboardingRedirect('back-navigation-requested-screen', {
+        from: activeScreen,
+        to: workOrderReturnScreen,
+        reason: 'return-from-create-maintenance-record',
+      });
       setActiveScreen(workOrderReturnScreen);
       return;
     }
 
     if (activeScreen === 'work-order-detail') {
+      logOnboardingRedirect('back-navigation-requested-screen', {
+        from: activeScreen,
+        to: 'work-orders',
+        reason: 'return-from-maintenance-record-detail',
+      });
       setActiveScreen('work-orders');
       return;
     }
 
-    setActiveScreen(activeScreen === 'machine-detail' || activeScreen === 'manuals' ? 'machines' : 'home');
+    const destination = activeScreen === 'machine-detail' || activeScreen === 'manuals' ? 'machines' : 'home';
+    logOnboardingRedirect('back-navigation-requested-screen', {
+      from: activeScreen,
+      to: destination,
+      reason: 'workspace-back-navigation',
+    });
+    setActiveScreen(destination);
   };
 
   return (
@@ -1816,6 +2013,24 @@ function OwnerOnboardingScreen({
   const isLastStep = activeStep === onboardingSteps.length - 1;
   const ownerEmailValue = draft.ownerEmail || ownerEmail;
 
+  useEffect(() => {
+    logOnboardingRedirect('owner-onboarding-screen-mounted', {
+      initialStepIndex: activeStep,
+      initialStepId: currentStep.id,
+    });
+    return () => {
+      logOnboardingRedirect('owner-onboarding-screen-unmounted');
+    };
+  }, []);
+
+  useEffect(() => {
+    logOnboardingRedirect('owner-onboarding-step-active', {
+      stepIndex: activeStep,
+      stepId: currentStep.id,
+      isLastStep,
+    });
+  }, [activeStep, currentStep.id, isLastStep]);
+
   const validateCurrentStep = (): string | null => {
     if (currentStep.id === 'account' && (!draft.businessName.trim() || !draft.operatorName.trim() || !draft.businessAddress.trim() || !ownerEmailValue.trim())) {
       return 'Business name, operator name, address, and email are required before continuing.';
@@ -1839,8 +2054,18 @@ function OwnerOnboardingScreen({
   }, [draft, onDraftChange, ownerEmail]);
 
   const advance = async () => {
+    logOnboardingWrite('onboarding-continue-clicked', {
+      stepIndex: activeStep,
+      stepId: currentStep.id,
+      isLastStep,
+      isSubmitting,
+    });
     const stepError = validateCurrentStep();
     if (stepError) {
+      logOnboardingWrite('onboarding-step-validation-blocked', {
+        stepIndex: activeStep,
+        stepId: currentStep.id,
+      });
       setSubmitError(stepError);
       return;
     }
@@ -1848,13 +2073,26 @@ function OwnerOnboardingScreen({
     if (isLastStep) {
       setSubmitError(null);
       setIsSubmitting(true);
+      logOnboardingWrite('onboarding-finish-callback-started', {
+        stepIndex: activeStep,
+        stepId: currentStep.id,
+      });
       const error = await onFinish({
         ...draft,
         ownerEmail: ownerEmailValue,
       });
       setIsSubmitting(false);
       if (error) {
+        logOnboardingWrite('onboarding-finish-callback-returned-error', {
+          stepIndex: activeStep,
+          stepId: currentStep.id,
+        });
         setSubmitError(error);
+      } else {
+        logOnboardingWrite('onboarding-finish-callback-returned-success', {
+          stepIndex: activeStep,
+          stepId: currentStep.id,
+        });
       }
       return;
     }

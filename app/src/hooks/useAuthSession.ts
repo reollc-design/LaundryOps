@@ -1,6 +1,7 @@
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { useEffect, useMemo, useState } from 'react';
 import { getFirebaseClient } from '../firebase/client';
+import { logOnboardingRedirect } from '../onboardingDebug';
 
 export interface AuthSessionState {
   loading: boolean;
@@ -24,6 +25,10 @@ export function useAuthSession(): AuthSessionState {
 
   useEffect(() => {
     if (!client.auth) {
+      logOnboardingRedirect('auth-observer-unavailable', {
+        configured: client.configured,
+        projectId: client.projectId,
+      });
       setState((previous) => ({
         ...previous,
         loading: false,
@@ -34,6 +39,10 @@ export function useAuthSession(): AuthSessionState {
     const unsubscribe = onAuthStateChanged(
       client.auth,
       (user) => {
+        logOnboardingRedirect('auth-observer-state', {
+          authenticated: Boolean(user),
+          providerIds: user?.providerData.map((provider) => provider.providerId) ?? [],
+        });
         setState({
           loading: false,
           user,
@@ -44,6 +53,13 @@ export function useAuthSession(): AuthSessionState {
         });
       },
       (error) => {
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code ?? 'unknown')
+          : 'unknown';
+        logOnboardingRedirect('auth-observer-error', {
+          code,
+          name: error.name,
+        });
         setState({
           loading: false,
           user: null,
@@ -60,4 +76,3 @@ export function useAuthSession(): AuthSessionState {
 
   return state;
 }
-

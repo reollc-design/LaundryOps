@@ -14,6 +14,7 @@ import {
 import { collection, doc, serverTimestamp, setDoc, Timestamp, writeBatch, type Firestore } from 'firebase/firestore';
 import { getFirebaseClient } from './client';
 import { calculateTrialEndsAt } from '../trial';
+import { logOnboardingRedirect, logOnboardingWrite } from '../onboardingDebug';
 
 function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
   const client = getFirebaseClient();
@@ -36,6 +37,11 @@ function getGoogleAuthProvider(): GoogleAuthProvider {
 
 async function upsertGoogleUserProfile(credential: UserCredential, db: Firestore): Promise<void> {
   const additionalUserInfo = getAdditionalUserInfo(credential);
+  logOnboardingWrite('google-profile-write-initiated', {
+    pathPattern: 'users/{uid}',
+    isNewUser: Boolean(additionalUserInfo?.isNewUser),
+    fields: ['displayName', 'email', 'lastSignInAt', 'lastSignInProvider'],
+  });
   await setDoc(
     doc(db, 'users', credential.user.uid),
     {
@@ -52,6 +58,9 @@ async function upsertGoogleUserProfile(credential: UserCredential, db: Firestore
     },
     { merge: true },
   );
+  logOnboardingWrite('google-profile-write-confirmed', {
+    pathPattern: 'users/{uid}',
+  });
 }
 
 async function upsertGoogleUserProfileAfterSignIn(credential: UserCredential, db: Firestore): Promise<void> {
@@ -62,6 +71,11 @@ async function upsertGoogleUserProfileAfterSignIn(credential: UserCredential, db
       ? String((error as { code?: unknown }).code ?? 'unknown')
       : 'unknown';
     console.warn('Google authentication succeeded; profile setup will continue during onboarding.', { code });
+    logOnboardingWrite('google-profile-write-failed', {
+      pathPattern: 'users/{uid}',
+      code,
+      name: error instanceof Error ? error.name : 'unknown',
+    });
   }
 }
 
@@ -128,7 +142,26 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
   const { auth, db } = requireFirebaseAuth();
   const user = auth.currentUser;
 
+  logOnboardingWrite('onboarding-write-requested', {
+    authenticated: Boolean(user),
+    requiredFieldPresence: {
+      businessName: Boolean(draft.businessName.trim()),
+      operatorName: Boolean(draft.operatorName.trim()),
+      businessAddress: Boolean(draft.businessAddress.trim()),
+      ownerEmail: Boolean(draft.ownerEmail.trim() || user?.email),
+      locationName: Boolean(draft.locationName.trim()),
+      locationAddress: Boolean(draft.locationAddress.trim()),
+      machineNumber: Boolean(draft.machineNumber.trim()),
+      machineType: Boolean(draft.machineType.trim()),
+      machineMake: Boolean(draft.machineMake.trim()),
+      machineModelNumber: Boolean(draft.machineModelNumber.trim()),
+    },
+  });
+
   if (!user) {
+    logOnboardingWrite('onboarding-write-blocked', {
+      reason: 'no-authenticated-user',
+    });
     throw new Error('No authenticated user. Sign in before finishing onboarding.');
   }
 
@@ -155,6 +188,9 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     || !trimmedDraft.machineMake
     || !trimmedDraft.machineModelNumber
   ) {
+    logOnboardingWrite('onboarding-write-blocked', {
+      reason: 'required-field-validation-failed',
+    });
     throw new Error('Company, operator, address, email, location, and first machine details are required.');
   }
 
@@ -220,7 +256,50 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     },
     { merge: true },
   );
-  await batch.commit();
+  logOnboardingWrite('onboarding-batch-writes-queued', {
+    pathPatterns: {
+      organization: 'organizations/{organizationId}',
+      membership: 'organizations/{organizationId}/memberships/{uid}',
+      location: 'organizations/{organizationId}/locations/{locationId}',
+      machine: 'organizations/{organizationId}/machines/{machineId}',
+      userProfile: 'users/{uid}',
+    },
+    dataShape: {
+      organizationFields: ['name', 'operatorName', 'businessAddress', 'ownerEmail', 'ownerUserId', 'createdBy', 'createdAt', 'subscriptionStatus', 'trialStartedAt', 'trialEndsAt', 'onboardingStatus'],
+      membershipFields: ['role', 'status', 'createdAt', 'createdBy'],
+      locationFields: ['name', 'address', 'status', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'],
+      machineFields: ['machineNumber', 'type', 'make', 'modelNumber', 'model', 'locationId', 'locationName', 'status', 'statusLabel', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'],
+      userProfileFields: ['displayName', 'email', 'defaultOrganizationId', 'onboardingDraft', 'onboardingCompletedAt'],
+      onboardingStatus: 'completed',
+      subscriptionStatus: 'trialing',
+      allRequiredValuesPresent: true,
+    },
+  });
+  logOnboardingWrite('onboarding-batch-commit-initiated', {
+    writeCount: 5,
+  });
+  try {
+    await batch.commit();
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code ?? 'unknown')
+      : 'unknown';
+    logOnboardingWrite('onboarding-batch-commit-failed', {
+      writeCount: 5,
+      code,
+      name: error instanceof Error ? error.name : 'unknown',
+    });
+    throw error;
+  }
+
+  logOnboardingWrite('onboarding-batch-commit-confirmed', {
+    writeCount: 5,
+    organizationCreated: true,
+    membershipCreated: true,
+    locationCreated: true,
+    machineCreated: true,
+    userProfileUpdated: true,
+  });
 
   return {
     organizationId: organizationRef.id,
