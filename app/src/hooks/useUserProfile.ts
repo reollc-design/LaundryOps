@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { getFirebaseClient } from '../firebase/client';
 import { logOnboardingRedirect } from '../onboardingDebug';
+import { shouldApplyProfileSnapshot } from '../onboardingFlow';
 
 export interface UserProfileData {
   displayName: string | null;
@@ -14,6 +15,7 @@ export interface UserProfileData {
 export interface UserProfileState {
   loading: boolean;
   loaded: boolean;
+  hasPendingWrites: boolean;
   profile: UserProfileData | null;
   error: string | null;
 }
@@ -23,6 +25,7 @@ export function useUserProfile(user: User | null): UserProfileState {
   const [state, setState] = useState<UserProfileState>({
     loading: false,
     loaded: false,
+    hasPendingWrites: false,
     profile: null,
     error: null,
   });
@@ -35,6 +38,7 @@ export function useUserProfile(user: User | null): UserProfileState {
       setState({
         loading: false,
         loaded: false,
+        hasPendingWrites: false,
         profile: null,
         error: null,
       });
@@ -48,6 +52,7 @@ export function useUserProfile(user: User | null): UserProfileState {
       setState({
         loading: false,
         loaded: true,
+        hasPendingWrites: false,
         profile: null,
         error: 'Firestore client is not configured.',
       });
@@ -66,6 +71,7 @@ export function useUserProfile(user: User | null): UserProfileState {
     });
     const unsubscribe = onSnapshot(
       profileRef,
+      { includeMetadataChanges: true },
       (snapshot) => {
         const data = snapshot.data();
         const defaultOrganizationId = typeof data?.defaultOrganizationId === 'string'
@@ -79,9 +85,18 @@ export function useUserProfile(user: User | null): UserProfileState {
           fromCache: snapshot.metadata.fromCache,
           hasPendingWrites: snapshot.metadata.hasPendingWrites,
         });
+        if (!shouldApplyProfileSnapshot(snapshot.metadata.hasPendingWrites)) {
+          setState((previous) => ({
+            ...previous,
+            hasPendingWrites: true,
+            error: null,
+          }));
+          return;
+        }
         setState({
           loading: false,
           loaded: true,
+          hasPendingWrites: false,
           profile: snapshot.exists()
             ? {
                 displayName: typeof data?.displayName === 'string' ? data.displayName : null,
@@ -102,6 +117,7 @@ export function useUserProfile(user: User | null): UserProfileState {
         setState({
           loading: false,
           loaded: true,
+          hasPendingWrites: false,
           profile: null,
           error: error.message,
         });

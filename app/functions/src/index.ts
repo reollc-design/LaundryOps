@@ -47,6 +47,11 @@ import {
   type RepairAssistImage,
 } from './repair-assist.js';
 import {
+  completeOwnerOnboardingTransaction,
+  type OnboardingStore,
+  type OwnerOnboardingDraft,
+} from './onboarding.js';
+import {
   assertOrganizationAccess,
   bearerTokenFromHeader,
   consumeRateLimit,
@@ -1223,6 +1228,7 @@ async function applyStripeBillingEvent(
 
 const CLIENT_SAFE_ERROR_PREFIXES = [
   'Missing required field:',
+  'requestId exceeds maximum length',
   'organizationId exceeds maximum length',
   'manualId exceeds maximum length',
   'machineModel exceeds maximum length',
@@ -1258,6 +1264,7 @@ const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'subscriptionId is invalid.',
   'Manual is already being indexed. Please wait for it to finish.',
   'Manual OCR is already processing. Please wait for it to finish.',
+  'This account is already connected to an organization.',
 ]);
 
 function clientSafeErrorMessage(error: unknown, fallback: string, logUnexpected = true): string {
@@ -1383,6 +1390,25 @@ function writeError(response: Response, status: number, code: string, message: s
       message,
     },
   });
+}
+
+function onboardingStore(db: Firestore): OnboardingStore {
+  return {
+    newDocumentId: (collectionPath) => db.collection(collectionPath).doc().id,
+    runTransaction: (work) => db.runTransaction(async (firestoreTransaction) => work({
+      get: async (path) => {
+        const snapshot = await firestoreTransaction.get(db.doc(path));
+        return snapshot.exists ? snapshot.data() ?? {} : null;
+      },
+      set: (path, data, options) => {
+        if (options?.merge) {
+          firestoreTransaction.set(db.doc(path), data, { merge: true });
+          return;
+        }
+        firestoreTransaction.set(db.doc(path), data);
+      },
+    })),
+  };
 }
 
 async function indexManualRecord(params: {
@@ -1721,6 +1747,50 @@ async function indexManualRecord(params: {
     }
   }
 }
+
+export const completeOwnerOnboarding = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'ownerOnboarding', uid: caller.uid, response });
+      const requestId = requireStringWithMaxLength(request.body?.requestId, 'requestId', MAX_DOCUMENT_ID_LENGTH);
+      const draft = request.body?.draft as OwnerOnboardingDraft | undefined;
+      if (!draft || typeof draft !== 'object') {
+        throw new Error('Missing required field: draft');
+      }
+
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const serverNow = Timestamp.now();
+      const result = await completeOwnerOnboardingTransaction({
+        store: onboardingStore(db),
+        uid: caller.uid,
+        authenticatedEmail: caller.email,
+        requestId,
+        draft,
+        nowMs: serverNow.toMillis(),
+        timestampFromMillis: (value) => Timestamp.fromMillis(value),
+      });
+
+      logger.info('owner_onboarding_completed', {
+        uid: caller.uid,
+        organizationId: result.organizationId,
+        replayed: result.replayed,
+      });
+      addRateLimitHeaders(response);
+      response.status(200).json({ ok: true, ...result });
+    } catch (error) {
+      const message = clientSafeErrorMessage(error, 'Could not complete company setup.');
+      writeError(response, httpStatusForError(error, 400), 'onboarding_failed', message);
+    }
+  },
+);
 
 export const createStripeCheckoutSession = onRequest(
   { cors: ALLOWED_CORS_ORIGINS, secrets: [stripeSecretKey] },

@@ -32,7 +32,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
 
@@ -41,6 +41,9 @@ jobs:
 
       - name: Type check
         run: npm run lint
+
+      - name: Test onboarding flow
+        run: npm run test:onboarding
 
       - name: Build
         run: npm run build
@@ -123,6 +126,7 @@ jobs:
       VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
       VITE_BILLING_API_BASE_URL: ${{ secrets.VITE_BILLING_API_BASE_URL }}
       VITE_FUNCTIONS_API_BASE_URL: ${{ secrets.VITE_FUNCTIONS_API_BASE_URL }}
+      VITE_RELEASE_COMMIT: ${{ github.sha }}
       DOCUMENT_AI_OCR_PROCESSOR_ID: ${{ secrets.DOCUMENT_AI_OCR_PROCESSOR_ID }}
       DOCUMENT_AI_OCR_LOCATION: us
       VITE_USE_FIREBASE_EMULATORS: 'false'
@@ -204,5 +208,33 @@ jobs:
         shell: bash
         run: printf 'DOCUMENT_AI_OCR_PROCESSOR_ID=%s\nDOCUMENT_AI_OCR_LOCATION=%s\n' "$DOCUMENT_AI_OCR_PROCESSOR_ID" "$DOCUMENT_AI_OCR_LOCATION" > functions/.env.laundromat-maintenance-app
 
-      - name: Deploy coordinated LaundryOps release
-        run: npx firebase-tools deploy --only hosting:laundryops,firestore:rules,firestore:indexes,storage:laundryopsStorage,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+      - name: Deploy targeted Functions first
+        run: npx firebase-tools deploy --only functions:completeOwnerOnboarding,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+
+      - name: Verify onboarding Function exists
+        shell: bash
+        run: npx firebase-tools functions:list --project laundromat-maintenance-app --json | grep -q 'completeOwnerOnboarding'
+
+      - name: Verify onboarding Function authentication and CORS
+        shell: bash
+        run: |
+          endpoint="https://us-central1-laundromat-maintenance-app.cloudfunctions.net/completeOwnerOnboarding"
+          status=$(curl --silent --show-error --output /tmp/onboarding-response.json --dump-header /tmp/onboarding-headers.txt --write-out '%{http_code}' \
+            --request POST \
+            --header 'Origin: https://laundryops-maintenance-app.web.app' \
+            --header 'Content-Type: application/json' \
+            --data '{"requestId":"deployment-smoke","draft":{}}' \
+            "$endpoint")
+          test "$status" = "401"
+          grep -qi '^access-control-allow-origin: https://laundryops-maintenance-app.web.app' /tmp/onboarding-headers.txt
+          grep -q '"code":"onboarding_failed"' /tmp/onboarding-response.json
+
+      - name: Deploy LaundryOps Hosting
+        run: npx firebase-tools deploy --only hosting:laundryops --project laundromat-maintenance-app --non-interactive
+
+      - name: Verify hosted LaundryOps shell
+        shell: bash
+        run: curl --fail --silent --show-error https://laundryops-maintenance-app.web.app/ | grep -q "$GITHUB_SHA"
+
+      - name: Deploy Firebase data rules last
+        run: npx firebase-tools deploy --only firestore:rules,firestore:indexes,storage:laundryopsStorage --project laundromat-maintenance-app --non-interactive

@@ -80,70 +80,46 @@ service cloud.firestore {
         );
     }
 
-    function isOnboardingOwner(orgId) {
-      return signedIn()
-        && getAfter(organizationPath(orgId)).data.ownerUserId == request.auth.uid
-        && getAfter(organizationPath(orgId)).data.createdBy == request.auth.uid
-        && getAfter(memberPath(orgId)).data.role == 'owner'
-        && getAfter(memberPath(orgId)).data.status == 'active'
-        && getAfter(memberPath(orgId)).data.createdBy == request.auth.uid;
-    }
-
-    function isOrganizationActiveForWrite(orgId) {
-      return isOrganizationActive(orgId)
-        || (
-          isOnboardingOwner(orgId)
-          && getAfter(organizationPath(orgId)).data.subscriptionStatus == 'trialing'
-          && getAfter(organizationPath(orgId)).data.trialEndsAt is timestamp
-          && request.time < getAfter(organizationPath(orgId)).data.trialEndsAt
-        );
-    }
-
-    function hasValidTrialWindow() {
-      return request.resource.data.trialStartedAt is timestamp
-        && request.resource.data.trialEndsAt is timestamp
-        && request.resource.data.trialStartedAt <= request.time
-        && request.resource.data.trialEndsAt == request.resource.data.trialStartedAt + duration.value(14, 'd');
-    }
-
     function unchanged(keys) {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys);
     }
 
     match /users/{userId} {
       allow read: if signedIn() && request.auth.uid == userId;
-      allow create, update: if signedIn()
+      allow create: if signedIn()
         && request.auth.uid == userId
         && !request.resource.data.keys().hasAny([
           'role',
           'organizationRole',
           'billingStatus',
           'subscriptionStatus',
-          'supportAccess'
+          'supportAccess',
+          'defaultOrganizationId',
+          'onboardingDraft',
+          'onboardingCompletedAt',
+          'onboardingRequestId',
+          'onboardingResult'
+        ]);
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && unchanged([
+          'role',
+          'organizationRole',
+          'billingStatus',
+          'subscriptionStatus',
+          'supportAccess',
+          'defaultOrganizationId',
+          'onboardingDraft',
+          'onboardingCompletedAt',
+          'onboardingRequestId',
+          'onboardingResult'
         ]);
       allow delete: if false;
     }
 
     match /organizations/{orgId} {
       allow read: if isMember(orgId);
-      allow create: if signedIn()
-        && request.resource.data.ownerUserId == request.auth.uid
-        && request.resource.data.createdBy == request.auth.uid
-        && request.resource.data.subscriptionStatus == 'trialing'
-        && hasValidTrialWindow()
-        && request.resource.data.keys().hasOnly([
-          'name',
-          'operatorName',
-          'businessAddress',
-          'ownerEmail',
-          'ownerUserId',
-          'createdBy',
-          'createdAt',
-          'subscriptionStatus',
-          'trialStartedAt',
-          'trialEndsAt',
-          'onboardingStatus'
-        ]);
+      allow create: if false;
       allow delete: if false;
       allow update: if isOwnerOrAdmin(orgId)
         && unchanged([
@@ -167,25 +143,13 @@ service cloud.firestore {
 
       match /memberships/{userId} {
         allow read: if isOwnerOrAdmin(orgId) || (signedIn() && request.auth.uid == userId);
-        allow create: if signedIn()
-          && userId == request.auth.uid
-          && getAfter(organizationPath(orgId)).data.ownerUserId == request.auth.uid
-          && request.resource.data.role == 'owner'
-          && request.resource.data.status == 'active'
-          && request.resource.data.createdBy == request.auth.uid
-          && request.resource.data.keys().hasOnly([
-            'role',
-            'status',
-            'createdAt',
-            'createdBy'
-          ]);
-        allow update, delete: if false;
+        allow create, update, delete: if false;
       }
 
       match /locations/{locationId} {
         allow read: if isMember(orgId);
-        allow create: if isOrganizationActiveForWrite(orgId)
-          && (isOperationsLead(orgId) || isOnboardingOwner(orgId))
+        allow create: if isOrganizationActive(orgId)
+          && isOperationsLead(orgId)
           && request.resource.data.name is string
           && request.resource.data.address is string
           && request.resource.data.createdBy == request.auth.uid
@@ -206,8 +170,8 @@ service cloud.firestore {
 
       match /machines/{machineId} {
         allow read: if isMember(orgId);
-        allow create: if isOrganizationActiveForWrite(orgId)
-          && (isOperationsLead(orgId) || isOnboardingOwner(orgId));
+        allow create: if isOrganizationActive(orgId)
+          && isOperationsLead(orgId);
         allow update: if isOrganizationActive(orgId)
           && (
             isOperationsLead(orgId)

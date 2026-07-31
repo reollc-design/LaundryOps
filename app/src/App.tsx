@@ -82,6 +82,7 @@ import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
 import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
 import { logOnboardingRedirect, logOnboardingWrite } from './onboardingDebug';
+import { decideOrganizationRoute, onboardingFailureMessage } from './onboardingFlow';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
@@ -693,6 +694,7 @@ export function App() {
     organizationId: string;
   } | null>(null);
   const previousOnboardingStateSnapshot = useRef<string | null>(null);
+  const onboardingRequestRef = useRef<{ userId: string; requestId: string } | null>(null);
   const authSession = useAuthSession();
   const userProfile = useUserProfile(authSession.user);
   const profileOrganizationId = userProfile.profile?.defaultOrganizationId ?? null;
@@ -768,6 +770,7 @@ export function App() {
       authenticated: Boolean(authSession.user),
       profileLoading: userProfile.loading,
       profileLoaded: userProfile.loaded,
+      profileHasPendingWrites: userProfile.hasPendingWrites,
       profileErrorPresent: Boolean(userProfile.error),
       hasProfileOrganization: Boolean(profileOrganizationId),
       hasPendingOrganization: Boolean(pendingOrganizationId),
@@ -799,6 +802,7 @@ export function App() {
     profileOrganizationId,
     userProfile.error,
     userProfile.loaded,
+    userProfile.hasPendingWrites,
     userProfile.loading,
   ]);
 
@@ -838,6 +842,22 @@ export function App() {
   useEffect(() => {
     const authenticatedUserId = authSession.user?.uid ?? null;
     if (
+      authenticatedUserId
+      && profileOrganizationId
+      && pendingOnboardingOrganization?.userId === authenticatedUserId
+      && pendingOnboardingOrganization.organizationId === profileOrganizationId
+      && !userProfile.hasPendingWrites
+    ) {
+      logOnboardingRedirect('pending-organization-cleared', {
+        authenticated: true,
+        hasPendingOrganization: true,
+        pendingOrganizationMatchesUser: true,
+        reason: 'profile-organization-server-confirmed',
+      });
+      setPendingOnboardingOrganization(null);
+      return;
+    }
+    if (
       !authenticatedUserId
       || (
         pendingOnboardingOrganization
@@ -864,7 +884,12 @@ export function App() {
         && pendingOnboardingOrganization?.userId === authenticatedUserId
       ),
     });
-  }, [authSession.user?.uid, pendingOnboardingOrganization]);
+  }, [
+    authSession.user?.uid,
+    pendingOnboardingOrganization,
+    profileOrganizationId,
+    userProfile.hasPendingWrites,
+  ]);
   useEffect(() => {
     if (authSession.loading || !authSession.configured) {
       logOnboardingRedirect('google-redirect-check-waiting', {
@@ -893,12 +918,20 @@ export function App() {
     })();
   }, [authSession.configured, authSession.loading]);
   useEffect(() => {
-    if (authSession.loading || userProfile.loading || !userProfile.loaded || !authSession.configured || !authSession.user) {
+    if (
+      authSession.loading
+      || userProfile.loading
+      || userProfile.hasPendingWrites
+      || !userProfile.loaded
+      || !authSession.configured
+      || !authSession.user
+    ) {
       logOnboardingRedirect('organization-route-guard-waiting', {
         activeScreen,
         authLoading: authSession.loading,
         profileLoading: userProfile.loading,
         profileLoaded: userProfile.loaded,
+        profileHasPendingWrites: userProfile.hasPendingWrites,
         authConfigured: authSession.configured,
         authenticated: Boolean(authSession.user),
         hasProfileOrganization: Boolean(profileOrganizationId),
@@ -907,7 +940,14 @@ export function App() {
       return;
     }
 
-    if (defaultOrganizationId && accountSetupScreens.includes(activeScreen)) {
+    const routeDecision = decideOrganizationRoute({
+      profileHasPendingWrites: userProfile.hasPendingWrites,
+      hasOrganization: Boolean(defaultOrganizationId),
+      isAccountSetupScreen: accountSetupScreens.includes(activeScreen),
+      isProtectedScreen: protectedScreens.includes(activeScreen),
+    });
+
+    if (routeDecision === 'home') {
       logOnboardingRedirect('route-to-home', {
         from: activeScreen,
         reason: profileOrganizationId ? 'profile-organization-found' : 'confirmed-pending-organization-found',
@@ -919,7 +959,7 @@ export function App() {
       return;
     }
 
-    if (!defaultOrganizationId && protectedScreens.includes(activeScreen)) {
+    if (routeDecision === 'owner-onboarding') {
       logOnboardingRedirect('route-to-owner-onboarding', {
         from: activeScreen,
         reason: 'protected-screen-has-no-profile-or-pending-organization',
@@ -943,6 +983,7 @@ export function App() {
     authSession.user,
     defaultOrganizationId,
     userProfile.loaded,
+    userProfile.hasPendingWrites,
     userProfile.loading,
   ]);
   useEffect(() => {
@@ -1063,23 +1104,30 @@ export function App() {
     }
 
     try {
-      const result = await completeOwnerOnboarding(draft);
+      if (!onboardingRequestRef.current || onboardingRequestRef.current.userId !== submittingUserId) {
+        onboardingRequestRef.current = {
+          userId: submittingUserId,
+          requestId: crypto.randomUUID(),
+        };
+      }
+      const result = await completeOwnerOnboarding(draft, onboardingRequestRef.current.requestId);
       logOnboardingWrite('step-3-onboarding-write-returned', {
         organizationCreated: Boolean(result.organizationId),
         locationCreated: Boolean(result.locationId),
         machineCreated: Boolean(result.machineId),
+        replayed: result.replayed,
       });
       setPendingOnboardingOrganization({
         userId: submittingUserId,
         organizationId: result.organizationId,
       });
       logOnboardingRedirect('pending-organization-state-update-requested', {
-        reason: 'atomic-onboarding-batch-confirmed',
+        reason: 'server-onboarding-transaction-confirmed',
         hasPendingOrganization: true,
       });
       logOnboardingRedirect('step-3-requested-home', {
         from: activeScreen,
-        reason: 'atomic-onboarding-batch-confirmed',
+        reason: 'server-onboarding-transaction-confirmed',
         hasPendingOrganization: true,
       });
       setActiveScreen('home');
@@ -1092,7 +1140,7 @@ export function App() {
           : 'unknown',
         name: error instanceof Error ? error.name : 'unknown',
       });
-      return getAuthErrorMessage(error);
+      return onboardingFailureMessage(error);
     }
   };
   const handleStartSubscription = async (billingPlan: BillingPlanKey): Promise<void> => {

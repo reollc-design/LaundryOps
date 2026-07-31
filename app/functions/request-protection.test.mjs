@@ -98,6 +98,7 @@ test('blocks repeated requests after the endpoint policy is exhausted', () => {
 
 test('defines an enforcement policy for every protected endpoint', () => {
   const operations = [
+    'ownerOnboarding',
     'repairAssist',
     'indexManual',
     'reindexManuals',

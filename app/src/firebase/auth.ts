@@ -11,9 +11,8 @@ import {
   updateProfile,
   type UserCredential,
 } from 'firebase/auth';
-import { collection, doc, serverTimestamp, setDoc, Timestamp, writeBatch, type Firestore } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc, type Firestore } from 'firebase/firestore';
 import { getFirebaseClient } from './client';
-import { calculateTrialEndsAt } from '../trial';
 import { logOnboardingRedirect, logOnboardingWrite } from '../onboardingDebug';
 
 function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
@@ -136,10 +135,32 @@ export interface OwnerOnboardingResult {
   organizationId: string;
   locationId: string;
   machineId: string;
+  replayed: boolean;
 }
 
-export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Promise<OwnerOnboardingResult> {
-  const { auth, db } = requireFirebaseAuth();
+interface OwnerOnboardingEndpointResponse extends Partial<OwnerOnboardingResult> {
+  ok?: boolean;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
+function functionsApiBaseUrl(): string {
+  const baseUrl =
+    import.meta.env.VITE_FUNCTIONS_API_BASE_URL?.trim()
+    || import.meta.env.VITE_BILLING_API_BASE_URL?.trim();
+  if (!baseUrl) {
+    throw new Error('Functions API URL is not configured.');
+  }
+  return baseUrl.replace(/\/+$/, '');
+}
+
+export async function completeOwnerOnboarding(
+  draft: OwnerOnboardingDraft,
+  requestId: string,
+): Promise<OwnerOnboardingResult> {
+  const { auth } = requireFirebaseAuth();
   const user = auth.currentUser;
 
   logOnboardingWrite('onboarding-write-requested', {
@@ -194,116 +215,55 @@ export async function completeOwnerOnboarding(draft: OwnerOnboardingDraft): Prom
     throw new Error('Company, operator, address, email, location, and first machine details are required.');
   }
 
-  const organizationRef = doc(collection(db, 'organizations'));
-  const membershipRef = doc(db, `organizations/${organizationRef.id}/memberships/${user.uid}`);
-  const locationRef = doc(collection(db, `organizations/${organizationRef.id}/locations`));
-  const machineRef = doc(collection(db, `organizations/${organizationRef.id}/machines`));
-  const batch = writeBatch(db);
-  const trialStartedAt = Timestamp.now();
-  const trialEndsAt = Timestamp.fromMillis(calculateTrialEndsAt(trialStartedAt.toMillis()));
+  if (!requestId.trim()) {
+    throw new Error('Could not create a safe onboarding request. Refresh and try again.');
+  }
 
-  batch.set(organizationRef, {
-    name: trimmedDraft.businessName,
-    operatorName: trimmedDraft.operatorName,
-    businessAddress: trimmedDraft.businessAddress,
-    ownerEmail: trimmedDraft.ownerEmail,
-    ownerUserId: user.uid,
-    createdBy: user.uid,
-    createdAt: serverTimestamp(),
-    subscriptionStatus: 'trialing',
-    trialStartedAt,
-    trialEndsAt,
-    onboardingStatus: 'completed',
-  });
-  batch.set(membershipRef, {
-    role: 'owner',
-    status: 'active',
-    createdAt: serverTimestamp(),
-    createdBy: user.uid,
-  });
-  batch.set(locationRef, {
-    name: trimmedDraft.locationName,
-    address: trimmedDraft.locationAddress,
-    status: 'active',
-    createdAt: serverTimestamp(),
-    createdBy: user.uid,
-    updatedAt: serverTimestamp(),
-    updatedBy: user.uid,
-  });
-  batch.set(machineRef, {
-    machineNumber: trimmedDraft.machineNumber,
-    type: trimmedDraft.machineType,
-    make: trimmedDraft.machineMake,
-    modelNumber: trimmedDraft.machineModelNumber,
-    model: `${trimmedDraft.machineMake} ${trimmedDraft.machineModelNumber}`.trim(),
-    locationId: locationRef.id,
-    locationName: trimmedDraft.locationName,
-    status: 'running',
-    statusLabel: 'Operational',
-    createdAt: serverTimestamp(),
-    createdBy: user.uid,
-    updatedAt: serverTimestamp(),
-    updatedBy: user.uid,
-  });
-  batch.set(
-    doc(db, 'users', user.uid),
-    {
-      displayName: trimmedDraft.operatorName,
-      email: trimmedDraft.ownerEmail,
-      defaultOrganizationId: organizationRef.id,
-      onboardingDraft: trimmedDraft,
-      onboardingCompletedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
-  logOnboardingWrite('onboarding-batch-writes-queued', {
-    pathPatterns: {
-      organization: 'organizations/{organizationId}',
-      membership: 'organizations/{organizationId}/memberships/{uid}',
-      location: 'organizations/{organizationId}/locations/{locationId}',
-      machine: 'organizations/{organizationId}/machines/{machineId}',
-      userProfile: 'users/{uid}',
-    },
-    dataShape: {
-      organizationFields: ['name', 'operatorName', 'businessAddress', 'ownerEmail', 'ownerUserId', 'createdBy', 'createdAt', 'subscriptionStatus', 'trialStartedAt', 'trialEndsAt', 'onboardingStatus'],
-      membershipFields: ['role', 'status', 'createdAt', 'createdBy'],
-      locationFields: ['name', 'address', 'status', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'],
-      machineFields: ['machineNumber', 'type', 'make', 'modelNumber', 'model', 'locationId', 'locationName', 'status', 'statusLabel', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'],
-      userProfileFields: ['displayName', 'email', 'defaultOrganizationId', 'onboardingDraft', 'onboardingCompletedAt'],
-      onboardingStatus: 'completed',
-      subscriptionStatus: 'trialing',
-      allRequiredValuesPresent: true,
-    },
-  });
-  logOnboardingWrite('onboarding-batch-commit-initiated', {
+  logOnboardingWrite('onboarding-function-request-initiated', {
+    endpoint: 'completeOwnerOnboarding',
     writeCount: 5,
   });
   try {
-    await batch.commit();
+    const idToken = await user.getIdToken();
+    const response = await fetch(`${functionsApiBaseUrl()}/completeOwnerOnboarding`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ requestId: requestId.trim(), draft: trimmedDraft }),
+    });
+    const data = (await response.json().catch(() => ({}))) as OwnerOnboardingEndpointResponse;
+    if (
+      !response.ok
+      || data.ok === false
+      || typeof data.organizationId !== 'string'
+      || typeof data.locationId !== 'string'
+      || typeof data.machineId !== 'string'
+    ) {
+      throw new Error(data.error?.message ?? 'Could not complete company setup.');
+    }
+
+    logOnboardingWrite('onboarding-function-request-confirmed', {
+      endpoint: 'completeOwnerOnboarding',
+      writeCount: 5,
+      replayed: Boolean(data.replayed),
+    });
+    return {
+      organizationId: data.organizationId,
+      locationId: data.locationId,
+      machineId: data.machineId,
+      replayed: Boolean(data.replayed),
+    };
   } catch (error) {
     const code = typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code?: unknown }).code ?? 'unknown')
       : 'unknown';
-    logOnboardingWrite('onboarding-batch-commit-failed', {
+    logOnboardingWrite('onboarding-function-request-failed', {
       writeCount: 5,
       code,
       name: error instanceof Error ? error.name : 'unknown',
     });
     throw error;
   }
-
-  logOnboardingWrite('onboarding-batch-commit-confirmed', {
-    writeCount: 5,
-    organizationCreated: true,
-    membershipCreated: true,
-    locationCreated: true,
-    machineCreated: true,
-    userProfileUpdated: true,
-  });
-
-  return {
-    organizationId: organizationRef.id,
-    locationId: locationRef.id,
-    machineId: machineRef.id,
-  };
 }

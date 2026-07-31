@@ -6,8 +6,13 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, Timestamp, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, runTransaction, Timestamp, writeBatch } from 'firebase/firestore';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  completeOwnerOnboardingTransaction,
+  ONBOARDING_TRIAL_DURATION_MS,
+  type OnboardingStore,
+} from '../functions/src/onboarding';
 
 const PROJECT_ID = 'demo-laundryops-rules';
 const BUCKET_URL = `gs://${PROJECT_ID}.appspot.com`;
@@ -341,12 +346,12 @@ describe('Firestore organization security', () => {
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1').delete());
   });
 
-  it('allows controlled owner bootstrap org creation and self-membership only', async () => {
+  it('blocks browser clients from creating organizations, memberships, or protected onboarding fields', async () => {
     const ownerA = dbFor('ownerA');
     const trialStartedAt = Timestamp.now();
     const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
 
-    await assertSucceeds(
+    await assertFails(
       ownerA.doc('organizations/orgBootstrap').set({
         name: 'Bootstrap Laundry',
         operatorName: 'Owner A',
@@ -362,7 +367,7 @@ describe('Firestore organization security', () => {
       }),
     );
 
-    await assertSucceeds(
+    await assertFails(
       ownerA.doc('organizations/orgBootstrap/memberships/ownerA').set({
         role: 'owner',
         status: 'active',
@@ -378,14 +383,43 @@ describe('Firestore organization security', () => {
         createdBy: 'ownerA',
       }),
     );
+    await assertFails(ownerA.doc('users/ownerA').set({
+      defaultOrganizationId: 'orgBootstrap',
+      onboardingCompletedAt: trialStartedAt,
+    }, { merge: true }));
   });
 
-  it('allows atomic onboarding to create the organization, membership, location, and first machine', async () => {
+  it('allows normal profile refreshes without allowing onboarding ownership fields to change', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await context.firestore().doc('users/ownerA').set({
+        defaultOrganizationId: 'orgA',
+        onboardingCompletedAt: Timestamp.now(),
+        onboardingRequestId: 'server-request',
+        onboardingResult: {
+          organizationId: 'orgA',
+          locationId: 'locationA1',
+          machineId: 'machineA1',
+        },
+      }, { merge: true });
+    });
+
+    const ownerA = dbFor('ownerA');
+    await assertSucceeds(ownerA.doc('users/ownerA').set({
+      displayName: 'Owner A Updated',
+      lastSignInProvider: 'google.com',
+    }, { merge: true }));
+    await assertFails(ownerA.doc('users/ownerA').set({
+      defaultOrganizationId: 'orgB',
+    }, { merge: true }));
+  });
+
+  it('rejects the exact five-write browser onboarding batch atomically', async () => {
     const ownerA = dbFor('ownerA');
     const organizationRef = doc(ownerA, 'organizations/orgAtomic');
     const membershipRef = doc(ownerA, 'organizations/orgAtomic/memberships/ownerA');
     const locationRef = doc(ownerA, 'organizations/orgAtomic/locations/locationA');
     const machineRef = doc(ownerA, 'organizations/orgAtomic/machines/machineA');
+    const userRef = doc(ownerA, 'users/ownerA');
     const batch = writeBatch(ownerA);
     const trialStartedAt = Timestamp.now();
     const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
@@ -433,33 +467,112 @@ describe('Firestore organization security', () => {
       updatedAt: '2026-05-20T00:00:00.000Z',
       updatedBy: 'ownerA',
     });
+    batch.set(userRef, {
+      displayName: 'Owner A',
+      email: 'owner@example.com',
+      defaultOrganizationId: organizationRef.id,
+      onboardingDraft: {
+        businessName: 'Atomic Laundry',
+        operatorName: 'Owner A',
+        businessAddress: '123 Main Street',
+        ownerEmail: 'owner@example.com',
+        locationName: 'Main Store',
+        locationAddress: '123 Main Street',
+        machineNumber: 'W01',
+        machineType: 'Washer',
+        machineMake: 'Speed Queen',
+        machineModelNumber: 'SC40',
+      },
+      onboardingCompletedAt: trialStartedAt,
+      onboardingRequestId: 'request-atomic',
+      onboardingResult: {
+        organizationId: organizationRef.id,
+        locationId: locationRef.id,
+        machineId: machineRef.id,
+      },
+    }, { merge: true });
 
-    await assertSucceeds(batch.commit());
-    await assertSucceeds(ownerA.doc('organizations/orgAtomic').get());
-    await assertSucceeds(ownerA.doc('organizations/orgAtomic/memberships/ownerA').get());
-    await assertSucceeds(ownerA.doc('organizations/orgAtomic/locations/locationA').get());
-    await assertSucceeds(ownerA.doc('organizations/orgAtomic/machines/machineA').get());
+    await assertFails(batch.commit());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const adminDb = context.firestore();
+      expect((await adminDb.doc('organizations/orgAtomic').get()).exists).toBe(false);
+      expect((await adminDb.doc('organizations/orgAtomic/memberships/ownerA').get()).exists).toBe(false);
+      expect((await adminDb.doc('organizations/orgAtomic/locations/locationA').get()).exists).toBe(false);
+      expect((await adminDb.doc('organizations/orgAtomic/machines/machineA').get()).exists).toBe(false);
+      expect((await adminDb.doc('users/ownerA').get()).data()?.defaultOrganizationId).toBeUndefined();
+    });
   });
 
-  it('requires the exact 14-day trial window and keeps trial fields immutable', async () => {
+  it('creates all five onboarding records once through a real server-authorized Firestore transaction', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      const store: OnboardingStore = {
+        newDocumentId: (collectionPath) => doc(collection(db, collectionPath)).id,
+        runTransaction: (work) => runTransaction(db, async (firestoreTransaction) => work({
+          get: async (path) => {
+            const snapshot = await firestoreTransaction.get(doc(db, path));
+            return snapshot.exists() ? snapshot.data() : null;
+          },
+          set: (path, data, options) => {
+            if (options?.merge) {
+              firestoreTransaction.set(doc(db, path), data, { merge: true });
+              return;
+            }
+            firestoreTransaction.set(doc(db, path), data);
+          },
+        })),
+      };
+      const input = {
+        store,
+        uid: 'newOwner',
+        authenticatedEmail: 'new-owner@example.com',
+        draft: {
+          businessName: 'New Owner Laundry',
+          operatorName: 'New Owner',
+          businessAddress: '100 Main Street',
+          ownerEmail: 'ignored@example.com',
+          locationName: 'Main Store',
+          locationAddress: '100 Main Street',
+          machineNumber: 'W01',
+          machineType: 'Washer',
+          machineMake: 'Speed Queen',
+          machineModelNumber: 'SC40',
+        },
+        nowMs: 1_800_000_000_000,
+        timestampFromMillis: (value: number) => Timestamp.fromMillis(value),
+      };
+
+      const [first, second] = await Promise.all([
+        completeOwnerOnboardingTransaction({ ...input, requestId: 'request-a' }),
+        completeOwnerOnboardingTransaction({ ...input, requestId: 'request-b' }),
+      ]);
+      expect(first.organizationId).toBe(second.organizationId);
+      expect([first.replayed, second.replayed].sort()).toEqual([false, true]);
+
+      const organization = await getDoc(doc(db, `organizations/${first.organizationId}`));
+      const membership = await getDoc(doc(db, `organizations/${first.organizationId}/memberships/newOwner`));
+      const location = await getDoc(doc(db, `organizations/${first.organizationId}/locations/${first.locationId}`));
+      const machine = await getDoc(doc(db, `organizations/${first.organizationId}/machines/${first.machineId}`));
+      const user = await getDoc(doc(db, 'users/newOwner'));
+      expect(organization.exists()).toBe(true);
+      expect(membership.exists()).toBe(true);
+      expect(location.exists()).toBe(true);
+      expect(machine.exists()).toBe(true);
+      expect(user.exists()).toBe(true);
+      expect(organization.data()?.ownerEmail).toBe('new-owner@example.com');
+      const trialStartedAt = organization.data()?.trialStartedAt as Timestamp;
+      const trialEndsAt = organization.data()?.trialEndsAt as Timestamp;
+      expect(trialEndsAt.toMillis() - trialStartedAt.toMillis())
+        .toBe(ONBOARDING_TRIAL_DURATION_MS);
+    });
+  });
+
+  it('keeps backend-owned trial fields immutable to browser clients', async () => {
     const ownerA = dbFor('ownerA');
     const trialStartedAt = Timestamp.now();
     const correctTrialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
-    const incorrectTrialEndsAt = Timestamp.fromMillis(correctTrialEndsAt.toMillis() + 1);
-
-    await assertFails(
-      ownerA.doc('organizations/orgWrongTrial').set({
-        name: 'Wrong Trial Laundry',
-        ownerUserId: 'ownerA',
-        createdBy: 'ownerA',
-        createdAt: trialStartedAt,
-        subscriptionStatus: 'trialing',
-        trialStartedAt,
-        trialEndsAt: incorrectTrialEndsAt,
-        onboardingStatus: 'completed',
-      }),
-    );
     await assertFails(ownerA.doc('organizations/orgA').update({ trialEndsAt: correctTrialEndsAt }));
+    await assertFails(ownerA.doc('organizations/orgA').update({ trialStartedAt }));
   });
 
   it('blocks operational writes after the trial end while keeping organization reads available', async () => {
