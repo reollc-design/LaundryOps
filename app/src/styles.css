@@ -3204,6 +3204,51 @@ button:focus-visible {
   font-weight: 950;
 }
 
+.home-trial-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #d8d2ff;
+  border-radius: 12px;
+  background: #fbfaff;
+}
+
+.home-trial-strip span,
+.home-trial-strip strong {
+  display: block;
+}
+
+.home-trial-strip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.home-trial-strip strong {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: 950;
+}
+
+.home-trial-strip button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .trial-card p {
   margin: 7px 0 0;
 }

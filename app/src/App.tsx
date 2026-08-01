@@ -234,6 +234,8 @@ function trialDaysRemaining(milliseconds: number | null): number {
   return Math.max(0, Math.ceil((milliseconds - Date.now()) / (24 * 60 * 60 * 1000)));
 }
 
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
 function getInitialScreen(): ScreenKey {
   const requestedScreen = new URLSearchParams(window.location.search).get('screen');
   const initialScreen = requestedScreen && requestedScreen in screenTitles ? (requestedScreen as ScreenKey) : 'welcome';
@@ -1537,6 +1539,7 @@ export function App() {
                     machineStatusBusyId={machineStatusBusyId}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
+                    organizationTrial={organizationTrial}
                     signOutBusy={signOutBusy}
                     signOutError={signOutError}
                     onSignOut={handleSignOut}
@@ -2488,6 +2491,7 @@ function HomeScreen({
   machineStatusBusyId,
   machineStatusError,
   orgConnected,
+  organizationTrial,
   signOutBusy,
   signOutError,
   onSignOut,
@@ -2504,11 +2508,13 @@ function HomeScreen({
   machineStatusBusyId: string | null;
   machineStatusError: string | null;
   orgConnected: boolean;
+  organizationTrial: OrganizationTrialState;
   signOutBusy: boolean;
   signOutError: string | null;
   onSignOut: () => Promise<void>;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
+  const [trialClockNow, setTrialClockNow] = useState(() => Date.now());
   const normalizedQuery = machineQuery.trim().toLowerCase();
   const machineResults = useMemo(() => {
     if (!normalizedQuery) {
@@ -2518,9 +2524,45 @@ function HomeScreen({
     return findMachines(machineQuery, machineCatalogData).slice(0, 6);
   }, [machineCatalogData, normalizedQuery, machineQuery]);
   const counts = useMemo(() => machineStatusCounts(machineCatalogData), [machineCatalogData]);
+  const showTrialStrip =
+    orgConnected &&
+    !organizationTrial.loading &&
+    organizationTrial.status === 'active' &&
+    organizationTrial.subscriptionStatus === 'trialing' &&
+    organizationTrial.accessEntitlement !== DEVELOPER_ACCESS_ENTITLEMENT &&
+    organizationTrial.trialEndsAtMs !== null;
+  const daysRemaining = organizationTrial.trialEndsAtMs === null
+    ? 0
+    : Math.max(0, Math.ceil((organizationTrial.trialEndsAtMs - trialClockNow) / DAY_IN_MILLISECONDS));
+
+  useEffect(() => {
+    if (!showTrialStrip || organizationTrial.trialEndsAtMs === null) {
+      return undefined;
+    }
+
+    const nextDayBoundary = organizationTrial.trialEndsAtMs - Math.max(daysRemaining - 1, 0) * DAY_IN_MILLISECONDS + 1;
+    const timeout = window.setTimeout(
+      () => setTrialClockNow(Date.now()),
+      Math.max(1, Math.min(nextDayBoundary - Date.now(), 2_147_000_000)),
+    );
+
+    return () => window.clearTimeout(timeout);
+  }, [daysRemaining, organizationTrial.trialEndsAtMs, showTrialStrip]);
 
   return (
     <div className="screen-stack">
+      {showTrialStrip && (
+        <section className="home-trial-strip" aria-label="Trial status">
+          <div>
+            <span>14-Day Trial</span>
+            <strong>{daysRemaining} {daysRemaining === 1 ? 'day' : 'days'} remaining</strong>
+          </div>
+          <button type="button" onClick={() => setActiveScreen('account')}>
+            View plans <ChevronRight size={15} />
+          </button>
+        </section>
+      )}
+
       <MachineStatusOverview counts={counts} onSelectStatus={onOpenMachines} />
 
       <section className="content-section machine-search-section">
