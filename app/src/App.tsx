@@ -13,12 +13,15 @@ import {
   ClipboardCheck,
   ClipboardList,
   CreditCard,
+  Eye,
+  EyeOff,
   Filter,
   FileText,
   FileUp,
   Home,
   Hourglass,
   KeyRound,
+  LogOut,
   LockKeyhole,
   Mail,
   MapPin,
@@ -1519,6 +1522,8 @@ export function App() {
                     activeScreen={activeScreen}
                     onBack={handleBack}
                     onAccountClick={() => setActiveScreen('account')}
+                    onSignOut={handleSignOut}
+                    signOutBusy={signOutBusy}
                     workspaceLabel={workspaceLabel}
                     machineCount={machineCatalogData.length}
                     workOrderCount={workOrderQueueData.length}
@@ -1540,9 +1545,7 @@ export function App() {
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
                     organizationTrial={organizationTrial}
-                    signOutBusy={signOutBusy}
                     signOutError={signOutError}
-                    onSignOut={handleSignOut}
                   />
                     )}
                     {activeScreen === 'machines' && (
@@ -1861,7 +1864,15 @@ function SignInScreen({
         </div>
         <div className="access-fields">
           <AuthField icon={Mail} label="Email" value={email} type="email" onChange={setEmail} />
-          <AuthField icon={KeyRound} label="Password" value={password} type="password" placeholder="Enter password" onChange={setPassword} />
+          <AuthField
+            icon={KeyRound}
+            label="Password"
+            value={password}
+            type="password"
+            placeholder="Enter password"
+            onChange={setPassword}
+            allowPasswordReveal
+          />
         </div>
         {authError && (
           <div className="auth-message">
@@ -2018,6 +2029,7 @@ function AuthField({
   placeholder,
   onChange,
   readOnly = false,
+  allowPasswordReveal = false,
 }: {
   icon: typeof Mail;
   label: string;
@@ -2026,21 +2038,38 @@ function AuthField({
   placeholder?: string;
   onChange?: (nextValue: string) => void;
   readOnly?: boolean;
+  allowPasswordReveal?: boolean;
 }) {
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const fieldId = `auth-field-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  const canRevealPassword = type === 'password' && allowPasswordReveal;
+
   return (
-    <label className="auth-field">
-      <span>{label}</span>
+    <div className="auth-field">
+      <label htmlFor={fieldId}>{label}</label>
       <div>
         <Icon size={17} />
         <input
-          type={type}
+          id={fieldId}
+          type={canRevealPassword && passwordVisible ? 'text' : type}
           value={value}
           placeholder={placeholder}
           readOnly={readOnly || !onChange}
           onChange={onChange ? (event) => onChange(event.target.value) : undefined}
         />
+        {canRevealPassword && (
+          <button
+            className="password-visibility-toggle"
+            type="button"
+            aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+            aria-pressed={passwordVisible}
+            onClick={() => setPasswordVisible((visible) => !visible)}
+          >
+            {passwordVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+          </button>
+        )}
       </div>
-    </label>
+    </div>
   );
 }
 
@@ -2394,6 +2423,8 @@ function AppHeader({
   activeScreen,
   onBack,
   onAccountClick,
+  onSignOut,
+  signOutBusy,
   workspaceLabel,
   machineCount,
   workOrderCount,
@@ -2403,6 +2434,8 @@ function AppHeader({
   activeScreen: ScreenKey;
   onBack: () => void;
   onAccountClick: () => void;
+  onSignOut: () => Promise<void>;
+  signOutBusy: boolean;
   workspaceLabel: string;
   machineCount: number;
   workOrderCount: number;
@@ -2422,9 +2455,22 @@ function AppHeader({
       <div className="header-copy">
         <h1>{title}</h1>
         {!showBack && activeScreen !== 'machines' && activeScreen !== 'work-orders' && (
-          <button className="workspace-chip" type="button" onClick={onAccountClick}>
-            {workspaceLabel}
-          </button>
+          <div className="workspace-row">
+            <button className="workspace-chip" type="button" onClick={onAccountClick}>
+              {workspaceLabel}
+            </button>
+            {activeScreen === 'home' && (
+              <button
+                className="header-sign-out"
+                type="button"
+                onClick={() => void onSignOut()}
+                disabled={signOutBusy}
+              >
+                <LogOut size={13} />
+                {signOutBusy ? 'Signing out...' : 'Sign out'}
+              </button>
+            )}
+          </div>
         )}
         {activeScreen === 'machines' && <span className="header-subtitle">{machineCount} machines</span>}
         {activeScreen === 'work-orders' && <span className="header-subtitle">{workOrderCount} maintenance records</span>}
@@ -2492,9 +2538,7 @@ function HomeScreen({
   machineStatusError,
   orgConnected,
   organizationTrial,
-  signOutBusy,
   signOutError,
-  onSignOut,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onOpenMachines: (filter: MachineFilter | null) => void;
@@ -2509,9 +2553,7 @@ function HomeScreen({
   machineStatusError: string | null;
   orgConnected: boolean;
   organizationTrial: OrganizationTrialState;
-  signOutBusy: boolean;
   signOutError: string | null;
-  onSignOut: () => Promise<void>;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const [trialClockNow, setTrialClockNow] = useState(() => Date.now());
@@ -2551,6 +2593,13 @@ function HomeScreen({
 
   return (
     <div className="screen-stack">
+      {signOutError && (
+        <div className="auth-message" role="alert">
+          <strong>Sign-out failed</strong>
+          <span>{signOutError}</span>
+        </div>
+      )}
+
       {showTrialStrip && (
         <section className="home-trial-strip" aria-label="Trial status">
           <div>
@@ -2644,15 +2693,6 @@ function HomeScreen({
           <h2>Account</h2>
           <button type="button" onClick={() => setActiveScreen('account')}>Details <ChevronRight size={14} /></button>
         </div>
-        {signOutError && (
-          <div className="auth-message">
-            <strong>Sign-out failed</strong>
-            <span>{signOutError}</span>
-          </div>
-        )}
-        <button className="secondary-action home-sign-out" type="button" onClick={() => void onSignOut()} disabled={signOutBusy}>
-          {signOutBusy ? 'Signing Out...' : 'Sign Out'}
-        </button>
       </section>
     </div>
   );
