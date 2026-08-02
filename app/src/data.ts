@@ -50,6 +50,7 @@ export interface UrgentMachine {
   status: MachineStatus;
   statusLabel: string;
   since: string;
+  downSinceEpoch?: number;
 }
 
 export interface WorkOrderSummary {

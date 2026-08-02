@@ -52,6 +52,11 @@ import {
   type OwnerOnboardingDraft,
 } from './onboarding.js';
 import {
+  machineStatusLabel,
+  type MachineOperationalStatus,
+} from './downtime.js';
+import { applyMachineStatusTransition } from './machine-status-service.js';
+import {
   assertOrganizationAccess,
   bearerTokenFromHeader,
   consumeRateLimit,
@@ -1392,6 +1397,31 @@ function writeError(response: Response, status: number, code: string, message: s
   });
 }
 
+async function assertOperationsAccess(organizationId: string, uid: string): Promise<void> {
+  ensureFirebaseAdmin();
+  const db = getFirestore();
+  const orgRef = db.doc(`organizations/${organizationId}`);
+  const membershipRef = db.doc(`organizations/${organizationId}/memberships/${uid}`);
+  const [orgSnap, membershipSnap] = await Promise.all([orgRef.get(), membershipRef.get()]);
+  assertOrganizationAccess({
+    uid,
+    mode: 'operations',
+    state: organizationAccessState(orgSnap, membershipSnap),
+  });
+  assertActiveOrganizationTrial(orgSnap);
+}
+
+function requiredMachineStatus(value: unknown): MachineOperationalStatus {
+  if (value === 'running' || value === 'needs-repair' || value === 'down') {
+    return value;
+  }
+  throw new Error('Machine status must be Operational, Needs Repair, or Down.');
+}
+
+function currentMachineStatus(value: unknown): MachineOperationalStatus {
+  return value === 'down' || value === 'needs-repair' ? value : 'running';
+}
+
 function onboardingStore(db: Firestore): OnboardingStore {
   return {
     newDocumentId: (collectionPath) => db.collection(collectionPath).doc().id,
@@ -1788,6 +1818,74 @@ export const completeOwnerOnboarding = onRequest(
     } catch (error) {
       const message = clientSafeErrorMessage(error, 'Could not complete company setup.');
       writeError(response, httpStatusForError(error, 400), 'onboarding_failed', message);
+    }
+  },
+);
+
+export const updateMachineOperationalStatus = onRequest(
+  { cors: ALLOWED_CORS_ORIGINS },
+  async (request: Request, response: Response) => {
+    if (request.method !== 'POST') {
+      writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
+      return;
+    }
+
+    try {
+      const caller = await requireVerifiedCaller(request);
+      await enforceRequestRateLimit({ operation: 'machineStatus', uid: caller.uid, response });
+      const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
+      const machineId = requirePathSafeDocumentId(request.body?.machineId, 'machineId');
+      const requestedStatus = requiredMachineStatus(request.body?.status);
+      await assertOperationsAccess(organizationId, caller.uid);
+
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const machineRef = db.doc(`organizations/${organizationId}/machines/${machineId}`);
+      const now = Timestamp.now();
+      let resultAction: 'opened' | 'closed' | 'status-only' | 'unchanged' = 'unchanged';
+      let activeDowntimeId: string | undefined;
+
+      await db.runTransaction(async (transaction) => {
+        const machineSnap = await transaction.get(machineRef);
+        if (!machineSnap.exists) {
+          throw new Error('Machine not found.');
+        }
+        const machineData = machineSnap.data() ?? {};
+        const result = await applyMachineStatusTransition({
+          adapter: {
+            getDowntimePeriod: async (periodId) => {
+              const periodSnap = await transaction.get(db.doc(`organizations/${organizationId}/downtimePeriods/${periodId}`));
+              return periodSnap.exists ? periodSnap.data() ?? {} : null;
+            },
+            createDowntimePeriod: (periodId, data) => transaction.set(db.doc(`organizations/${organizationId}/downtimePeriods/${periodId}`), data),
+            updateDowntimePeriod: (periodId, data) => transaction.update(db.doc(`organizations/${organizationId}/downtimePeriods/${periodId}`), data),
+            updateMachine: (data) => transaction.update(machineRef, data),
+          },
+          organizationId,
+          machineId,
+          machineNumber: optionalString(machineData.machineNumber) ?? machineId,
+          machineModel: machineModelFromParts(machineData),
+          locationId: optionalString(machineData.locationId),
+          currentStatus: currentMachineStatus(machineData.status),
+          requestedStatus,
+          downSinceMs: timestampMilliseconds(machineData.downSince) ?? undefined,
+          activeDowntimeId: optionalString(machineData.activeDowntimeId),
+          nowMs: now.toMillis(),
+          timestamp: now,
+          clearValue: FieldValue.delete(),
+          updatedBy: caller.uid,
+          nextDowntimeId: db.collection(`organizations/${organizationId}/downtimePeriods`).doc().id,
+        });
+        resultAction = result.action;
+        activeDowntimeId = result.activeDowntimeId;
+      });
+
+      logger.info('machine_operational_status_updated', { organizationId, machineId, status: requestedStatus, action: resultAction });
+      addRateLimitHeaders(response);
+      response.status(200).json({ ok: true, status: requestedStatus, statusLabel: machineStatusLabel(requestedStatus), action: resultAction, activeDowntimeId });
+    } catch (error) {
+      const message = clientSafeErrorMessage(error, 'Could not update the machine status.');
+      writeError(response, httpStatusForError(error, 400), 'machine_status_update_failed', message);
     }
   },
 );

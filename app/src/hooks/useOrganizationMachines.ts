@@ -1,4 +1,4 @@
-import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
+import { Timestamp, collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { useEffect, useMemo, useState } from 'react';
 import type { MachineStatus, UrgentMachine } from '../data';
@@ -17,6 +17,16 @@ function asString(value: unknown): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function timestampToEpoch(value: unknown): number | undefined {
+  if (value instanceof Timestamp) return value.toMillis();
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate?: unknown }).toDate === 'function') {
+    const milliseconds = (value as { toDate: () => Date }).toDate().getTime();
+    return Number.isFinite(milliseconds) ? milliseconds : undefined;
+  }
+  return undefined;
 }
 
 function normalizeMachineStatus(rawStatus: string | null): MachineStatus {
@@ -139,6 +149,7 @@ export function useOrganizationMachines(user: User | null, organizationId: strin
           status,
           statusLabel: labelForStatus(status, asString(data.statusLabel)),
           since: sinceForStatus(status),
+          ...(timestampToEpoch(data.downSince) ? { downSinceEpoch: timestampToEpoch(data.downSince) } : {}),
         } satisfies UrgentMachine;
       });
 

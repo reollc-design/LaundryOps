@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit",
     "test:trial": "node --experimental-strip-types src/trial.test.mjs && node --experimental-strip-types functions/trial.test.mjs",
     "test:onboarding": "node --experimental-strip-types src/onboardingFlow.test.mjs",
+    "test:downtime": "node --experimental-strip-types src/downtime.test.mjs && node --experimental-strip-types functions/downtime.test.mjs",
     "test:functions": "npm --prefix functions test",
     "visual:landing": "node tools/visual/landing-screenshots.mjs",
     "firebase:emulators": "firebase\\run-emulators.cmd",

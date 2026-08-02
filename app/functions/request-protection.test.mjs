@@ -75,6 +75,14 @@ test('rejects an authenticated user without the required role', () => {
     }),
     /Owner, admin, or manager access is required/,
   );
+  assert.throws(
+    () => assertOrganizationAccess({
+      uid: 'viewerA',
+      mode: 'operations',
+      state: activeMembership('viewer'),
+    }),
+    /Owner, admin, manager, or technician access is required/,
+  );
 });
 
 test('blocks repeated requests after the endpoint policy is exhausted', () => {
@@ -105,6 +113,7 @@ test('defines an enforcement policy for every protected endpoint', () => {
     'deleteManual',
     'stripeCheckout',
     'billingPortal',
+    'machineStatus',
   ];
   for (const operation of operations) {
     const policy = REQUEST_RATE_LIMIT_POLICIES[operation];
@@ -129,6 +138,11 @@ test('keeps valid owner, manager, and member requests functional', () => {
     mode: 'member',
     state: activeMembership('technician'),
   }));
+  assert.doesNotThrow(() => assertOrganizationAccess({
+    uid: 'techA1',
+    mode: 'operations',
+    state: activeMembership('technician'),
+  }));
 
   const policy = REQUEST_RATE_LIMIT_POLICIES.indexManual;
   const first = consumeRateLimit(null, 2_000_000, policy);
@@ -136,6 +150,13 @@ test('keeps valid owner, manager, and member requests functional', () => {
   assert.equal(first.allowed, true);
   assert.equal(second.allowed, true);
   assert.equal(second.remaining, policy.limit - 2);
+
+  const machineStatusPolicy = REQUEST_RATE_LIMIT_POLICIES.machineStatus;
+  let machineStatusRecord = null;
+  for (let index = 0; index < machineStatusPolicy.limit; index += 1) {
+    machineStatusRecord = consumeRateLimit(machineStatusRecord, 3_000_000, machineStatusPolicy).record;
+  }
+  assert.equal(consumeRateLimit(machineStatusRecord, 3_000_000, machineStatusPolicy).allowed, false);
 });
 
 let failures = 0;

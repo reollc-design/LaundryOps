@@ -1,4 +1,4 @@
-export type OrganizationAccessMode = 'member' | 'ownerOrAdmin' | 'manualManager';
+export type OrganizationAccessMode = 'member' | 'ownerOrAdmin' | 'manualManager' | 'operations';
 
 export type RequestRateLimitOperation =
   | 'ownerOnboarding'
@@ -7,7 +7,8 @@ export type RequestRateLimitOperation =
   | 'reindexManuals'
   | 'deleteManual'
   | 'stripeCheckout'
-  | 'billingPortal';
+  | 'billingPortal'
+  | 'machineStatus';
 
 export interface RateLimitPolicy {
   limit: number;
@@ -22,6 +23,7 @@ export const REQUEST_RATE_LIMIT_POLICIES: Record<RequestRateLimitOperation, Rate
   deleteManual: { limit: 10, windowSeconds: 60 },
   stripeCheckout: { limit: 5, windowSeconds: 300 },
   billingPortal: { limit: 10, windowSeconds: 60 },
+  machineStatus: { limit: 30, windowSeconds: 60 },
 };
 
 export interface RateLimitRecord {
@@ -107,11 +109,15 @@ export function assertOrganizationAccess(params: {
 
   const roles = params.mode === 'manualManager'
     ? ['owner', 'admin', 'manager']
-    : ['owner', 'admin'];
+    : params.mode === 'operations'
+      ? ['owner', 'admin', 'manager', 'technician']
+      : ['owner', 'admin'];
   if (!roles.includes(String(state.membershipRole)) || state.membershipStatus !== 'active') {
     throw new OrganizationAccessError(
       params.mode === 'manualManager'
         ? 'Owner, admin, or manager access is required.'
+        : params.mode === 'operations'
+          ? 'Owner, admin, manager, or technician access is required.'
         : 'Owner or admin access is required.',
     );
   }

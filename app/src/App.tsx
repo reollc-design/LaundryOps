@@ -45,7 +45,6 @@ import {
 import {
   accountStats,
   aiWorkOrderDraft,
-  downtimeTrend,
   machineCatalog,
   machineHistory,
   manualCoverageRows,
@@ -79,10 +78,12 @@ import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWork
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOrganizationTrial';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
+import { useOrganizationDowntimePeriods } from './hooks/useOrganizationDowntimePeriods';
 import { useOrganizationManuals, type ManualLibraryRow } from './hooks/useOrganizationManuals';
 import { useOrganizationMembership } from './hooks/useOrganizationMembership';
 import { useOrganizationWorkOrders } from './hooks/useOrganizationWorkOrders';
 import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
+import { buildDowntimeTrend, totalDowntimeHours, type DowntimePeriod, type DowntimeReportPeriod } from './downtime';
 import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
 import { logOnboardingRedirect, logOnboardingWrite } from './onboardingDebug';
 import { decideOrganizationRoute, onboardingFailureMessage } from './onboardingFlow';
@@ -712,6 +713,7 @@ export function App() {
   const organizationTrial = useOrganizationTrial(authSession.user, defaultOrganizationId);
   const workspaceTrialExpired = orgConnected && organizationTrial.status === 'expired';
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
+  const orgDowntime = useOrganizationDowntimePeriods(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
   const canManageManuals = useOrganizationMembership(authSession.user, defaultOrganizationId);
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
@@ -1270,12 +1272,17 @@ export function App() {
         machineId,
         status,
       });
+      setMachineStatusOverrides((previous) => {
+        const { [machineId]: _completedOverride, ...remaining } = previous;
+        return remaining;
+      });
     } catch (error) {
-      setMachineStatusOverrides((previous) => ({
-        ...previous,
-        [machineId]: normalizedCurrentStatus,
-      }));
+      setMachineStatusOverrides((previous) => {
+        const { [machineId]: _failedOverride, ...remaining } = previous;
+        return remaining;
+      });
       setMachineStatusError(getErrorMessage(error, 'Could not update machine status. Try again.'));
+      throw error;
     } finally {
       setMachineStatusBusyId((current) => (current === machineId ? null : current));
     }
@@ -1664,6 +1671,8 @@ export function App() {
                     orgConnected={orgConnected}
                     workOrders={workOrderQueueData}
                     machines={machineCatalogData}
+                    downtimePeriods={orgDowntime.periods}
+                    downtimeError={orgDowntime.error}
                   />
                     )}
                   </div>
@@ -3155,7 +3164,7 @@ function UrgentMachineRow({
             key={statusKey}
             type="button"
             className={`status-chip ${activeStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
-            onClick={() => void onSetStatus(machine.id, statusKey)}
+            onClick={() => { void onSetStatus(machine.id, statusKey).catch(() => undefined); }}
             disabled={busy}
             aria-pressed={activeStatus === statusKey}
           >
@@ -5218,7 +5227,7 @@ function WorkOrderDetailScreen({
                   key={statusKey}
                   type="button"
                   className={`status-chip ${machineOperationalStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
-                  onClick={() => void onSetMachineStatus(machine.id, statusKey)}
+                  onClick={() => { void onSetMachineStatus(machine.id, statusKey).catch(() => undefined); }}
                   disabled={busy || machineStatusBusy || !orgConnected}
                   aria-pressed={machineOperationalStatus === statusKey}
                 >
@@ -6001,13 +6010,31 @@ function ReportsScreen({
   orgConnected,
   workOrders,
   machines,
+  downtimePeriods,
+  downtimeError,
 }: {
   orgConnected: boolean;
   workOrders: WorkOrderSummary[];
   machines: UrgentMachine[];
+  downtimePeriods: DowntimePeriod[];
+  downtimeError: string | null;
 }) {
   const [activePeriod, setActivePeriod] = useState(reportPeriods[1]);
+  const [reportNow, setReportNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setReportNow(Date.now()), 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
   const activePeriodCutoff = useMemo(() => getReportPeriodCutoff(activePeriod), [activePeriod]);
+  const downtimeReportPeriod = activePeriod as DowntimeReportPeriod;
+  const liveDowntimeTrend = useMemo(
+    () => buildDowntimeTrend(downtimePeriods, downtimeReportPeriod, reportNow),
+    [downtimePeriods, downtimeReportPeriod, reportNow],
+  );
+  const liveDowntimeHours = useMemo(
+    () => totalDowntimeHours(downtimePeriods, downtimeReportPeriod, reportNow),
+    [downtimePeriods, downtimeReportPeriod, reportNow],
+  );
   const reportWorkOrders = useMemo(
     () => workOrders.filter((order) => {
       if (order.maintenanceDateEpoch == null) {
@@ -6039,7 +6066,7 @@ function ReportsScreen({
     [reportWorkOrders],
   );
   const liveMetrics = useMemo<ReportMetric[]>(() => {
-    if (!orgConnected || reportWorkOrders.length === 0) {
+    if (!orgConnected || (reportWorkOrders.length === 0 && liveDowntimeHours === 0)) {
       return [];
     }
 
@@ -6065,8 +6092,15 @@ function ReportsScreen({
         change: 'In progress now',
         tone: 'waiting',
       },
+      {
+        id: 'live-downtime',
+        label: 'Downtime',
+        value: `${liveDowntimeHours} hr${liveDowntimeHours === 1 ? '' : 's'}`,
+        change: 'Hours offline in this period',
+        tone: 'down',
+      },
     ];
-  }, [liveCompletedCount, liveInProgressCount, liveTotalCost, orgConnected, reportWorkOrders.length]);
+  }, [liveCompletedCount, liveDowntimeHours, liveInProgressCount, liveTotalCost, orgConnected, reportWorkOrders.length]);
   const liveSpendRows = useMemo<ReportRow[]>(() => {
     if (!orgConnected || reportWorkOrders.length === 0) {
       return [];
@@ -6137,8 +6171,9 @@ function ReportsScreen({
     liveSpendRows.length > 0 ||
     liveRepeatRows.length > 0 ||
     liveTechnicianRows.length > 0 ||
-    reportWorkOrders.length > 0;
-  const maxDowntime = downtimeTrend.length > 0 ? Math.max(...downtimeTrend.map((point) => point.hours)) : 1;
+    reportWorkOrders.length > 0 ||
+    liveDowntimeHours > 0;
+  const maxDowntime = liveDowntimeTrend.length > 0 ? Math.max(...liveDowntimeTrend.map((point) => point.hours), 1) : 1;
 
   return (
     <div className="screen-stack">
@@ -6187,25 +6222,26 @@ function ReportsScreen({
           <h2>Downtime Trend</h2>
           <span>Hours offline</span>
         </div>
-        <div className="downtime-chart" aria-label="Weekly downtime chart">
-          {downtimeTrend.map((point) => (
-            <div className="downtime-bar-column" key={point.day}>
+        <div className="downtime-chart" aria-label={`${activePeriod} downtime chart`}>
+          {liveDowntimeTrend.map((point) => (
+            <div className="downtime-bar-column" key={`${point.label}-${point.startMs}`}>
               <div className="downtime-bar-track">
-                <span style={{ height: `${Math.max((point.hours / maxDowntime) * 100, 10)}%` }} />
+                <span style={{ height: point.hours > 0 ? `${Math.max((point.hours / maxDowntime) * 100, 10)}%` : '0%' }} />
               </div>
               <strong>{point.hours}</strong>
-              <small>{point.day}</small>
+              <small>{point.label}</small>
             </div>
           ))}
         </div>
-        {downtimeTrend.length === 0 && <p className="empty-state">No downtime data yet.</p>}
+        {downtimePeriods.length === 0 && <p className="empty-state">Downtime tracking begins the next time a machine is marked Down.</p>}
+        {downtimeError && <p className="empty-state">Could not load downtime data: {downtimeError}</p>}
       </section>
 
       <section className="report-insight-card">
         <TrendingDown size={20} />
         <div>
           <strong>{hasReportData ? 'Review trends before making operational changes.' : 'Insights will appear as live data is added.'}</strong>
-          <span>{hasReportData ? 'Use this page to monitor downtime, spend, and repeat issues over time.' : 'Once your team logs repairs and updates machine statuses, this section will populate automatically.'}</span>
+          <span>{hasReportData ? 'Use this page to monitor downtime, spend, and repeat issues over time.' : 'Downtime starts tracking the next time a machine is marked Down.'}</span>
         </div>
       </section>
 
@@ -6244,7 +6280,7 @@ function ReportsScreen({
       <section className="report-insight-card manual-report-note">
         <ShieldCheck size={20} />
         <div>
-          <strong>Manual upload is now a launch requirement.</strong>
+          <strong>Upload Repair Manual</strong>
           <span>Upload manuals for each machine family to keep AI Repair Assist grounded in factual repair documents.</span>
         </div>
       </section>

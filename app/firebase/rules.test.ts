@@ -138,6 +138,13 @@ async function seedBaseData() {
       status: 'down',
       statusLabel: 'Down',
     });
+    await db.doc('organizations/orgA/downtimePeriods/downtimeA1').set({
+      machineId: 'washerA2',
+      machineNumber: 'D07',
+      machineModel: 'Huebsch HX12',
+      status: 'active',
+      startedAt: Timestamp.fromDate(new Date('2026-05-20T00:00:00.000Z')),
+    });
     await db.doc('organizations/orgB/machines/washerB1').set({
       machineNumber: 'W01',
       type: 'Washer',
@@ -276,7 +283,7 @@ describe('Firestore organization security', () => {
     );
 
     await assertSucceeds(techA1.doc('organizations/orgA/machines/washerA2').get());
-    await assertSucceeds(
+    await assertFails(
       techA1.doc('organizations/orgA/machines/washerA1').update({
         status: 'down',
         statusLabel: 'Down',
@@ -383,10 +390,55 @@ describe('Firestore organization security', () => {
         createdBy: 'ownerA',
       }),
     );
+    await assertFails(
+      managerA1.doc('organizations/orgA/machines/washerDownAtCreate').set({
+        machineNumber: 'W20',
+        type: 'Washer',
+        make: 'Speed Queen',
+        modelNumber: 'SQ20',
+        model: 'Speed Queen SQ20',
+        status: 'down',
+        statusLabel: 'Down',
+      }),
+    );
+    await assertFails(
+      managerA1.doc('organizations/orgA/machines/washerInjectedMarker').set({
+        machineNumber: 'W21',
+        type: 'Washer',
+        make: 'Speed Queen',
+        modelNumber: 'SQ21',
+        model: 'Speed Queen SQ21',
+        status: 'running',
+        statusLabel: 'Operational',
+        activeDowntimeId: 'downtimeA1',
+      }),
+    );
     await assertFails(ownerA.doc('users/ownerA').set({
       defaultOrganizationId: 'orgBootstrap',
       onboardingCompletedAt: trialStartedAt,
     }, { merge: true }));
+  });
+
+  it('prevents deletion of an active Down machine until its outage is closed', async () => {
+    const ownerA = dbFor('ownerA');
+    await assertFails(ownerA.doc('organizations/orgA/machines/washerA2').delete());
+    await assertSucceeds(ownerA.doc('organizations/orgA/machines/washerA1').delete());
+  });
+
+  it('keeps downtime records readable to members and backend-only for writes', async () => {
+    const ownerA = dbFor('ownerA');
+    const techA1 = dbFor('techA1');
+    const ownerB = dbFor('ownerB');
+
+    await assertSucceeds(ownerA.doc('organizations/orgA/downtimePeriods/downtimeA1').get());
+    await assertSucceeds(techA1.doc('organizations/orgA/downtimePeriods/downtimeA1').get());
+    await assertFails(ownerB.doc('organizations/orgA/downtimePeriods/downtimeA1').get());
+    await assertFails(ownerA.doc('organizations/orgA/downtimePeriods/client-created').set({
+      machineId: 'washerA1',
+      status: 'active',
+      startedAt: Timestamp.now(),
+    }));
+    await assertFails(ownerA.doc('organizations/orgA/downtimePeriods/downtimeA1').update({ status: 'completed' }));
   });
 
   it('allows normal profile refreshes without allowing onboarding ownership fields to change', async () => {

@@ -13,14 +13,12 @@ function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
   return { auth: client.auth, db: client.db };
 }
 
-function statusLabel(status: MachineOperationalStatus): string {
-  if (status === 'down') {
-    return 'Down';
+function getFunctionsApiBaseUrl(): string {
+  const baseUrl = import.meta.env.VITE_BILLING_API_BASE_URL?.trim();
+  if (!baseUrl) {
+    throw new Error('Machine status service is not configured. Add VITE_BILLING_API_BASE_URL.');
   }
-  if (status === 'needs-repair') {
-    return 'Needs Repair';
-  }
-  return 'Operational';
+  return baseUrl.replace(/\/+$/, '');
 }
 
 export interface UpdateMachineStatusInput {
@@ -30,19 +28,25 @@ export interface UpdateMachineStatusInput {
 }
 
 export async function updateMachineStatus(input: UpdateMachineStatusInput): Promise<void> {
-  const { auth, db } = requireFirebaseAuth();
+  const { auth } = requireFirebaseAuth();
   const user = auth.currentUser;
   if (!user) {
     throw new Error('No authenticated user. Sign in before updating machine status.');
   }
 
-  const machineRef = doc(db, `organizations/${input.organizationId}/machines/${input.machineId}`);
-  await updateDoc(machineRef, {
-    status: input.status,
-    statusLabel: statusLabel(input.status),
-    updatedAt: serverTimestamp(),
-    updatedBy: user.uid,
+  const idToken = await user.getIdToken();
+  const response = await fetch(`${getFunctionsApiBaseUrl()}/updateMachineOperationalStatus`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify(input),
   });
+  const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: { message?: string } };
+  if (!response.ok || body.ok === false) {
+    throw new Error(body.error?.message ?? 'Could not update the machine status.');
+  }
 }
 
 export interface CreateMachineInput {

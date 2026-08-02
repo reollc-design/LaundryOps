@@ -171,22 +171,27 @@ service cloud.firestore {
       match /machines/{machineId} {
         allow read: if isMember(orgId);
         allow create: if isOrganizationActive(orgId)
-          && isOperationsLead(orgId);
+          && isOperationsLead(orgId)
+          && request.resource.data.status == 'running'
+          && request.resource.data.statusLabel == 'Operational'
+          && !request.resource.data.keys().hasAny(['downSince', 'activeDowntimeId']);
         allow update: if isOrganizationActive(orgId)
-          && (
-            isOperationsLead(orgId)
-            || (
-              isTechnician(orgId)
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'status',
-                'statusLabel',
-                'updatedAt',
-                'updatedBy',
-                'lastServicedAt'
-              ])
-            )
-          );
-        allow delete: if isOrganizationActive(orgId) && isOwnerOrAdmin(orgId);
+          && isOperationsLead(orgId)
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'status',
+            'statusLabel',
+            'downSince',
+            'activeDowntimeId'
+          ]);
+        allow delete: if isOrganizationActive(orgId)
+          && isOwnerOrAdmin(orgId)
+          && resource.data.status != 'down'
+          && !resource.data.keys().hasAny(['downSince', 'activeDowntimeId']);
+      }
+
+      match /downtimePeriods/{periodId} {
+        allow read: if isMember(orgId);
+        allow create, update, delete: if false;
       }
 
       match /workOrders/{workOrderId} {

@@ -209,7 +209,7 @@ jobs:
         run: printf 'DOCUMENT_AI_OCR_PROCESSOR_ID=%s\nDOCUMENT_AI_OCR_LOCATION=%s\n' "$DOCUMENT_AI_OCR_PROCESSOR_ID" "$DOCUMENT_AI_OCR_LOCATION" > functions/.env.laundromat-maintenance-app
 
       - name: Deploy targeted Functions first
-        run: npx firebase-tools deploy --only functions:completeOwnerOnboarding,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
+        run: npx firebase-tools deploy --only functions:completeOwnerOnboarding,functions:updateMachineOperationalStatus,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook --project laundromat-maintenance-app --non-interactive
 
       - name: Verify onboarding Function exists
         shell: bash
