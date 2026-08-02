@@ -355,6 +355,7 @@ describe('Firestore organization security', () => {
 
   it('blocks browser clients from creating organizations, memberships, or protected onboarding fields', async () => {
     const ownerA = dbFor('ownerA');
+    const managerA1 = dbFor('managerA1');
     const trialStartedAt = Timestamp.now();
     const trialEndsAt = Timestamp.fromMillis(trialStartedAt.toMillis() + 14 * 24 * 60 * 60 * 1000);
 
