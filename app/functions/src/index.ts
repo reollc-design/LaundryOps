@@ -83,6 +83,10 @@ import {
   type StripeBillingEventType,
   type StripeSubscriptionSnapshot,
 } from './stripe-webhook-state.js';
+import {
+  logStripeWebhookFailure,
+  type StripeWebhookFailureStage,
+} from './stripe-webhook-diagnostics.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -2470,15 +2474,19 @@ export const stripeWebhook = onRequest(
       return;
     }
 
+    let stage: StripeWebhookFailureStage = 'initialize';
     try {
       ensureFirebaseAdmin();
       const stripe = getStripeClient();
+      stage = 'load_webhook_secret';
       const webhookSecret = stripeWebhookSecret.value();
       if (!webhookSecret) {
         throw new Error('Missing STRIPE_WEBHOOK_SECRET.');
       }
 
+      stage = 'verify_signature';
       const event = stripe.webhooks.constructEvent(request.rawBody, signature, webhookSecret);
+      stage = 'initialize_firestore';
       const db = getFirestore();
 
       if (
@@ -2491,6 +2499,7 @@ export const stripeWebhook = onRequest(
         let organizationId: string | undefined;
         let subscription: Stripe.Subscription | undefined;
 
+        stage = 'resolve_subscription';
         if (event.type === 'checkout.session.completed') {
           const checkoutSession = payloadObject as Stripe.Checkout.Session;
           organizationId = stripeWebhookOrganizationId(checkoutSession.metadata?.organizationId);
@@ -2505,6 +2514,7 @@ export const stripeWebhook = onRequest(
         }
 
         if (organizationId && subscription) {
+          stage = 'persist_billing';
           const result = await applyStripeBillingEvent(
             db,
             buildStripeBillingEventState({
@@ -2523,12 +2533,7 @@ export const stripeWebhook = onRequest(
 
       response.status(200).json({ received: true });
     } catch (error) {
-      console.error('Webhook handling failed.', {
-        name: error instanceof Error ? error.name : 'UnknownError',
-        code: typeof error === 'object' && error !== null && 'code' in error
-          ? String(error.code)
-          : undefined,
-      });
+      logStripeWebhookFailure(stage, error, (event, details) => logger.error(event, details));
       response.status(400).send('Webhook handling failed.');
     }
   },
