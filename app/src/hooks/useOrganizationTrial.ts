@@ -9,6 +9,8 @@ export interface OrganizationTrialState {
   status: TrialAccessStatus | 'unknown';
   accessEntitlement: string | null;
   subscriptionStatus: string | null;
+  providerCustomerId: string | null;
+  providerSubscriptionId: string | null;
   trialStartedAtMs: number | null;
   trialEndsAtMs: number | null;
   error: string | null;
@@ -17,6 +19,8 @@ export interface OrganizationTrialState {
 interface TrialRecord {
   accessEntitlement: string | null;
   subscriptionStatus: string | null;
+  providerCustomerId: string | null;
+  providerSubscriptionId: string | null;
   trialStartedAtMs: number | null;
   trialEndsAtMs: number | null;
 }
@@ -66,6 +70,8 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
           ? {
               accessEntitlement: typeof data?.accessEntitlement === 'string' ? data.accessEntitlement : null,
               subscriptionStatus: typeof data?.subscriptionStatus === 'string' ? data.subscriptionStatus : null,
+              providerCustomerId: typeof data?.providerCustomerId === 'string' ? data.providerCustomerId : null,
+              providerSubscriptionId: typeof data?.providerSubscriptionId === 'string' ? data.providerSubscriptionId : null,
               trialStartedAtMs: timestampToMillis(data?.trialStartedAt),
               trialEndsAtMs: timestampToMillis(data?.trialEndsAt),
             }
@@ -100,6 +106,8 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
     status: loading || !record || !evaluation ? 'unknown' : evaluation.status,
     accessEntitlement: record?.accessEntitlement ?? null,
     subscriptionStatus: record?.subscriptionStatus ?? null,
+    providerCustomerId: record?.providerCustomerId ?? null,
+    providerSubscriptionId: record?.providerSubscriptionId ?? null,
     trialStartedAtMs: record?.trialStartedAtMs ?? null,
     trialEndsAtMs: evaluation?.trialEndsAtMs ?? null,
     error,

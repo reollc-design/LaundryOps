@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --configLoader runner",
     "build": "vite build --configLoader runner",
+    "build:staging": "vite build --mode staging --configLoader runner",
     "lint": "tsc --noEmit",
     "test:trial": "node --experimental-strip-types src/trial.test.mjs && node --experimental-strip-types functions/trial.test.mjs",
     "test:onboarding": "node --experimental-strip-types src/onboardingFlow.test.mjs",

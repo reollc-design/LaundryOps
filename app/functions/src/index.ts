@@ -87,6 +87,12 @@ import {
   logStripeWebhookFailure,
   type StripeWebhookFailureStage,
 } from './stripe-webhook-diagnostics.js';
+import {
+  decideCheckoutAttempt,
+  stripeCheckoutIdempotencyKey,
+  stripeCustomerIdempotencyKey,
+  stripeSubscriptionDisposition,
+} from './stripe-checkout-guard.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -109,9 +115,22 @@ const LOCAL_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
+function configuredCorsOrigins(): string[] {
+  const configured = getEnv('LAUNDRYOPS_ALLOWED_CORS_ORIGINS', '');
+  const origins = configured
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => /^https:\/\/[a-z0-9.-]+$/i.test(origin));
+  return origins.length > 0 ? origins : PRODUCTION_CORS_ORIGINS;
+}
+
+function applicationUrl(): string {
+  return getEnv('LAUNDRYOPS_APP_URL', DEFAULT_APP_URL);
+}
+
 const ALLOWED_CORS_ORIGINS = process.env.FUNCTIONS_EMULATOR === 'true'
-  ? [...PRODUCTION_CORS_ORIGINS, ...LOCAL_CORS_ORIGINS]
-  : PRODUCTION_CORS_ORIGINS;
+  ? [...configuredCorsOrigins(), ...LOCAL_CORS_ORIGINS]
+  : configuredCorsOrigins();
 const DEFAULT_MANUAL_MODEL = 'gpt-5.5';
 const MAX_REPAIR_ASSIST_CHUNKS = 8;
 const MAX_CODE_ALIAS_PARTS = 5;
@@ -123,6 +142,7 @@ const MANUAL_REINDEX_PAGE_SIZE = 100;
 const FIRESTORE_BATCH_WRITE_LIMIT = 450;
 const MANUAL_INDEX_LEASE_DURATION_MS = 10 * 60 * 1000;
 const MANUAL_DELETION_RESERVATION_DURATION_MS = 10 * 60 * 1000;
+const STRIPE_CHECKOUT_ATTEMPT_DURATION_MS = 24 * 60 * 60 * 1000;
 const MANUAL_OCR_OUTPUT_PREFIX = '__laundryops/manual-ocr';
 const MANUAL_OCR_INPUT_PREFIX = '__laundryops/manual-ocr-input';
 const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
@@ -1102,7 +1122,7 @@ async function getOrCreateStripeCustomer(params: {
       organizationId: params.organizationId,
       ownerUserId: params.uid,
     },
-  });
+  }, { idempotencyKey: stripeCustomerIdempotencyKey(params.organizationId) });
 
   await orgRef.set(
     {
@@ -1401,6 +1421,113 @@ function writeError(response: Response, status: number, code: string, message: s
   });
 }
 
+async function listStripeSubscriptionStatuses(stripe: Stripe, stripeCustomerId: string): Promise<string[]> {
+  const statuses: string[] = [];
+  let startingAfter: string | undefined;
+
+  do {
+    const page = await stripe.subscriptions.list({
+      customer: stripeCustomerId,
+      status: 'all',
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    statuses.push(...page.data.map((subscription) => subscription.status));
+    startingAfter = page.has_more ? page.data.at(-1)?.id : undefined;
+  } while (startingAfter);
+
+  return statuses;
+}
+
+type CheckoutReservation =
+  | { action: 'create'; attemptId: string }
+  | { action: 'existing_checkout'; attemptId: string; checkoutUrl: string; sessionId: string | null }
+  | { action: 'pending' };
+
+function checkoutAttemptRef(db: Firestore, organizationId: string): DocumentReference {
+  return db.doc(`organizations/${organizationId}/billingCheckout/current`);
+}
+
+async function reserveStripeCheckoutAttempt(params: {
+  db: Firestore;
+  organizationId: string;
+  uid: string;
+}): Promise<CheckoutReservation> {
+  const orgRef = params.db.doc(`organizations/${params.organizationId}`);
+  const attemptRef = checkoutAttemptRef(params.db, params.organizationId);
+  const now = Date.now();
+
+  return params.db.runTransaction(async (transaction) => {
+    const [orgSnap, attemptSnap] = await Promise.all([transaction.get(orgRef), transaction.get(attemptRef)]);
+    if (!orgSnap.exists) {
+      throw new Error('Organization not found.');
+    }
+
+    const attempt = attemptSnap.data() ?? {};
+    const expiresAtMs = timestampToMilliseconds(attempt.expiresAt);
+    const attemptId = optionalString(attempt.attemptId);
+    const state = optionalString(attempt.state);
+    const checkoutUrl = optionalString(attempt.checkoutUrl);
+    const sessionId = optionalString(attempt.sessionId);
+    const stillActive = attemptId !== undefined && expiresAtMs !== null && expiresAtMs > now;
+
+    const decision = decideCheckoutAttempt({ nowMs: now, expiresAtMs, state, hasCheckoutUrl: Boolean(checkoutUrl) });
+    if (stillActive && decision === 'existing_checkout' && checkoutUrl) {
+      return { action: 'existing_checkout', attemptId, checkoutUrl, sessionId: sessionId ?? null };
+    }
+    if (stillActive && decision === 'pending') {
+      return { action: 'pending' };
+    }
+    if (stillActive && decision === 'resume_attempt' && attemptId) {
+      transaction.set(attemptRef, {
+        state: 'in_progress',
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedBy: params.uid,
+      }, { merge: true });
+      return { action: 'create', attemptId };
+    }
+
+    const nextAttemptId = randomUUID();
+    transaction.set(attemptRef, {
+      attemptId: nextAttemptId,
+      state: 'in_progress',
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      expiresAt: Timestamp.fromMillis(now + STRIPE_CHECKOUT_ATTEMPT_DURATION_MS),
+      createdBy: params.uid,
+      checkoutUrl: FieldValue.delete(),
+      sessionId: FieldValue.delete(),
+      errorCode: FieldValue.delete(),
+    });
+    return { action: 'create', attemptId: nextAttemptId };
+  });
+}
+
+async function markStripeCheckoutAttempt(params: {
+  db: Firestore;
+  organizationId: string;
+  attemptId: string;
+  state: 'ready' | 'failed' | 'blocked';
+  checkoutUrl?: string | null;
+  sessionId?: string | null;
+  errorCode?: string;
+}): Promise<void> {
+  const attemptRef = checkoutAttemptRef(params.db, params.organizationId);
+  await params.db.runTransaction(async (transaction) => {
+    const attemptSnap = await transaction.get(attemptRef);
+    if (!attemptSnap.exists || optionalString(attemptSnap.data()?.attemptId) !== params.attemptId) {
+      return;
+    }
+    transaction.set(attemptRef, {
+      state: params.state,
+      checkoutUrl: params.checkoutUrl ?? FieldValue.delete(),
+      sessionId: params.sessionId ?? FieldValue.delete(),
+      errorCode: params.errorCode ?? FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
+}
+
 async function assertOperationsAccess(organizationId: string, uid: string): Promise<void> {
   ensureFirebaseAdmin();
   const db = getFirestore();
@@ -1442,6 +1569,27 @@ function onboardingStore(db: Firestore): OnboardingStore {
         firestoreTransaction.set(db.doc(path), data);
       },
     })),
+  };
+}
+
+async function getExistingStripeCustomer(params: { organizationId: string }): Promise<OrganizationBillingIdentity> {
+  ensureFirebaseAdmin();
+  const orgSnap = await getFirestore().doc(`organizations/${params.organizationId}`).get();
+  if (!orgSnap.exists) {
+    throw new Error('Organization not found.');
+  }
+  const orgData = orgSnap.data() ?? {};
+  assertBillingAllowed({ accessEntitlement: optionalString(orgData.accessEntitlement) });
+  const stripeCustomerId = optionalString(orgData.providerCustomerId);
+  if (!stripeCustomerId) {
+    throw new Error('No Stripe billing account exists for this organization yet.');
+  }
+  return {
+    stripeCustomerId,
+    organizationName: optionalString(orgData.name) ?? 'LaundryOps Account',
+    subscriptionStatus: optionalString(orgData.subscriptionStatus) ?? null,
+    trialStartedAtMs: timestampToMilliseconds(orgData.trialStartedAt),
+    trialEndsAtMs: timestampToMilliseconds(orgData.trialEndsAt),
   };
 }
 
@@ -1902,13 +2050,13 @@ export const createStripeCheckoutSession = onRequest(
       return;
     }
 
+    let checkoutAttempt: { db: Firestore; organizationId: string; attemptId: string } | null = null;
     try {
       const caller = await requireVerifiedCaller(request);
       await enforceRequestRateLimit({ operation: 'stripeCheckout', uid: caller.uid, response });
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       const billingPlan = billingPlanFromRequest(request.body?.billingPlan);
       await assertOwnerOrAdmin(organizationId, caller.uid);
-
       const customerIdentity = await getOrCreateStripeCustomer({
         organizationId,
         uid: caller.uid,
@@ -1916,9 +2064,62 @@ export const createStripeCheckoutSession = onRequest(
       });
 
       const stripe = getStripeClient();
+      const subscriptionStatuses = await listStripeSubscriptionStatuses(stripe, customerIdentity.stripeCustomerId);
+      if (stripeSubscriptionDisposition(subscriptionStatuses) === 'manage_billing') {
+        addRateLimitHeaders(response);
+        response.status(200).json({
+          ok: true,
+          action: 'manage_billing',
+          message: 'This company already has a Stripe subscription that can be managed or recovered in Billing.',
+        });
+        return;
+      }
+
+      ensureFirebaseAdmin();
+      const db = getFirestore();
+      const reservation = await reserveStripeCheckoutAttempt({ db, organizationId, uid: caller.uid });
+      if (reservation.action === 'existing_checkout') {
+        addRateLimitHeaders(response);
+        response.status(200).json({
+          ok: true,
+          action: 'checkout',
+          checkoutUrl: reservation.checkoutUrl,
+          sessionId: reservation.sessionId,
+          billingPlan,
+        });
+        return;
+      }
+      if (reservation.action === 'pending') {
+        addRateLimitHeaders(response);
+        response.status(202).json({
+          ok: true,
+          action: 'pending',
+          message: 'A checkout request is already being prepared for this organization. Please wait a moment and try again.',
+        });
+        return;
+      }
+      checkoutAttempt = { db, organizationId, attemptId: reservation.attemptId };
+
+      // Recheck after the transaction reservation so a concurrently completed checkout wins.
+      const statusesAfterReservation = await listStripeSubscriptionStatuses(stripe, customerIdentity.stripeCustomerId);
+      if (stripeSubscriptionDisposition(statusesAfterReservation) === 'manage_billing') {
+        await markStripeCheckoutAttempt({
+          db,
+          organizationId,
+          attemptId: reservation.attemptId,
+          state: 'blocked',
+        });
+        addRateLimitHeaders(response);
+        response.status(200).json({
+          ok: true,
+          action: 'manage_billing',
+          message: 'This company already has a Stripe subscription that can be managed or recovered in Billing.',
+        });
+        return;
+      }
       const priceId = priceIdForBillingPlan(billingPlan);
-      const successUrl = getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account?billing=success`);
-      const cancelUrl = getEnv('STRIPE_CANCEL_URL', `${DEFAULT_APP_URL}/account?billing=cancel`);
+      const successUrl = getEnv('STRIPE_SUCCESS_URL', `${applicationUrl()}/account?billing=success`);
+      const cancelUrl = getEnv('STRIPE_CANCEL_URL', `${applicationUrl()}/account?billing=cancel`);
       const subscriptionData = buildCheckoutSubscriptionData({
         organizationId,
         billingPlan,
@@ -1940,17 +2141,38 @@ export const createStripeCheckoutSession = onRequest(
           billingPlan,
         },
         subscription_data: subscriptionData,
+      }, { idempotencyKey: stripeCheckoutIdempotencyKey(organizationId, reservation.attemptId) });
+
+      await markStripeCheckoutAttempt({
+        db,
+        organizationId,
+        attemptId: reservation.attemptId,
+        state: 'ready',
+        checkoutUrl: session.url,
+        sessionId: session.id,
       });
 
       addRateLimitHeaders(response);
       response.status(200).json({
         ok: true,
+        action: 'checkout',
         checkoutUrl: session.url,
         sessionId: session.id,
         trialEndUnixSeconds: subscriptionData.trial_end ?? null,
         billingPlan,
       });
     } catch (error) {
+      if (checkoutAttempt) {
+        try {
+          await markStripeCheckoutAttempt({
+            ...checkoutAttempt,
+            state: 'failed',
+            errorCode: 'checkout_request_failed',
+          });
+        } catch (markError) {
+          logger.warn('stripe_checkout_attempt_failure_not_recorded', { error: markError instanceof Error ? markError.name : 'unknown' });
+        }
+      }
       const message = clientSafeErrorMessage(error, 'Could not start subscription checkout.');
       writeError(response, httpStatusForError(error, 400), 'checkout_failed', message);
     }
@@ -1971,13 +2193,9 @@ export const createStripeBillingPortalSession = onRequest(
       const organizationId = requirePathSafeDocumentId(request.body?.organizationId, 'organizationId');
       await assertOwnerOrAdmin(organizationId, caller.uid);
 
-      const customerIdentity = await getOrCreateStripeCustomer({
-        organizationId,
-        uid: caller.uid,
-        email: caller.email,
-      });
+      const customerIdentity = await getExistingStripeCustomer({ organizationId });
 
-      const returnUrl = getEnv('STRIPE_BILLING_RETURN_URL', getEnv('STRIPE_SUCCESS_URL', `${DEFAULT_APP_URL}/account`));
+      const returnUrl = getEnv('STRIPE_BILLING_RETURN_URL', getEnv('STRIPE_SUCCESS_URL', `${applicationUrl()}/account`));
       const stripe = getStripeClient();
       const portalSession = await stripe.billingPortal.sessions.create({
         customer: customerIdentity.stripeCustomerId,

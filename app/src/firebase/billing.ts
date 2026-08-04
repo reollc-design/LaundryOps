@@ -14,6 +14,8 @@ export type BillingPlanKey = 'monthly' | 'annual';
 
 interface BillingEndpointResponse {
   ok?: boolean;
+  action?: 'checkout' | 'manage_billing' | 'pending';
+  message?: string;
   checkoutUrl?: string;
   portalUrl?: string;
   error?: {
@@ -21,6 +23,11 @@ interface BillingEndpointResponse {
     message?: string;
   };
 }
+
+export type StripeCheckoutResult =
+  | { action: 'checkout'; checkoutUrl: string }
+  | { action: 'manage_billing'; message: string }
+  | { action: 'pending'; message: string };
 
 function requireBillingAuth(): Auth {
   const client = getFirebaseClient();
@@ -64,7 +71,7 @@ async function callBillingEndpoint(path: string, payload: Record<string, unknown
   return data;
 }
 
-export async function startStripeCheckout(input: BillingCheckoutInput): Promise<string> {
+export async function startStripeCheckout(input: BillingCheckoutInput): Promise<StripeCheckoutResult> {
   const organizationId = input.organizationId.trim();
   if (!organizationId) {
     throw new Error('Missing organization ID.');
@@ -74,10 +81,16 @@ export async function startStripeCheckout(input: BillingCheckoutInput): Promise<
     organizationId,
     billingPlan: input.billingPlan,
   });
+  if (data.action === 'manage_billing') {
+    return { action: 'manage_billing', message: data.message ?? 'This company already has a subscription. Opening Billing instead.' };
+  }
+  if (data.action === 'pending') {
+    return { action: 'pending', message: data.message ?? 'Checkout is already being prepared. Please wait a moment and try again.' };
+  }
   if (!data.checkoutUrl) {
     throw new Error('Checkout URL was not returned.');
   }
-  return data.checkoutUrl;
+  return { action: 'checkout', checkoutUrl: data.checkoutUrl };
 }
 
 export async function openStripeBillingPortal(input: BillingPortalInput): Promise<string> {

@@ -1165,11 +1165,21 @@ export function App() {
 
     setBillingBusyAction('checkout');
     try {
-      const checkoutUrl = await startStripeCheckout({
+      const checkout = await startStripeCheckout({
         organizationId: defaultOrganizationId,
         billingPlan,
       });
-      window.location.assign(checkoutUrl);
+      if (checkout.action === 'checkout') {
+        window.location.assign(checkout.checkoutUrl);
+        return;
+      }
+      if (checkout.action === 'pending') {
+        setBillingError(checkout.message);
+        return;
+      }
+      setBillingBusyAction('portal');
+      const portalUrl = await openStripeBillingPortal({ organizationId: defaultOrganizationId });
+      window.location.assign(portalUrl);
     } catch (error) {
       setBillingError(getErrorMessage(error, 'Could not start Stripe checkout. Try again.'));
     } finally {
@@ -3930,6 +3940,8 @@ function AccountScreen({
   const developerAccess = organizationTrial.accessEntitlement === DEVELOPER_ACCESS_ENTITLEMENT;
   const trialExpired = organizationTrial.status === 'expired';
   const paidSubscription = organizationTrial.subscriptionStatus === 'active';
+  const stripeLinkedSubscription = Boolean(organizationTrial.providerSubscriptionId)
+    && ['active', 'trialing', 'past_due', 'unpaid', 'paused', 'incomplete'].includes(organizationTrial.subscriptionStatus ?? '');
   const trialing = !developerAccess && organizationTrial.subscriptionStatus === 'trialing' && !trialExpired;
   const trialLabel = developerAccess
     ? 'Developer access active'
@@ -4010,8 +4022,8 @@ function AccountScreen({
       ) : (
         <section className="content-section subscription-card">
         <div className="section-heading">
-          <h2>{trialExpired ? 'Choose a plan to continue' : 'Choose your plan after your 14-day free trial'}</h2>
-          <span>Annual recommended</span>
+          <h2>{stripeLinkedSubscription ? 'Manage your company subscription' : trialExpired ? 'Choose a plan to continue' : 'Choose your plan after your 14-day free trial'}</h2>
+          <span>{stripeLinkedSubscription ? 'Stripe subscription linked' : 'Annual recommended'}</span>
         </div>
         <div className="subscription-line">
           <CreditCard size={18} />
@@ -4020,7 +4032,7 @@ function AccountScreen({
             <span>Use one login for the full machine and repair workflow.</span>
           </div>
         </div>
-        <div className="billing-plan-grid" role="radiogroup" aria-label="Subscription plan">
+        {!stripeLinkedSubscription && <div className="billing-plan-grid" role="radiogroup" aria-label="Subscription plan">
           {billingPlans.map((plan) => (
             <button
               key={plan.key}
@@ -4041,9 +4053,9 @@ function AccountScreen({
               <span className="billing-plan-detail">{plan.detail}</span>
             </button>
           ))}
-        </div>
+        </div>}
         <div className="subscription-actions">
-          <button
+          {!stripeLinkedSubscription && <button
             className="primary-action"
             type="button"
             disabled={!orgConnected || billingBusyAction !== null}
@@ -4051,7 +4063,7 @@ function AccountScreen({
           >
             <CreditCard size={18} />
             {billingBusyAction === 'checkout' ? 'Starting...' : `Start ${selectedPlan.name} Plan`}
-          </button>
+          </button>}
           <button
             className="secondary-action"
             type="button"
