@@ -26,6 +26,8 @@ jobs:
       VITE_RELEASE_COMMIT: ${{ github.sha }}
       STRIPE_MONTHLY_PRICE_ID: ${{ secrets.STAGING_STRIPE_MONTHLY_PRICE_ID }}
       STRIPE_ANNUAL_PRICE_ID: ${{ secrets.STAGING_STRIPE_ANNUAL_PRICE_ID }}
+      DOCUMENT_AI_OCR_PROCESSOR_ID: ${{ secrets.STAGING_DOCUMENT_AI_OCR_PROCESSOR_ID }}
+      DOCUMENT_AI_OCR_LOCATION: us
     defaults:
       run:
         working-directory: app
@@ -76,6 +78,8 @@ jobs:
             VITE_FUNCTIONS_API_BASE_URL
             STRIPE_MONTHLY_PRICE_ID
             STRIPE_ANNUAL_PRICE_ID
+            DOCUMENT_AI_OCR_PROCESSOR_ID
+            DOCUMENT_AI_OCR_LOCATION
           )
           for var_name in "${required_vars[@]}"; do
             test -n "${!var_name}" || { echo "$var_name is missing."; exit 1; }
@@ -86,13 +90,15 @@ jobs:
           expected_functions_url="https://us-central1-laundryops-staging.cloudfunctions.net"
           test "$VITE_BILLING_API_BASE_URL" = "$expected_functions_url"
           test "$VITE_FUNCTIONS_API_BASE_URL" = "$expected_functions_url"
-          for secret_name in STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET; do
+          for secret_name in STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET OPENAI_API_KEY; do
             gcloud secrets describe "$secret_name" --project laundryops-staging --quiet >/dev/null
+            gcloud secrets versions list "$secret_name" --project laundryops-staging --filter="state=ENABLED" --limit=1 --format="value(name)" | grep -q .
           done
 
       - name: Configure staging Function environment
         shell: bash
         run: |
+          # Firebase validates every declared parameter while loading this source.
           cat > functions/.env.laundryops-staging <<EOF
           LAUNDRYOPS_APP_URL=https://laundryops-staging.web.app
           LAUNDRYOPS_ALLOWED_CORS_ORIGINS=https://laundryops-staging.web.app,https://laundryops-staging.firebaseapp.com
@@ -101,13 +107,15 @@ jobs:
           STRIPE_SUCCESS_URL=https://laundryops-staging.web.app/account?billing=success
           STRIPE_CANCEL_URL=https://laundryops-staging.web.app/account?billing=cancel
           STRIPE_BILLING_RETURN_URL=https://laundryops-staging.web.app/account
+          DOCUMENT_AI_OCR_PROCESSOR_ID=$DOCUMENT_AI_OCR_PROCESSOR_ID
+          DOCUMENT_AI_OCR_LOCATION=$DOCUMENT_AI_OCR_LOCATION
           EOF
 
       - name: Deploy staging onboarding and billing Functions
         run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only functions:completeOwnerOnboarding,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:stripeWebhook --non-interactive
 
-      - name: Deploy staging Hosting
-        run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only hosting --non-interactive
-
       - name: Deploy staging data rules
         run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only firestore:rules,firestore:indexes,storage --non-interactive
+
+      - name: Deploy staging Hosting
+        run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only hosting --non-interactive
