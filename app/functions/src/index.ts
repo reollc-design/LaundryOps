@@ -101,11 +101,11 @@ import {
   stripeSubscriptionDisposition,
 } from './stripe-checkout-guard.js';
 import {
-  allowedCorsOrigins,
   billingPriceIdForPlan as requiredBillingPriceIdForPlan,
   requiredApplicationUrl,
   requiredStripeTestSecret,
 } from './runtime-config.js';
+import { decideCors } from './cors-policy.js';
 
 setGlobalOptions({ region: 'us-central1', maxInstances: 20 });
 
@@ -116,7 +116,6 @@ const documentAiOcrProcessorId = defineString('DOCUMENT_AI_OCR_PROCESSOR_ID');
 const documentAiOcrLocation = defineString('DOCUMENT_AI_OCR_LOCATION', { default: 'us' });
 
 const STRIPE_API_VERSION: Stripe.StripeConfig['apiVersion'] = '2025-08-27.basil';
-const ALLOWED_CORS_ORIGINS = allowedCorsOrigins();
 const DEFAULT_MANUAL_MODEL = 'gpt-5.5';
 const MAX_REPAIR_ASSIST_CHUNKS = 8;
 const MAX_CODE_ALIAS_PARTS = 5;
@@ -131,6 +130,29 @@ const MANUAL_DELETION_RESERVATION_DURATION_MS = 10 * 60 * 1000;
 const STRIPE_CHECKOUT_ATTEMPT_DURATION_MS = 24 * 60 * 60 * 1000;
 const MANUAL_OCR_OUTPUT_PREFIX = '__laundryops/manual-ocr';
 const MANUAL_OCR_INPUT_PREFIX = '__laundryops/manual-ocr-input';
+
+type HttpHandler = (request: Request, response: Response) => void | Promise<void>;
+
+function withAllowedCors(handler: HttpHandler): HttpHandler {
+  return async (request, response) => {
+    const origin = request.get('origin');
+    const corsDecision = decideCors(origin);
+    for (const [header, value] of Object.entries(corsDecision.headers)) {
+      response.setHeader(header, value);
+    }
+
+    if (request.method === 'OPTIONS') {
+      if (!origin || !corsDecision.allowed) {
+        response.status(403).json({ error: 'origin_not_allowed' });
+        return;
+      }
+      response.status(204).send();
+      return;
+    }
+
+    await handler(request, response);
+  };
+}
 const LEGACY_MANUAL_CHUNK_COLLECTION = 'chunks';
 const MANUAL_CHUNK_VERSION_PREFIX = 'chunks_v';
 const LEGACY_MANUAL_ERROR_CODE_COLLECTION = 'errorCodes';
@@ -1937,8 +1959,8 @@ async function indexManualRecord(params: {
 }
 
 export const completeOwnerOnboarding = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS },
-  async (request: Request, response: Response) => {
+  {},
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -1977,12 +1999,12 @@ export const completeOwnerOnboarding = onRequest(
       const message = clientSafeErrorMessage(error, 'Could not complete company setup.');
       writeError(response, httpStatusForError(error, 400), 'onboarding_failed', message);
     }
-  },
+  }),
 );
 
 export const updateMachineOperationalStatus = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS },
-  async (request: Request, response: Response) => {
+  {},
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2045,12 +2067,12 @@ export const updateMachineOperationalStatus = onRequest(
       const message = clientSafeErrorMessage(error, 'Could not update the machine status.');
       writeError(response, httpStatusForError(error, 400), 'machine_status_update_failed', message);
     }
-  },
+  }),
 );
 
 export const createStripeCheckoutSession = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, secrets: [stripeSecretKey] },
-  async (request: Request, response: Response) => {
+  { secrets: [stripeSecretKey] },
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2206,12 +2228,12 @@ export const createStripeCheckoutSession = onRequest(
       const message = clientSafeErrorMessage(error, 'Could not start subscription checkout.');
       writeError(response, httpStatusForError(error, 400), 'checkout_failed', message);
     }
-  },
+  }),
 );
 
 export const createStripeBillingPortalSession = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, secrets: [stripeSecretKey] },
-  async (request: Request, response: Response) => {
+  { secrets: [stripeSecretKey] },
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2241,12 +2263,12 @@ export const createStripeBillingPortalSession = onRequest(
       const message = clientSafeErrorMessage(error, 'Could not open billing portal.');
       writeError(response, httpStatusForError(error, 400), 'portal_failed', message);
     }
-  },
+  }),
 );
 
 export const indexOrganizationManual = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 540, concurrency: 1, maxInstances: 2 },
-  async (request: Request, response: Response) => {
+  { timeoutSeconds: 540, concurrency: 1, maxInstances: 2 },
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2281,12 +2303,12 @@ export const indexOrganizationManual = onRequest(
       const message = clientSafeErrorMessage(error, 'Manual indexing failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_index_failed', message);
     }
-  },
+  }),
 );
 
 export const reindexOrganizationManuals = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, timeoutSeconds: 540 },
-  async (request: Request, response: Response) => {
+  { timeoutSeconds: 540 },
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2349,7 +2371,7 @@ export const reindexOrganizationManuals = onRequest(
       const message = clientSafeErrorMessage(error, 'Manual bulk re-index failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_bulk_reindex_failed', message);
     }
-  },
+  }),
 );
 
 export const refreshManualMachineCoverage = onDocumentWritten(
@@ -2445,8 +2467,8 @@ export const completeManualOcrJobs = onSchedule(
 );
 
 export const deleteOrganizationManual = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS },
-  async (request: Request, response: Response) => {
+  {},
+  withAllowedCors(async (request: Request, response: Response) => {
     if (request.method !== 'POST') {
       writeError(response, 405, 'method_not_allowed', 'Use POST for this endpoint.');
       return;
@@ -2536,12 +2558,12 @@ export const deleteOrganizationManual = onRequest(
       const message = clientSafeErrorMessage(error, 'Manual delete failed.');
       writeError(response, httpStatusForError(error, 400), 'manual_delete_failed', message);
     }
-  },
+  }),
 );
 
 export const generateRepairAssist = onRequest(
-  { cors: ALLOWED_CORS_ORIGINS, secrets: [openAiApiKey], timeoutSeconds: 120 },
-  async (request: Request, response: Response) => {
+  { secrets: [openAiApiKey], timeoutSeconds: 120 },
+  withAllowedCors(async (request: Request, response: Response) => {
     let stage = 'request_received';
     logger.info('repair_assist_stage', { stage });
     if (request.method !== 'POST') {
@@ -2705,7 +2727,7 @@ export const generateRepairAssist = onRequest(
       const message = clientSafeErrorMessage(error, 'Could not generate repair guidance.', false);
       writeError(response, httpStatusForError(error, 400), 'repair_assist_failed', message);
     }
-  },
+  }),
 );
 
 export const stripeWebhook = onRequest(
