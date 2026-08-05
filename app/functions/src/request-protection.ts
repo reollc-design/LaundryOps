@@ -3,6 +3,7 @@ export type OrganizationAccessMode = 'member' | 'ownerOrAdmin' | 'manualManager'
 export type RequestRateLimitOperation =
   | 'ownerOnboarding'
   | 'repairAssist'
+  | 'manualUpload'
   | 'indexManual'
   | 'reindexManuals'
   | 'deleteManual'
@@ -18,6 +19,7 @@ export interface RateLimitPolicy {
 export const REQUEST_RATE_LIMIT_POLICIES: Record<RequestRateLimitOperation, RateLimitPolicy> = {
   ownerOnboarding: { limit: 5, windowSeconds: 300 },
   repairAssist: { limit: 10, windowSeconds: 60 },
+  manualUpload: { limit: 10, windowSeconds: 300 },
   indexManual: { limit: 5, windowSeconds: 60 },
   reindexManuals: { limit: 2, windowSeconds: 300 },
   deleteManual: { limit: 10, windowSeconds: 60 },

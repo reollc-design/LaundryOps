@@ -225,7 +225,16 @@ service cloud.firestore {
 
       match /manuals/{manualId} {
         allow read: if isMember(orgId);
-        allow create, update: if isOrganizationActive(orgId) && hasRole(orgId, ['owner', 'admin', 'manager']);
+        allow create: if false;
+        allow update: if isOrganizationActive(orgId)
+          && hasRole(orgId, ['owner', 'admin', 'manager'])
+          && resource.data.status == 'processing'
+          && request.resource.data.status == 'missing'
+          && request.resource.data.indexError is string
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'indexError'
+          ]);
         allow delete: if false;
 
         match /{chunkCollection}/{chunkId} {

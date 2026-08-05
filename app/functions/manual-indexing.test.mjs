@@ -228,14 +228,25 @@ test('counts all eight machines that share the same normalized model number', ()
   }));
 
   assert.equal(
-    machines.filter((machine) => manualModelMatchesMachine('SFNNCASG113TN01', machine)).length,
+    machines.filter((machine) => manualModelMatchesMachine('Speed Queen SFNNCASG113TN01', machine)).length,
     8,
   );
 });
 
+test('requires the known manufacturer for long alphanumeric model numbers', () => {
+  const machine = {
+    make: 'Speed Queen',
+    modelNumber: 'SFNNCASG113TN01',
+  };
+
+  assert.equal(manualModelMatchesMachine('Speed Queen Horizon SFNNCASG113TN01', machine), true);
+  assert.equal(manualModelMatchesMachine('Other Brand SFNNCASG113TN01', machine), false);
+  assert.equal(manualModelMatchesMachine('SFNNCASG113TN01', machine), false);
+});
+
 test('refreshes only affected manual coverage after a machine create, edit, or delete', () => {
   const manuals = [
-    { id: 'speed-queen', machineModel: 'SCN30LCFXU3001' },
+    { id: 'speed-queen', machineModel: 'Speed Queen SCN30LCFXU3001' },
     { id: 'adc', machineModel: 'ADC285' },
   ];
   const sixSpeedQueenMachines = Array.from({ length: 6 }, () => ({

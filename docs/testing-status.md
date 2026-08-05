@@ -19,7 +19,7 @@ Last updated: 2026-08-05.
 | Frontend TypeScript lint | PASS | `app`: `npm.cmd run lint` |
 | Functions TypeScript lint | PASS | `app/functions`: `npm.cmd run lint` |
 | Runtime staging-config regression | PASS | `app/functions/runtime-config.test.mjs` |
-| Full Functions unit suite | PASS | Manual indexing 27/27, deletion 4/4, OCR 11/11, OCR worker 15/15, onboarding 5/5, Repair Assist 10/10, request protection 6/6, Stripe webhook state 12/12, webhook diagnostics 2/2, downtime 7/7, machine status 5/5, trial and checkout guards passed |
+| Full Functions unit suite | PASS | Manual indexing 28/28, deletion 4/4, OCR 11/11, OCR worker 15/15, onboarding 5/5, Repair Assist 12/12, request protection 6/6, Stripe webhook state 12/12, webhook diagnostics 2/2, downtime 7/7, machine status 5/5, trial and checkout guards passed |
 | Frontend trial/onboarding/downtime tests | PASS | Trial, 7/7 onboarding-flow, downtime 8/8 |
 | Manual upload and invalid-organization regressions | PASS | Frontend policy and recovery tests; Functions policy tests |
 | Duplicate-manual fail-closed selection | PASS | `app/functions/manual-selection.test.mjs`, including exact, normalized, compact, legacy, and paginated duplicates |

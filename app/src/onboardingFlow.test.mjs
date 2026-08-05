@@ -24,6 +24,13 @@ assert.equal(decideOrganizationRoute({
 
 assert.equal(decideOrganizationRoute({
   profileHasPendingWrites: false,
+  hasOrganization: false,
+  isAccountSetupScreen: true,
+  isProtectedScreen: false,
+}), 'owner-onboarding', 'an authenticated user restored to Welcome must continue to onboarding');
+
+assert.equal(decideOrganizationRoute({
+  profileHasPendingWrites: false,
   hasOrganization: true,
   isAccountSetupScreen: true,
   isProtectedScreen: false,

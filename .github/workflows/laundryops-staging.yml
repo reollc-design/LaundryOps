@@ -124,7 +124,7 @@ jobs:
           LAUNDRYOPS_ALLOWED_CORS_ORIGINS: https://laundryops-staging.web.app,https://laundryops-staging.firebaseapp.com
         run: >-
           npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging
-          --only functions:completeOwnerOnboarding,functions:updateMachineOperationalStatus,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook
+          --only functions:completeOwnerOnboarding,functions:createOrganizationManualUpload,functions:updateMachineOperationalStatus,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook
           --non-interactive
 
       - name: Deploy staging data rules
@@ -140,6 +140,7 @@ jobs:
 
           required_functions=(
             completeOwnerOnboarding
+            createOrganizationManualUpload
             updateMachineOperationalStatus
             createStripeCheckoutSession
             createStripeBillingPortalSession

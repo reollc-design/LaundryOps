@@ -16,7 +16,7 @@ export function decideOrganizationRoute(input: {
   if (input.hasOrganization && input.isAccountSetupScreen) {
     return 'home';
   }
-  if (!input.hasOrganization && input.isProtectedScreen) {
+  if (!input.hasOrganization && (input.isProtectedScreen || input.isAccountSetupScreen)) {
     return 'owner-onboarding';
   }
   return 'none';

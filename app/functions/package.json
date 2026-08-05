@@ -10,11 +10,12 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test:runtime-config": "node --experimental-strip-types runtime-config.test.mjs",
+    "test:billing-plan": "node --experimental-strip-types billing-plan.test.mjs",
     "test:manual-selection": "node --experimental-strip-types manual-selection.test.mjs",
     "test:manual-upload-policy": "node --experimental-strip-types manual-upload-policy.test.mjs",
     "test:repair-assist-policy": "node --experimental-strip-types repair-assist-policy.test.mjs",
     "test:cors-policy": "node cors-policy.test.mjs",
-    "test": "npm run build && node --experimental-strip-types runtime-config.test.mjs && node --experimental-strip-types manual-indexing.test.mjs && node --experimental-strip-types manual-deletion-reservation.test.mjs && node --experimental-strip-types manual-ocr.test.mjs && node --experimental-strip-types manual-ocr-worker.test.mjs && node --experimental-strip-types onboarding.test.mjs && node --experimental-strip-types manual-selection.test.mjs && node --experimental-strip-types manual-upload-policy.test.mjs && node --experimental-strip-types repair-assist-policy.test.mjs && node cors-policy.test.mjs && node --experimental-strip-types repair-assist.test.mjs && node --experimental-strip-types request-protection.test.mjs && node --experimental-strip-types stripe-checkout-guard.test.mjs && node --experimental-strip-types stripe-webhook-state.test.mjs && node --experimental-strip-types stripe-webhook-diagnostics.test.mjs && node --experimental-strip-types trial.test.mjs && node --experimental-strip-types downtime.test.mjs && node machine-status-service.test.mjs"
+    "test": "npm run build && node --experimental-strip-types runtime-config.test.mjs && node --experimental-strip-types billing-plan.test.mjs && node --experimental-strip-types manual-indexing.test.mjs && node --experimental-strip-types manual-deletion-reservation.test.mjs && node --experimental-strip-types manual-ocr.test.mjs && node --experimental-strip-types manual-ocr-worker.test.mjs && node --experimental-strip-types onboarding.test.mjs && node --experimental-strip-types manual-selection.test.mjs && node --experimental-strip-types manual-upload-policy.test.mjs && node --experimental-strip-types repair-assist-policy.test.mjs && node cors-policy.test.mjs && node --experimental-strip-types repair-assist.test.mjs && node --experimental-strip-types request-protection.test.mjs && node --experimental-strip-types stripe-checkout-guard.test.mjs && node --experimental-strip-types stripe-webhook-state.test.mjs && node --experimental-strip-types stripe-webhook-diagnostics.test.mjs && node --experimental-strip-types trial.test.mjs && node --experimental-strip-types downtime.test.mjs && node machine-status-service.test.mjs"
   },
   "dependencies": {
     "@google-cloud/documentai": "^9.6.2",
@@ -24,6 +25,13 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "stripe": "^18.3.0"
+  },
+  "overrides": {
+    "websocket-driver": "0.7.5",
+    "body-parser": "1.20.6",
+    "brace-expansion": "2.1.4",
+    "form-data": "2.5.6",
+    "protobufjs": "7.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

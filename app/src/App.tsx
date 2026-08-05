@@ -771,6 +771,10 @@ export function App() {
     return computedUrgent.length > 0 ? computedUrgent : orgMachines.machines.slice(0, 6);
   }, [machineCatalogData, orgConnected, orgMachines.machines]);
   const isSetupFlow = accountSetupScreens.includes(activeScreen);
+  const restoringSession = authSession.configured && (
+    authSession.loading
+    || Boolean(authSession.user && (userProfile.loading || !userProfile.loaded || userProfile.hasPendingWrites))
+  );
   const showBack =
     activeScreen === 'machine-detail' ||
     activeScreen === 'manuals' ||
@@ -1539,7 +1543,20 @@ export function App() {
       <section className="phone-frame" aria-label="LaundryOps">
         <div className={`phone-shell ${isSetupFlow ? 'setup-shell' : 'workspace-shell'} ${activeScreen === 'welcome' ? 'landing-shell' : ''}`}>
           {activeScreen !== 'welcome' && <StatusBar />}
-          {isSetupFlow ? (
+          {restoringSession ? (
+            <div className="setup-content">
+              <section className="auth-message" role="status" aria-live="polite">
+                <strong>Restoring your session...</strong>
+                <span>Checking your company workspace before opening the app.</span>
+              </section>
+            </div>
+          ) : invalidOrganization ? (
+            <OrganizationRecoveryScreen
+              onSignOut={handleSignOut}
+              signOutBusy={signOutBusy}
+              signOutError={signOutError}
+            />
+          ) : isSetupFlow ? (
             <div className="setup-content">
               {activeScreen === 'welcome' && (
                 <WelcomeScreen
@@ -1576,13 +1593,7 @@ export function App() {
             </div>
           ) : (
             <>
-              {invalidOrganization ? (
-                <OrganizationRecoveryScreen
-                  onSignOut={handleSignOut}
-                  signOutBusy={signOutBusy}
-                  signOutError={signOutError}
-                />
-              ) : workspaceTrialExpired ? (
+              {workspaceTrialExpired ? (
                 <TrialExpiredScreen
                   billingBusyAction={billingBusyAction}
                   billingError={billingError}
@@ -3613,7 +3624,7 @@ function ManualLibraryScreen({
       return;
     }
     if (!machineModel.trim()) {
-      setUploadError('Enter the machine model number first.');
+      setUploadError('Enter the manufacturer and machine model number first.');
       return;
     }
     if (!selectedFile) {
@@ -3627,11 +3638,10 @@ function ManualLibraryScreen({
         organizationId,
         machineModel: machineModel.trim(),
         file: selectedFile,
-        linkedMachineCount: 0,
       });
-      setUploadSuccess(result.processing
-        ? `Manual uploaded for model number ${machineModel.trim()}. OCR indexing is processing in the background.`
-        : `Manual uploaded and indexed for model number ${machineModel.trim()}.`);
+       setUploadSuccess(result.processing
+         ? `Manual uploaded for ${machineModel.trim()}. OCR indexing is processing in the background.`
+         : `Manual uploaded and indexed for ${machineModel.trim()}.`);
       setMachineModel('');
       setSelectedFile(null);
       setFilePickerKey((value) => value + 1);
@@ -3762,15 +3772,15 @@ function ManualLibraryScreen({
           <span className="upload-icon"><FileUp size={23} /></span>
           <div>
             <h2>Upload Repair Manual</h2>
-            <p>Link a PDF to a specific machine model number so AI Repair Assist answers from the actual manual.</p>
+           <p>Link a PDF to the exact manufacturer and machine model so AI Repair Assist answers from the correct manual.</p>
           </div>
         </div>
         <div className="upload-form">
           <label>
-            <span>Machine Model Number</span>
+             <span>Manufacturer and Model Number</span>
             <input
               value={machineModel}
-              placeholder="Ex: SFNNCASG113TN01"
+               placeholder="Ex: Speed Queen SFNNCASG113TN01"
               onChange={(event) => setMachineModel(event.target.value)}
               disabled={uploadBusy || !canManageManuals}
             />

@@ -108,6 +108,7 @@ test('defines an enforcement policy for every protected endpoint', () => {
   const operations = [
     'ownerOnboarding',
     'repairAssist',
+    'manualUpload',
     'indexManual',
     'reindexManuals',
     'deleteManual',

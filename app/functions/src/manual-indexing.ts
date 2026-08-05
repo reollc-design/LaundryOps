@@ -79,16 +79,18 @@ export function manualModelMatchesMachine(
   const modelNumber = machine.modelNumber ?? '';
   const modelNumberKey = compactKey(modelNumber);
   if (modelNumberKey) {
-    const makeModelKey = compactKey([machine.make, modelNumber].filter(Boolean).join(' '));
-    const requiresManufacturer = /^\d+$/.test(modelNumberKey) || modelNumberKey.length < 4;
-    const embeddedSpecificModelKeys = modelCandidates(modelNumber)
-      .filter((candidate) => candidate.length >= 4 && /[a-z]/.test(candidate) && /\d/.test(candidate));
-    const authoritativeMachineModels = uniqueStrings([
-      ...(requiresManufacturer ? [] : [modelNumberKey]),
-      makeModelKey === modelNumberKey ? '' : makeModelKey,
-      ...embeddedSpecificModelKeys,
-    ]);
-    return manualModels.some((candidate) => authoritativeMachineModels.includes(candidate));
+    const makeKey = compactKey(machine.make ?? '');
+    if (makeKey) {
+      const manualKey = compactKey(manualModel);
+      const machineModelCandidates = modelCandidates(modelNumber);
+      return manualKey.includes(makeKey)
+        && (
+          machineModelCandidates.some((candidate) => manualModels.includes(candidate))
+          || manualModels.some((candidate) => candidate.startsWith(makeKey) && candidate.endsWith(modelNumberKey))
+        );
+    }
+
+    return modelCandidates(modelNumber).some((candidate) => manualModels.includes(candidate));
   }
 
   const legacyMachineModels = modelCandidates(machine.model ?? '');

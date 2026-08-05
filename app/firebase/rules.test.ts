@@ -346,10 +346,36 @@ describe('Firestore organization security', () => {
     );
   });
 
-  it('allows manual metadata edits but blocks direct manual deletes', async () => {
+  it('keeps manual source metadata backend-only and permits only upload failure marking', async () => {
     const ownerA = dbFor('ownerA');
+    const adminA = dbFor('adminA');
+    const managerA1 = dbFor('managerA1');
 
-    await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualA1').update({ title: 'Updated Washer Manual' }));
+    for (const db of [ownerA, adminA, managerA1]) {
+      await assertFails(db.doc('organizations/orgA/manuals/manualClientCreated').set({
+        title: 'Client-created manual',
+        machineModel: 'Speed Queen SC40',
+        status: 'processing',
+      }));
+      await assertFails(db.doc('organizations/orgA/manuals/manualA1').update({
+        status: 'indexed',
+        machineModel: 'Wrong Model',
+        machineModelKey: 'wrong model',
+        machineModelCompactKey: 'wrongmodel',
+        activeChunkCollection: 'chunks_client',
+        activeErrorCodeCollection: 'errorCodes_client',
+        storagePath: 'orgs/orgA/manuals/attacker/manualA1/manual.pdf',
+        linkedMachineCount: 999,
+        pageCount: 999,
+        chunkCount: 999,
+      }));
+      await assertFails(db.doc('organizations/orgA/manuals/manualA1').update({ title: 'Updated Washer Manual' }));
+    }
+
+    await assertSucceeds(ownerA.doc('organizations/orgA/manuals/manualA1').update({
+      status: 'missing',
+      indexError: 'Manual upload failed. Try again.',
+    }));
     await assertFails(ownerA.doc('organizations/orgA/manuals/manualA1').delete());
   });
 
