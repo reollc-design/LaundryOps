@@ -119,6 +119,9 @@ jobs:
           EOF
 
       - name: Deploy staging application Functions
+        env:
+          LAUNDRYOPS_APP_URL: https://laundryops-staging.web.app
+          LAUNDRYOPS_ALLOWED_CORS_ORIGINS: https://laundryops-staging.web.app,https://laundryops-staging.firebaseapp.com
         run: >-
           npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging
           --only functions:completeOwnerOnboarding,functions:updateMachineOperationalStatus,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook
