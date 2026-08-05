@@ -3,8 +3,7 @@ import { collection, doc, serverTimestamp, setDoc, type Firestore } from 'fireba
 import { ref, uploadBytes, type FirebaseStorage } from 'firebase/storage';
 import { getFirebaseClient } from './client';
 import type { RepairAssistImageInput } from '../repairAssistPhotos';
-
-const MAX_MANUAL_UPLOAD_BYTES = 25 * 1024 * 1024;
+import { isApprovedManualUpload, MAX_MANUAL_UPLOAD_BYTES } from '../manualUploadPolicy';
 
 interface ManualEndpointResponse {
   ok?: boolean;
@@ -189,12 +188,11 @@ export async function uploadManualAndIndex(input: UploadManualInput): Promise<Up
   }
 
   const fileName = sanitizeFilename(input.file.name || 'manual.pdf');
-  const looksLikePdf = input.file.type === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf');
-  if (!looksLikePdf) {
+  if (!isApprovedManualUpload(fileName, input.file.type, input.file.size)) {
     throw new Error('Upload a PDF manual file.');
   }
   if (input.file.size > MAX_MANUAL_UPLOAD_BYTES) {
-    throw new Error('PDF is too large. Please upload a manual under 25 MB.');
+    throw new Error('PDF is too large. Please upload a manual of 25 MB or less.');
   }
 
   const { auth, db, storage } = requireFirebaseServices();

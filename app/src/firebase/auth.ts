@@ -4,6 +4,7 @@ import {
   getAdditionalUserInfo,
   GoogleAuthProvider,
   getRedirectResult,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
@@ -26,6 +27,15 @@ function requireFirebaseAuth(): { auth: Auth; db: Firestore } {
 export async function signInWithEmail(email: string, password: string): Promise<UserCredential> {
   const { auth } = requireFirebaseAuth();
   return signInWithEmailAndPassword(auth, email, password);
+}
+
+export async function sendPasswordReset(email: string): Promise<void> {
+  const { auth } = requireFirebaseAuth();
+  const trimmedEmail = email.trim();
+  if (!trimmedEmail) {
+    throw new Error('Enter your email address first.');
+  }
+  await sendPasswordResetEmail(auth, trimmedEmail);
 }
 
 function getGoogleAuthProvider(): GoogleAuthProvider {

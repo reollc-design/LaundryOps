@@ -14,8 +14,8 @@ import {
   type OnboardingStore,
 } from '../functions/src/onboarding';
 
-const PROJECT_ID = 'demo-laundryops-rules';
-const BUCKET_URL = `gs://${PROJECT_ID}.appspot.com`;
+const PROJECT_ID = process.env.RULES_TEST_PROJECT_ID ?? 'demo-laundryops-rules';
+const BUCKET_URL = process.env.RULES_TEST_BUCKET_URL ?? `gs://${PROJECT_ID}.appspot.com`;
 
 let testEnv: RulesTestEnvironment;
 
@@ -753,11 +753,18 @@ describe('Storage organization security', () => {
     await assertFails(ownerStorage.ref(manualPath).delete());
   });
 
-  it('rejects manual uploads at the 25 MB limit', async () => {
+  it('enforces the inclusive 25 MB PDF upload policy', async () => {
     const ownerStorage = storageFor('ownerA');
-    const oversizedPdf = new Blob([new Uint8Array(25 * 1024 * 1024)], { type: 'application/pdf' });
+    const validBoundaryPdf = new Blob([new Uint8Array(25 * 1024 * 1024)], { type: 'application/pdf' });
+    const oversizedPdf = new Blob([new Uint8Array((25 * 1024 * 1024) + 1)], { type: 'application/pdf' });
+    const wrongMime = new Blob(['manual'], { type: 'application/octet-stream' });
 
+    await assertSucceeds(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/boundary.pdf').put(validBoundaryPdf));
+    await assertSucceeds(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/uppercase.PDF').put(new Blob(['manual'], { type: 'application/pdf' })));
     await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/oversized.pdf').put(oversizedPdf));
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/manual.pdf.exe').put(new Blob(['manual'], { type: 'application/pdf' })));
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/no-extension').put(new Blob(['manual'], { type: 'application/pdf' })));
+    await assertFails(ownerStorage.ref('orgs/orgA/manuals/ownerA/manualA1/wrong-mime.pdf').put(wrongMime));
   });
 
   it('allows operational machine photos and operations-lead work order attachments', async () => {

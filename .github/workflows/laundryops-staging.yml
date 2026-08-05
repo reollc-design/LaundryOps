@@ -1,6 +1,9 @@
 name: Deploy LaundryOps Staging
 
 on:
+  push:
+    branches:
+      - feature/stripe-checkout-dedup
   workflow_dispatch:
 
 permissions:
@@ -50,10 +53,14 @@ jobs:
       - name: Install Functions dependencies
         run: npm ci --prefix functions
 
-      - name: Validate app and billing Functions
+      - name: Validate app, rules, and billing Functions
+        env:
+          RULES_TEST_PROJECT_ID: laundryops-staging
+          RULES_TEST_BUCKET_URL: gs://laundryops-staging.firebasestorage.app
         run: |
           npm run lint
           npm run test:onboarding
+          npx firebase-tools emulators:exec --config firebase.staging.json --project laundryops-staging --only firestore,storage "npx vitest run --configLoader runner --config vitest.rules.config.ts"
           npm run build:staging
           npm --prefix functions run lint
           npm --prefix functions test
@@ -111,11 +118,66 @@ jobs:
           DOCUMENT_AI_OCR_LOCATION=$DOCUMENT_AI_OCR_LOCATION
           EOF
 
-      - name: Deploy staging onboarding and billing Functions
-        run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only functions:completeOwnerOnboarding,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:stripeWebhook --non-interactive
+      - name: Deploy staging application Functions
+        run: >-
+          npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging
+          --only functions:completeOwnerOnboarding,functions:updateMachineOperationalStatus,functions:createStripeCheckoutSession,functions:createStripeBillingPortalSession,functions:indexOrganizationManual,functions:reindexOrganizationManuals,functions:refreshManualMachineCoverage,functions:completeManualOcrJobs,functions:deleteOrganizationManual,functions:generateRepairAssist,functions:stripeWebhook
+          --non-interactive
 
       - name: Deploy staging data rules
         run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only firestore:rules,firestore:indexes,storage --non-interactive
 
       - name: Deploy staging Hosting
         run: npx firebase-tools deploy --config firebase.staging.json --project laundryops-staging --only hosting --non-interactive
+
+      - name: Verify deployed staging resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_functions=(
+            completeOwnerOnboarding
+            updateMachineOperationalStatus
+            createStripeCheckoutSession
+            createStripeBillingPortalSession
+            indexOrganizationManual
+            reindexOrganizationManuals
+            refreshManualMachineCoverage
+            completeManualOcrJobs
+            deleteOrganizationManual
+            generateRepairAssist
+            stripeWebhook
+          )
+          functions_json="$(npx firebase-tools functions:list --config firebase.staging.json --project laundryops-staging --json)"
+          for function_name in "${required_functions[@]}"; do
+            printf '%s' "$functions_json" | grep -q "\"id\": \"$function_name\"" || {
+              echo "Required staging Function is missing: $function_name"
+              exit 1
+            }
+          done
+
+          shell_html="$(curl --fail --silent --show-error "https://laundryops-staging.web.app/")"
+          printf '%s' "$shell_html" | grep -q "$GITHUB_SHA"
+          asset_paths="$(printf '%s' "$shell_html" | grep -oE '/assets/[^" ]+\.(js|css)' | sort -u || true)"
+          while IFS= read -r asset_path; do
+            [ -n "$asset_path" ] || continue
+            asset_content="$(curl --fail --silent --show-error "https://laundryops-staging.web.app$asset_path")"
+            if printf '%s' "$asset_content" | grep -Eqi 'laundromat-maintenance-app|laundryops-maintenance-app|sk_live_|pk_live_|cs_live_'; then
+              echo "Production or live Stripe marker found in staging asset: $asset_path"
+              exit 1
+            fi
+          done <<< "$asset_paths"
+
+          endpoint="https://us-central1-laundryops-staging.cloudfunctions.net/completeOwnerOnboarding"
+          response_file="$(mktemp)"
+          headers_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$response_file" --dump-header "$headers_file" --write-out '%{http_code}' \
+            --request POST \
+            --header 'Origin: https://laundryops-staging.web.app' \
+            --header 'Content-Type: application/json' \
+            --data '{"requestId":"deployment-smoke","draft":{}}' \
+            "$endpoint")"
+          test "$status" = "401"
+          grep -qi '^access-control-allow-origin: https://laundryops-staging.web.app' "$headers_file"
+          grep -q '"code":"onboarding_failed"' "$response_file"
+          rm -f "$response_file" "$headers_file"

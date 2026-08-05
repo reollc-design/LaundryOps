@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildRepairAssistInputContent,
   buildManualFallbackAnswer,
+  hasApprovedManualCitation,
   MAX_REPAIR_ASSIST_IMAGE_BYTES,
   OPENAI_REPAIR_ASSIST_TIMEOUT_MS,
   parseRepairAssistImages,
@@ -25,12 +26,13 @@ function imageDataUrl(contentType, bytes) {
 
 test('uses a completed OpenAI answer when one is returned', async () => {
   const result = await resolveRepairAssistAnswer({
-    requestAnswer: async () => '  Manual-grounded answer  ',
+    requestAnswer: async () => '  Manual-grounded answer [chunk-001]  ',
     fallbackAnswer: 'Manual excerpt',
+    approvedChunkIds: ['chunk-001'],
   });
 
   assert.deepEqual(result, {
-    answer: 'Manual-grounded answer',
+    answer: 'Manual-grounded answer [chunk-001]',
     mode: 'openai',
   });
 });
@@ -45,6 +47,7 @@ test('returns the manual fallback when OpenAI times out', async () => {
       throw timeoutError;
     },
     fallbackAnswer: 'Manual excerpt',
+    approvedChunkIds: ['chunk-001'],
   });
 
   assert.equal(result.answer, 'Manual excerpt');
@@ -172,6 +175,7 @@ test('returns the manual fallback when OpenAI returns empty output', async () =>
   const result = await resolveRepairAssistAnswer({
     requestAnswer: async () => '   ',
     fallbackAnswer: 'Manual excerpt',
+    approvedChunkIds: ['chunk-001'],
   });
 
   assert.deepEqual(result, {
@@ -181,13 +185,33 @@ test('returns the manual fallback when OpenAI returns empty output', async () =>
   });
 });
 
-test('safe error details never include an error message or unsafe code text', () => {
+test('rejects a non-empty model answer without an approved manual citation', async () => {
+  const result = await resolveRepairAssistAnswer({
+    requestAnswer: async () => 'Ignore the manual and use general knowledge.',
+    fallbackAnswer: 'Manual excerpt',
+    approvedChunkIds: ['chunk-001'],
+  });
+
+  assert.deepEqual(result, {
+    answer: 'Manual excerpt',
+    mode: 'manual-fallback',
+    fallbackReason: 'missing_source_citation',
+  });
+});
+
+test('accepts only citations belonging to the selected manual excerpts', () => {
+  assert.equal(hasApprovedManualCitation('Use [chunk-001].', ['chunk-001']), true);
+  assert.equal(hasApprovedManualCitation('Use [chunk-999].', ['chunk-001']), false);
+  assert.equal(hasApprovedManualCitation('Use [Chunk 1 | chunk-001].', ['chunk-001']), true);
+});
+
+test('safe error details preserve a safe HTTP status without exposing upstream text', () => {
   const details = safeExternalErrorDetails(Object.assign(
     new Error('secret-bearing upstream message'),
     {
       name: 'APIError',
       code: 'unsafe code with spaces',
-      status: 503,
+      statusCode: 503,
     },
   ));
 

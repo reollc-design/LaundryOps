@@ -12,12 +12,10 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
-  "storage": [
-    {
-      "bucket": "laundryops-staging.firebasestorage.app",
-      "rules": "storage.rules"
-    }
-  ],
+  "storage": {
+    "bucket": "laundryops-staging.firebasestorage.app",
+    "rules": "storage.rules"
+  },
   "hosting": {
     "site": "laundryops-staging",
     "public": "dist",

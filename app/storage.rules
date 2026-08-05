@@ -66,9 +66,7 @@ service firebase.storage {
 
     function isPdf(fileName) {
       return request.resource.contentType == 'application/pdf'
-        || request.resource.contentType.matches('application/pdf.*')
-        || fileName.matches('.*\\.pdf')
-        || fileName.matches('.*\\.PDF');
+        && fileName.matches('.*\\.pdf$|.*\\.PDF$');
     }
 
     function isSupportedImage() {
@@ -76,7 +74,7 @@ service firebase.storage {
     }
 
     function isReasonableUpload() {
-      return request.resource.size < 25 * 1024 * 1024;
+      return request.resource.size <= 25 * 1024 * 1024;
     }
 
     function isReasonableImageUpload() {

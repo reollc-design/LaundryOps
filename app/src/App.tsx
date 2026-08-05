@@ -68,6 +68,7 @@ import {
   signInWithEmail,
   signInWithGoogle,
   signInWithGoogleRedirect,
+  sendPasswordReset,
   signOutCurrentUser,
   type OwnerOnboardingDraft,
 } from './firebase/auth';
@@ -708,14 +709,24 @@ export function App() {
     authSession.user && pendingOnboardingOrganization?.userId === authSession.user.uid
       ? pendingOnboardingOrganization.organizationId
       : null;
-  const defaultOrganizationId = profileOrganizationId ?? pendingOrganizationId;
+  const requestedOrganizationId = profileOrganizationId ?? pendingOrganizationId;
+  const organizationTrial = useOrganizationTrial(authSession.user, requestedOrganizationId);
+  const invalidOrganization = Boolean(requestedOrganizationId && organizationTrial.invalidOrganization);
+  const defaultOrganizationId = invalidOrganization ? null : requestedOrganizationId;
   const orgConnected = authSession.configured && !!authSession.user && !!defaultOrganizationId;
-  const organizationTrial = useOrganizationTrial(authSession.user, defaultOrganizationId);
   const workspaceTrialExpired = orgConnected && organizationTrial.status === 'expired';
   const orgMachines = useOrganizationMachines(authSession.user, defaultOrganizationId);
   const orgDowntime = useOrganizationDowntimePeriods(authSession.user, defaultOrganizationId);
   const orgManuals = useOrganizationManuals(authSession.user, defaultOrganizationId);
-  const canManageManuals = useOrganizationMembership(authSession.user, defaultOrganizationId);
+  const organizationMembership = useOrganizationMembership(authSession.user, defaultOrganizationId);
+  const canManageManuals = organizationMembership.canManageManuals;
+  const canManageOperations = organizationMembership.canManageOperations;
+  const canChangeMachineStatus = organizationMembership.canChangeMachineStatus;
+  const canCreateWorkOrders = organizationMembership.canCreateWorkOrders;
+  const canEditWorkOrders = organizationMembership.canEditWorkOrders;
+  const canDeleteWorkOrders = organizationMembership.canDeleteWorkOrders;
+  const canEditMachines = organizationMembership.canEditMachines;
+  const canDeleteMachines = organizationMembership.canDeleteMachines;
   const orgWorkOrders = useOrganizationWorkOrders(authSession.user, defaultOrganizationId);
   const workspaceLabel = userProfile.profile?.displayName ?? 'Company Account';
   const workOrderQueueData = orgConnected ? orgWorkOrders.workOrders : workOrderQueue;
@@ -947,6 +958,14 @@ export function App() {
       return;
     }
 
+    if (organizationTrial.invalidOrganization) {
+      logOnboardingRedirect('organization-recovery-required', {
+        activeScreen,
+        reason: 'organization-missing-inaccessible-or-invalid',
+      });
+      return;
+    }
+
     const routeDecision = decideOrganizationRoute({
       profileHasPendingWrites: userProfile.hasPendingWrites,
       hasOrganization: Boolean(defaultOrganizationId),
@@ -992,6 +1011,7 @@ export function App() {
     userProfile.loaded,
     userProfile.hasPendingWrites,
     userProfile.loading,
+    organizationTrial.invalidOrganization,
   ]);
   useEffect(() => {
     if (selectedWorkOrderId && !workOrderQueueData.some((order) => order.id === selectedWorkOrderId)) {
@@ -1037,6 +1057,20 @@ export function App() {
       setActiveScreen('home');
       return null;
     } catch (error) {
+      return getAuthErrorMessage(error);
+    }
+  };
+  const handlePasswordReset = async (email: string): Promise<string | null> => {
+    try {
+      await sendPasswordReset(email);
+      return null;
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      if (code === 'auth/user-not-found') {
+        return null;
+      }
       return getAuthErrorMessage(error);
     }
   };
@@ -1268,6 +1302,10 @@ export function App() {
       setMachineStatusError('Complete onboarding first before updating machine status.');
       return;
     }
+    if (!canChangeMachineStatus) {
+      setMachineStatusError('Your organization role cannot change machine status.');
+      return;
+    }
 
     setMachineStatusError(null);
     setMachineStatusOverrides((previous) => ({
@@ -1305,6 +1343,10 @@ export function App() {
       : null;
     if (!orgConnected || !defaultOrganizationId) {
       setWorkOrderError('Complete onboarding first before saving maintenance records.');
+      return;
+    }
+    if (!canCreateWorkOrders) {
+      setWorkOrderError('Only owners, admins, and managers can create maintenance records.');
       return;
     }
 
@@ -1372,6 +1414,10 @@ export function App() {
       setWorkOrderError('Complete onboarding first before saving maintenance records.');
       return;
     }
+    if (!canEditWorkOrders) {
+      setWorkOrderError('Your organization role cannot edit this maintenance record.');
+      return;
+    }
 
     const totalCost = Math.max(0, entry.partsCost) + Math.max(0, entry.laborCost) + Math.max(0, entry.otherCost);
     const title = [entry.repairType.trim(), entry.symptoms.trim()]
@@ -1416,6 +1462,9 @@ export function App() {
     if (!orgConnected || !defaultOrganizationId) {
       throw new Error('Complete onboarding first before adding maintenance photos.');
     }
+    if (!canEditWorkOrders) {
+      throw new Error('Only owners, admins, and managers can add maintenance photos.');
+    }
     await addWorkOrderPhotos({
       organizationId: defaultOrganizationId,
       workOrderId,
@@ -1427,6 +1476,10 @@ export function App() {
   const handleDeleteWorkOrder = async (workOrderId: string): Promise<void> => {
     if (!orgConnected || !defaultOrganizationId) {
       setWorkOrderDeleteError('Complete onboarding first before deleting maintenance records.');
+      return;
+    }
+    if (!canDeleteWorkOrders) {
+      setWorkOrderDeleteError('Only owners and admins can delete maintenance records.');
       return;
     }
 
@@ -1499,6 +1552,7 @@ export function App() {
                 <SignInScreen
                   onBack={() => setActiveScreen('welcome')}
                   onSignIn={handleEmailSignIn}
+                  onPasswordReset={handlePasswordReset}
                   onGoogleSignIn={handleGoogleSignIn}
                   onCreateAccount={() => setActiveScreen('create-account')}
                 />
@@ -1522,7 +1576,13 @@ export function App() {
             </div>
           ) : (
             <>
-              {workspaceTrialExpired ? (
+              {invalidOrganization ? (
+                <OrganizationRecoveryScreen
+                  onSignOut={handleSignOut}
+                  signOutBusy={signOutBusy}
+                  signOutError={signOutError}
+                />
+              ) : workspaceTrialExpired ? (
                 <TrialExpiredScreen
                   billingBusyAction={billingBusyAction}
                   billingError={billingError}
@@ -1563,6 +1623,8 @@ export function App() {
                     orgConnected={orgConnected}
                     organizationTrial={organizationTrial}
                     signOutError={signOutError}
+                    canCreateWorkOrders={canCreateWorkOrders}
+                    canChangeMachineStatus={canChangeMachineStatus}
                   />
                     )}
                     {activeScreen === 'machines' && (
@@ -1581,6 +1643,11 @@ export function App() {
                     machineStatusBusyId={machineStatusBusyId}
                     machineStatusError={machineStatusError}
                     orgConnected={orgConnected}
+                    canManageOperations={canManageOperations}
+                    canChangeMachineStatus={canChangeMachineStatus}
+                    canCreateWorkOrders={canCreateWorkOrders}
+                    canEditMachines={canEditMachines}
+                    canDeleteMachines={canDeleteMachines}
                   />
                     )}
                     {activeScreen === 'machine-detail' && (
@@ -1592,6 +1659,8 @@ export function App() {
                     onCreateWorkOrder={() => openCreateWorkOrder('machine-detail', selectedMachine?.id ?? null)}
                     onOpenAiAssist={() => openAssistScreen(selectedMachine)}
                     onOpenMaintenanceRecords={() => setActiveScreen('work-orders')}
+                    canManageOperations={canManageOperations}
+                    canCreateWorkOrders={canCreateWorkOrders}
                   />
                     )}
                     {activeScreen === 'manuals' && (
@@ -1629,6 +1698,8 @@ export function App() {
                     organizationId={defaultOrganizationId}
                     initialAssistDraft={repairAssistWorkOrderDraft}
                     onSetMachineStatus={handleSetMachineStatus}
+                    canCreateWorkOrder={canCreateWorkOrders}
+                    canChangeMachineStatus={canChangeMachineStatus}
                   />
                     )}
                     {activeScreen === 'work-orders' && (
@@ -1644,6 +1715,8 @@ export function App() {
                     orgWorkOrdersError={orgWorkOrders.error}
                     workOrderDeleteBusyId={workOrderDeleteBusyId}
                     workOrderDeleteError={workOrderDeleteError}
+                    canCreateWorkOrders={canCreateWorkOrders}
+                    canDeleteWorkOrders={canDeleteWorkOrders}
                   />
                     )}
                     {activeScreen === 'work-order-detail' && (
@@ -1663,6 +1736,8 @@ export function App() {
                     onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
                     onAddPhotos={handleAddSelectedWorkOrderPhotos}
                     onSetMachineStatus={handleSetMachineStatus}
+                    canEditWorkOrder={canEditWorkOrders}
+                    canChangeMachineStatus={canChangeMachineStatus}
                   />
                     )}
                     {activeScreen === 'ai-assist' && (
@@ -1827,19 +1902,22 @@ function WelcomeScreen({
 function SignInScreen({
   onBack,
   onSignIn,
+  onPasswordReset,
   onGoogleSignIn,
   onCreateAccount,
 }: {
   onBack: () => void;
   onSignIn: (email: string, password: string) => Promise<string | null>;
+  onPasswordReset: (email: string) => Promise<string | null>;
   onGoogleSignIn: () => Promise<string | null>;
   onCreateAccount: () => void;
 }) {
-  const [showReset, setShowReset] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isResetSubmitting, setIsResetSubmitting] = useState(false);
   const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
 
   const submitSignIn = async () => {
@@ -1856,6 +1934,25 @@ function SignInScreen({
     if (error) {
       setAuthError(error);
     }
+  };
+  const submitPasswordReset = async () => {
+    if (!email.trim()) {
+      setAuthError('Enter your email address first.');
+      return;
+    }
+
+    setAuthError(null);
+    setResetMessage(null);
+    setIsResetSubmitting(true);
+    const error = await onPasswordReset(email.trim());
+    setIsResetSubmitting(false);
+
+    if (error) {
+      setAuthError(error);
+      return;
+    }
+
+    setResetMessage('If an account uses this email, a password reset link is on the way.');
   };
   const submitGoogleSignIn = async () => {
     setAuthError(null);
@@ -1899,10 +1996,10 @@ function SignInScreen({
             <span>{authError}</span>
           </div>
         )}
-        {showReset && (
+        {resetMessage && (
           <div className="auth-message">
-            <strong>Password reset ready</strong>
-            <span>Production Firebase Auth will send the reset email from this screen.</span>
+            <strong>Password reset requested</strong>
+            <span>{resetMessage}</span>
           </div>
         )}
         <button className="primary-action" type="button" onClick={submitSignIn} disabled={isSubmitting}>
@@ -1917,7 +2014,9 @@ function SignInScreen({
           {isGoogleSubmitting ? 'Opening Google...' : 'Continue with Google'}
         </button>
         <div className="access-link-row">
-          <button type="button" onClick={() => setShowReset(true)}>Forgot password?</button>
+           <button type="button" onClick={() => void submitPasswordReset()} disabled={isResetSubmitting}>
+             {isResetSubmitting ? 'Sending reset email...' : 'Forgot password?'}
+           </button>
           <button type="button" onClick={onCreateAccount}>Create account</button>
         </div>
       </section>
@@ -2088,6 +2187,30 @@ function AuthField({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function OrganizationRecoveryScreen({
+  onSignOut,
+  signOutBusy,
+  signOutError,
+}: {
+  onSignOut: () => Promise<void>;
+  signOutBusy: boolean;
+  signOutError: string | null;
+}) {
+  return (
+    <div className="screen-stack">
+      <section className="content-section empty-state-panel" role="alert" aria-live="assertive">
+        <div className="empty-state-icon"><Building2 size={26} /></div>
+        <h1>Workspace unavailable</h1>
+        <p>This account is not connected to an accessible LaundryOps organization. Your data is protected, so no replacement workspace was created.</p>
+        <button className="primary-action full-width-action" type="button" onClick={() => void onSignOut()} disabled={signOutBusy}>
+          {signOutBusy ? 'Signing out...' : 'Sign out and recover access'}
+        </button>
+        {signOutError && <p className="auth-message" role="alert">{signOutError}</p>}
+      </section>
     </div>
   );
 }
@@ -2558,6 +2681,8 @@ function HomeScreen({
   orgConnected,
   organizationTrial,
   signOutError,
+  canCreateWorkOrders,
+  canChangeMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onOpenMachines: (filter: MachineFilter | null) => void;
@@ -2573,6 +2698,8 @@ function HomeScreen({
   orgConnected: boolean;
   organizationTrial: OrganizationTrialState;
   signOutError: string | null;
+  canCreateWorkOrders: boolean;
+  canChangeMachineStatus: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const [trialClockNow, setTrialClockNow] = useState(() => Date.now());
@@ -2662,7 +2789,7 @@ function HomeScreen({
                     machine={machine}
                     busy={machineStatusBusyId === machine.id}
                     onClick={() => onOpenMachineDetail(machine.id)}
-                    onSetStatus={onSetMachineStatus}
+                    onSetStatus={canChangeMachineStatus ? onSetMachineStatus : undefined}
                   />
                 ))}
               </div>
@@ -2685,7 +2812,7 @@ function HomeScreen({
               machine={machine}
               busy={machineStatusBusyId === machine.id}
               onClick={() => onOpenMachineDetail(machine.id)}
-              onSetStatus={onSetMachineStatus}
+              onSetStatus={canChangeMachineStatus ? onSetMachineStatus : undefined}
             />
           ))}
         </div>
@@ -2702,7 +2829,7 @@ function HomeScreen({
         </div>
         <div className="quick-grid">
           <QuickAction icon={BookOpen} label="Manual Library" tone="teal" onClick={() => setActiveScreen('manuals')} />
-          <QuickAction icon={ClipboardList} label="New Maintenance Record" tone="primary" onClick={onCreateWorkOrder} />
+          {canCreateWorkOrders && <QuickAction icon={ClipboardList} label="New Maintenance Record" tone="primary" onClick={onCreateWorkOrder} />}
           <QuickAction icon={Sparkles} label="Ask AI" tone="ai" onClick={() => setActiveScreen('ai-assist')} />
         </div>
       </section>
@@ -2732,6 +2859,11 @@ function MachinesScreen({
   machineStatusBusyId,
   machineStatusError,
   orgConnected,
+  canManageOperations,
+  canChangeMachineStatus,
+  canCreateWorkOrders,
+  canEditMachines,
+  canDeleteMachines,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   activeFilter: MachineFilter;
@@ -2747,6 +2879,11 @@ function MachinesScreen({
   machineStatusBusyId: string | null;
   machineStatusError: string | null;
   orgConnected: boolean;
+  canManageOperations: boolean;
+  canChangeMachineStatus: boolean;
+  canCreateWorkOrders: boolean;
+  canEditMachines: boolean;
+  canDeleteMachines: boolean;
 }) {
   const [machineQuery, setMachineQuery] = useState('');
   const [showAddMachineForm, setShowAddMachineForm] = useState(false);
@@ -2806,6 +2943,10 @@ function MachinesScreen({
       setAddMachineError('Complete onboarding first before adding machines.');
       return;
     }
+    if (!canManageOperations) {
+      setAddMachineError('Only owners, admins, and managers can add machines.');
+      return;
+    }
     if (!machineNumberInput.trim() || !machineMakeInput.trim() || !machineModelNumberInput.trim()) {
       setAddMachineError('Machine ID, make, and model number are required.');
       return;
@@ -2837,6 +2978,10 @@ function MachinesScreen({
       setEditMachineError('Complete onboarding first before editing machines.');
       return;
     }
+    if (!canManageOperations) {
+      setEditMachineError('Only owners, admins, and managers can edit machines.');
+      return;
+    }
     if (!editMachineNumberInput.trim() || !editMachineMakeInput.trim() || !editMachineModelNumberInput.trim()) {
       setEditMachineError('Machine ID, make, and model number are required.');
       return;
@@ -2866,6 +3011,10 @@ function MachinesScreen({
     }
     if (!orgConnected || !organizationId) {
       setDeleteMachineError('Complete onboarding first before deleting machines.');
+      return;
+    }
+    if (!canDeleteMachines) {
+      setDeleteMachineError('Only owners and admins can delete machines.');
       return;
     }
 
@@ -2938,13 +3087,13 @@ function MachinesScreen({
               onClick={() => onOpenMachineDetail(machine.id)}
               onOpenDetails={() => onOpenMachineDetail(machine.id)}
               onAskAi={() => onOpenAiAssist(machine)}
-              onCreateWorkOrder={() => onCreateWorkOrder(machine.id)}
-              onSetStatus={onSetMachineStatus}
-              onEdit={() => openEditMachine(machine)}
-              onDelete={() => {
+              onCreateWorkOrder={canCreateWorkOrders ? () => onCreateWorkOrder(machine.id) : undefined}
+              onSetStatus={canChangeMachineStatus ? onSetMachineStatus : undefined}
+              onEdit={canEditMachines ? () => openEditMachine(machine) : undefined}
+              onDelete={canDeleteMachines ? () => {
                 setDeletingMachine(machine);
                 setDeleteMachineError(null);
-              }}
+              } : undefined}
             />
           ))}
         </div>
@@ -2952,7 +3101,7 @@ function MachinesScreen({
         {machineStatusError && <p className="empty-state">{machineStatusError}</p>}
       </section>
 
-      <button
+      {canManageOperations && <button
         className="machine-fab"
         type="button"
         onClick={() => {
@@ -2962,9 +3111,9 @@ function MachinesScreen({
         aria-label="Add machine"
       >
         <Plus size={22} />
-      </button>
+      </button>}
 
-      {showAddMachineForm && (
+      {showAddMachineForm && canManageOperations && (
         <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Add machine">
           <div className="machine-modal-card">
             <div className="section-heading">
@@ -3002,7 +3151,7 @@ function MachinesScreen({
           </div>
         </section>
       )}
-      {editingMachine && (
+      {editingMachine && canEditMachines && (
         <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Edit machine">
           <div className="machine-modal-card">
             <div className="section-heading">
@@ -3039,7 +3188,7 @@ function MachinesScreen({
           </div>
         </section>
       )}
-      {deletingMachine && (
+      {deletingMachine && canDeleteMachines && (
         <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Delete machine">
           <div className="machine-modal-card">
             <div className="section-heading">
@@ -3143,7 +3292,7 @@ function UrgentMachineRow({
   onOpenDetails?: () => void;
   onAskAi?: () => void;
   onCreateWorkOrder?: () => void;
-  onSetStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
+  onSetStatus?: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
   busy?: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -3164,7 +3313,7 @@ function UrgentMachineRow({
         </div>
         <ChevronRight className="row-chevron" size={18} />
       </button>
-      <div className="machine-status-toggle" role="group" aria-label={`Status for ${machine.machineNumber}`}>
+      {onSetStatus && <div className="machine-status-toggle" role="group" aria-label={`Status for ${machine.machineNumber}`}>
         {([
           ['running', 'Op'],
           ['needs-repair', 'Repair'],
@@ -3181,7 +3330,7 @@ function UrgentMachineRow({
             {label}
           </button>
         ))}
-      </div>
+      </div>}
       {(onAskAi || onOpenDetails || onCreateWorkOrder || onEdit || onDelete) && (
         <div className="machine-row-actions">
           {onAskAi && (
@@ -3223,6 +3372,8 @@ function MachineDetailScreen({
   onCreateWorkOrder,
   onOpenAiAssist,
   onOpenMaintenanceRecords,
+  canManageOperations,
+  canCreateWorkOrders,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   machine: UrgentMachine | null;
@@ -3231,6 +3382,8 @@ function MachineDetailScreen({
   onCreateWorkOrder: () => void;
   onOpenAiAssist: () => void;
   onOpenMaintenanceRecords: () => void;
+  canManageOperations: boolean;
+  canCreateWorkOrders: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [machineNumberInput, setMachineNumberInput] = useState('');
@@ -3312,7 +3465,7 @@ function MachineDetailScreen({
           <strong>{machineModel}</strong>
           <span>{machine?.type ?? 'Machine type not set'}</span>
           <span>S/N 123456789</span>
-          {machine && (
+          {machine && canManageOperations && (
             <button className="row-action-button machine-detail-edit" type="button" onClick={openEdit}>
               <Pencil size={14} /> Edit machine details
             </button>
@@ -3327,14 +3480,16 @@ function MachineDetailScreen({
         <p>{machine?.since ?? 'Status just updated'}</p>
       </section>
 
-      <button className="primary-action" type="button" onClick={onCreateWorkOrder}>
-        <Plus size={20} /> Create Maintenance Record
-      </button>
+      {canCreateWorkOrders && (
+        <button className="primary-action" type="button" onClick={onCreateWorkOrder}>
+          <Plus size={20} /> Create Maintenance Record
+        </button>
+      )}
 
       <div className="shortcut-grid">
         <Shortcut icon={Sparkles} label="Ask AI" onClick={onOpenAiAssist} tone="ai" />
         <Shortcut icon={BookOpen} label="Search Manual" onClick={() => setActiveScreen('manuals')} />
-        <Shortcut icon={Camera} label="Add Photo" onClick={onCreateWorkOrder} />
+        {canCreateWorkOrders && <Shortcut icon={Camera} label="Add Photo" onClick={onCreateWorkOrder} />}
       </div>
 
       <div className="stat-grid">
@@ -3364,7 +3519,7 @@ function MachineDetailScreen({
         </div>
         {machineHistory.length === 0 && <p className="empty-state">No maintenance history recorded yet.</p>}
       </section>
-      {isEditing && (
+      {isEditing && canManageOperations && (
         <section className="machine-modal-backdrop" role="dialog" aria-modal="true" aria-label="Edit machine">
           <div className="machine-modal-card">
             <div className="section-heading">
@@ -4140,6 +4295,8 @@ function CreateWorkOrderScreen({
   initialAssistDraft,
   availableMachines = [],
   onSetMachineStatus,
+  canCreateWorkOrder,
+  canChangeMachineStatus,
 }: {
   onSave: (entry: WorkOrderCostEntry) => Promise<void>;
   busy: boolean;
@@ -4150,6 +4307,8 @@ function CreateWorkOrderScreen({
   initialAssistDraft: RepairAssistWorkOrderDraft | null;
   availableMachines?: UrgentMachine[];
   onSetMachineStatus?: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
+  canCreateWorkOrder: boolean;
+  canChangeMachineStatus: boolean;
 }) {
   const [maintenanceType, setMaintenanceType] = useState('Standard Repair');
   const [repairType, setRepairType] = useState('');
@@ -4345,6 +4504,17 @@ function CreateWorkOrderScreen({
     }
   };
 
+  if (!canCreateWorkOrder) {
+    return (
+      <div className="screen-stack">
+        <section className="content-section empty-state-panel" role="alert">
+          <h2>Permission required</h2>
+          <p>Only owners, admins, and managers can create maintenance records.</p>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="screen-stack">
       <section className="draft-machine-card">
@@ -4454,7 +4624,7 @@ function CreateWorkOrderScreen({
               type="button"
               className={`status-chip ${machineStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
               onClick={() => void handleMachineStatusChange(statusKey)}
-              disabled={busy || !onSetMachineStatus}
+              disabled={busy || !onSetMachineStatus || !canChangeMachineStatus}
               aria-pressed={machineStatus === statusKey}
             >
               {statusLabel}
@@ -4683,6 +4853,8 @@ function WorkOrdersScreen({
   orgWorkOrdersError,
   workOrderDeleteBusyId,
   workOrderDeleteError,
+  canCreateWorkOrders,
+  canDeleteWorkOrders,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   onCreateWorkOrder: () => void;
@@ -4695,6 +4867,8 @@ function WorkOrdersScreen({
   orgWorkOrdersError: string | null;
   workOrderDeleteBusyId: string | null;
   workOrderDeleteError: string | null;
+  canCreateWorkOrders: boolean;
+  canDeleteWorkOrders: boolean;
 }) {
   const [statusFilter, setStatusFilter] = useState<WorkOrderStatusFilter>('all');
   const [priorityFilter, setPriorityFilter] = useState<WorkOrderPriorityFilter>('all');
@@ -4722,7 +4896,7 @@ function WorkOrdersScreen({
       <section className="content-section work-filter-card">
         <div className="section-heading">
           <h2>Maintenance Records</h2>
-          <button type="button" onClick={onCreateWorkOrder}><Plus size={14} /> New Record</button>
+          {canCreateWorkOrders && <button type="button" onClick={onCreateWorkOrder}><Plus size={14} /> New Record</button>}
         </div>
         <div className="work-filter-block">
           <div className="filter-label">
@@ -4782,7 +4956,7 @@ function WorkOrdersScreen({
                 onOpenMachineDetail(order.machineId);
               }
             }}
-            onDelete={() => void onDeleteWorkOrder(order.id)}
+            onDelete={canDeleteWorkOrders ? () => void onDeleteWorkOrder(order.id) : undefined}
           />
         ))}
         {filteredOrders.length === 0 && <p className="empty-state">No maintenance records match your filters.</p>}
@@ -4908,6 +5082,8 @@ function WorkOrderDetailScreen({
   onUpdateDetails,
   onAddPhotos,
   onSetMachineStatus,
+  canEditWorkOrder,
+  canChangeMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
   createdFromDraft: boolean;
@@ -4924,6 +5100,8 @@ function WorkOrderDetailScreen({
   onUpdateDetails: (entry: WorkOrderDetailsEntry) => Promise<void>;
   onAddPhotos: (workOrderId: string, files: File[]) => Promise<void>;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
+  canEditWorkOrder: boolean;
+  canChangeMachineStatus: boolean;
 }) {
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
   const [selectedStatus, setSelectedStatus] = useState<'planned' | 'in-progress' | 'completed'>('planned');
@@ -4960,7 +5138,7 @@ function WorkOrderDetailScreen({
   const parsedLaborCost = parseUsdAmount(laborCostInput);
   const parsedOtherCost = parseUsdAmount(otherCostInput);
   const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
-  const detailInputsDisabled = busy || detailAssistantLoading || !orgConnected || pendingSavedSignature !== null;
+  const detailInputsDisabled = busy || detailAssistantLoading || !orgConnected || pendingSavedSignature !== null || !canEditWorkOrder;
 
   useEffect(() => {
     if (!order) {
@@ -5098,6 +5276,10 @@ function WorkOrderDetailScreen({
       setDetailAssistantError('Complete onboarding first before using AI diagnostics.');
       return;
     }
+    if (!canEditWorkOrder) {
+      setDetailAssistantError('Only owners, admins, and managers can save AI diagnoses to maintenance records.');
+      return;
+    }
     if (!order) {
       setDetailAssistantError('Open a maintenance record before using AI diagnostics.');
       return;
@@ -5156,6 +5338,10 @@ function WorkOrderDetailScreen({
 
   const addDetailPhotos = async (files: File[]): Promise<void> => {
     if (!order || files.length === 0 || photoBusy) {
+      return;
+    }
+    if (!canEditWorkOrder) {
+      setPhotoError('Only owners, admins, and managers can add maintenance photos.');
       return;
     }
     const existingPhotoCount = order.photoAttachments?.length ?? 0;
@@ -5240,7 +5426,7 @@ function WorkOrderDetailScreen({
                   type="button"
                   className={`status-chip ${machineOperationalStatus === statusKey ? `status-chip-${statusKey} is-active` : ''}`}
                   onClick={() => { void onSetMachineStatus(machine.id, statusKey).catch(() => undefined); }}
-                  disabled={busy || machineStatusBusy || !orgConnected}
+                  disabled={busy || machineStatusBusy || !orgConnected || !canChangeMachineStatus}
                   aria-pressed={machineOperationalStatus === statusKey}
                 >
                   {statusLabel}
@@ -5451,17 +5637,17 @@ function WorkOrderDetailScreen({
             <strong>{retryPhotoFiles.length} selected photo{retryPhotoFiles.length === 1 ? '' : 's'} ready to retry</strong>
             <span>The maintenance record was saved. These temporary selections remain until you retry or leave this record.</span>
             <SelectedPhotoStrip files={retryPhotoFiles} onRemove={() => undefined} hideRemove />
-            <button
+            {canEditWorkOrder && <button
               className="secondary-action full-width-action"
               type="button"
               onClick={() => void addDetailPhotos(retryPhotoFiles)}
               disabled={photoBusy}
             >
               <RefreshCw size={18} /> {photoBusy ? 'Retrying Photos...' : 'Retry Photos'}
-            </button>
+            </button>}
           </div>
         )}
-        <input
+        {canEditWorkOrder && <input
           ref={detailPhotoInputRef}
           className="visually-hidden"
           type="file"
@@ -5472,8 +5658,8 @@ function WorkOrderDetailScreen({
             event.target.value = '';
             void addDetailPhotos(files);
           }}
-        />
-        <button
+        />}
+        {canEditWorkOrder && <button
           className="secondary-action full-width-action"
           type="button"
           onClick={() => detailPhotoInputRef.current?.click()}
@@ -5484,7 +5670,7 @@ function WorkOrderDetailScreen({
             : (order.photoAttachments?.length ?? 0) >= MAX_REPAIR_ASSIST_PHOTOS
               ? '3 Photos Added'
               : 'Add Photo'}
-        </button>
+        </button>}
         {(photoError || photoExternalError) && (
           <div className="auth-message" role="alert">
             <strong>Add Photo</strong>

@@ -2,6 +2,7 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { getFirebaseClient } from '../firebase/client';
+import { isInvalidOrganizationState } from '../organizationRecovery';
 import { evaluateTrialAccess, shouldScheduleTrialExpiration, type TrialAccessStatus } from '../trial';
 
 export interface OrganizationTrialState {
@@ -14,6 +15,7 @@ export interface OrganizationTrialState {
   trialStartedAtMs: number | null;
   trialEndsAtMs: number | null;
   error: string | null;
+  invalidOrganization: boolean;
 }
 
 interface TrialRecord {
@@ -42,6 +44,8 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
   const [record, setRecord] = useState<TrialRecord | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [organizationExists, setOrganizationExists] = useState<boolean | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -49,6 +53,8 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
       setRecord(null);
       setLoading(false);
       setError(null);
+      setOrganizationExists(null);
+      setErrorCode(null);
       return undefined;
     }
 
@@ -56,16 +62,25 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
       setRecord(null);
       setLoading(false);
       setError('Firestore client is not configured.');
+      setOrganizationExists(null);
+      setErrorCode('client-not-configured');
       return undefined;
     }
 
     setLoading(true);
     setError(null);
+    setOrganizationExists(null);
+    setErrorCode(null);
     const organizationRef = doc(client.db, 'organizations', organizationId);
     const unsubscribe = onSnapshot(
       organizationRef,
       (snapshot) => {
         const data = snapshot.data();
+        const validOrganizationIdentity = snapshot.exists()
+          && typeof data?.ownerUserId === 'string'
+          && data.ownerUserId.trim().length > 0;
+        setOrganizationExists(validOrganizationIdentity);
+        setErrorCode(null);
         setRecord(snapshot.exists()
           ? {
               accessEntitlement: typeof data?.accessEntitlement === 'string' ? data.accessEntitlement : null,
@@ -83,6 +98,8 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
         setRecord(null);
         setLoading(false);
         setError(snapshotError.message);
+        setOrganizationExists(null);
+        setErrorCode(snapshotError.code ?? null);
       },
     );
 
@@ -111,5 +128,6 @@ export function useOrganizationTrial(user: User | null, organizationId: string |
     trialStartedAtMs: record?.trialStartedAtMs ?? null,
     trialEndsAtMs: evaluation?.trialEndsAtMs ?? null,
     error,
+    invalidOrganization: isInvalidOrganizationState({ loading, organizationExists, errorCode }),
   };
 }

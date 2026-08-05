@@ -15,7 +15,7 @@ export interface SafeExternalErrorDetails {
 export interface RepairAssistAnswerResult {
   answer: string;
   mode: 'openai' | 'manual-fallback';
-  fallbackReason?: 'empty_response' | 'request_failed';
+  fallbackReason?: 'empty_response' | 'missing_source_citation' | 'request_failed';
   error?: SafeExternalErrorDetails;
 }
 
@@ -149,7 +149,7 @@ export function safeExternalErrorDetails(error: unknown): SafeExternalErrorDetai
     ? record.name
     : 'UnknownError';
   const errorCode = safeErrorCode(record.code);
-  const httpStatus = safeHttpStatus(record.status);
+  const httpStatus = safeHttpStatus(record.status ?? record.statusCode);
   const timeoutText = `${errorName} ${errorCode ?? ''}`.toLowerCase();
 
   return {
@@ -228,10 +228,11 @@ export function buildManualFallbackAnswer(params: {
 export async function resolveRepairAssistAnswer(params: {
   requestAnswer: () => Promise<string | null | undefined>;
   fallbackAnswer: string;
+  approvedChunkIds: string[];
 }): Promise<RepairAssistAnswerResult> {
   try {
     const answer = (await params.requestAnswer())?.trim();
-    if (answer) {
+    if (answer && hasApprovedManualCitation(answer, params.approvedChunkIds)) {
       return {
         answer,
         mode: 'openai',
@@ -241,7 +242,7 @@ export async function resolveRepairAssistAnswer(params: {
     return {
       answer: params.fallbackAnswer,
       mode: 'manual-fallback',
-      fallbackReason: 'empty_response',
+      fallbackReason: answer ? 'missing_source_citation' : 'empty_response',
     };
   } catch (error) {
     return {
@@ -251,4 +252,13 @@ export async function resolveRepairAssistAnswer(params: {
       error: safeExternalErrorDetails(error),
     };
   }
+}
+
+export function hasApprovedManualCitation(answer: string, approvedChunkIds: string[]): boolean {
+  const approved = new Set(approvedChunkIds);
+  const citations = Array.from(
+    answer.matchAll(/\[(?:chunk\s+\d+\s*\|\s*)?([A-Za-z0-9._:-]{1,200})\]/gi),
+    (match) => match[1],
+  );
+  return citations.some((citation) => approved.has(citation));
 }
