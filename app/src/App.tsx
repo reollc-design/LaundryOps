@@ -75,7 +75,7 @@ import {
 import { openStripeBillingPortal, startStripeCheckout, type BillingPlanKey } from './firebase/billing';
 import { deleteOrganizationManual, generateManualRepairAssist, reindexOrganizationManuals, retryOrganizationManualOcr, uploadManualAndIndex, type ManualRepairAssistResult } from './firebase/manuals';
 import { createMachine, deleteMachine as deleteMachineRecord, updateMachine, updateMachineStatus, type MachineOperationalStatus } from './firebase/machines';
-import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWorkOrderPhotoBlob, updateWorkOrderDetails } from './firebase/workOrders';
+import { addWorkOrderPhotos, createWorkOrderFromDraft, deleteWorkOrder, loadWorkOrderPhotoBlob, updateWorkOrderDetails, updateWorkOrderStatus } from './firebase/workOrders';
 import { useUserProfile } from './hooks/useUserProfile';
 import { useOrganizationTrial, type OrganizationTrialState } from './hooks/useOrganizationTrial';
 import { useOrganizationMachines } from './hooks/useOrganizationMachines';
@@ -87,7 +87,15 @@ import { DEVELOPER_ACCESS_ENTITLEMENT } from './trial';
 import { buildDowntimeTrend, totalDowntimeHours, type DowntimePeriod, type DowntimeReportPeriod } from './downtime';
 import { blobToDataUrl, MAX_REPAIR_ASSIST_PHOTOS, mergeRepairAssistPhotoFiles, prepareRepairAssistImages } from './repairAssistPhotos';
 import { logOnboardingRedirect, logOnboardingWrite } from './onboardingDebug';
-import { decideOrganizationRoute, onboardingFailureMessage } from './onboardingFlow';
+import {
+  decideOrganizationRoute,
+  emptyOnboardingDraft,
+  onboardingFailureMessage,
+  onboardingProgressStorageKey,
+  parseStoredOnboardingProgress,
+  serializeStoredOnboardingProgress,
+} from './onboardingFlow';
+import { getWorkOrderEditMode, type WorkOrderEditMode } from './workOrderFlow';
 
 type TabKey = Extract<ScreenKey, 'home' | 'machines' | 'work-orders' | 'ai-assist' | 'reports'>;
 type MachineFilter = 'all' | MachineOperationalStatus;
@@ -684,18 +692,9 @@ export function App() {
   const [machineStatusOverrides, setMachineStatusOverrides] = useState<Record<string, MachineOperationalStatus>>({});
   const [machineStatusBusyId, setMachineStatusBusyId] = useState<string | null>(null);
   const [machineStatusError, setMachineStatusError] = useState<string | null>(null);
-  const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>({
-    businessName: '',
-    operatorName: '',
-    businessAddress: '',
-    ownerEmail: '',
-    locationName: '',
-    locationAddress: '',
-    machineNumber: '',
-    machineType: 'Washer',
-    machineMake: '',
-    machineModelNumber: '',
-  });
+  const [onboardingDraft, setOnboardingDraft] = useState<OwnerOnboardingDraft>(emptyOnboardingDraft);
+  const [onboardingActiveStep, setOnboardingActiveStep] = useState(0);
+  const [onboardingProgressLoadedForUserId, setOnboardingProgressLoadedForUserId] = useState<string | null>(null);
   const [pendingOnboardingOrganization, setPendingOnboardingOrganization] = useState<{
     userId: string;
     organizationId: string;
@@ -762,6 +761,15 @@ export function App() {
     }
     return machineCatalogData.find((machine) => machine.id === selectedWorkOrder.machineId) ?? null;
   }, [machineCatalogData, selectedWorkOrder?.machineId]);
+  const selectedWorkOrderEditMode = getWorkOrderEditMode({
+    active: organizationMembership.active,
+    role: organizationMembership.role,
+    canEditWorkOrder: canEditWorkOrders,
+    assignedToCurrentUser: Boolean(
+      selectedWorkOrder?.assignedUserId
+      && selectedWorkOrder.assignedUserId === authSession.user?.uid,
+    ),
+  });
   const urgentMachineData = useMemo(() => {
     if (!orgConnected) {
       return urgentMachines;
@@ -1018,6 +1026,50 @@ export function App() {
     organizationTrial.invalidOrganization,
   ]);
   useEffect(() => {
+    const userId = authSession.user?.uid ?? null;
+    if (!userId) {
+      setOnboardingProgressLoadedForUserId(null);
+      setOnboardingActiveStep(0);
+      setOnboardingDraft(emptyOnboardingDraft());
+      return;
+    }
+    if (onboardingProgressLoadedForUserId === userId) {
+      return;
+    }
+
+    let storedProgress = null;
+    try {
+      storedProgress = parseStoredOnboardingProgress(
+        window.sessionStorage.getItem(onboardingProgressStorageKey(userId)),
+        onboardingSteps.length,
+      );
+    } catch {
+      storedProgress = null;
+    }
+    if (storedProgress) {
+      setOnboardingDraft(storedProgress.draft);
+      setOnboardingActiveStep(storedProgress.activeStep);
+    } else {
+      setOnboardingDraft(emptyOnboardingDraft());
+      setOnboardingActiveStep(0);
+    }
+    setOnboardingProgressLoadedForUserId(userId);
+  }, [authSession.user?.uid, onboardingProgressLoadedForUserId]);
+  useEffect(() => {
+    const userId = authSession.user?.uid;
+    if (!userId || activeScreen !== 'owner-onboarding' || onboardingProgressLoadedForUserId !== userId) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(
+        onboardingProgressStorageKey(userId),
+        serializeStoredOnboardingProgress(onboardingActiveStep, onboardingDraft),
+      );
+    } catch {
+      // Session storage is best-effort; the onboarding write remains authoritative.
+    }
+  }, [activeScreen, authSession.user?.uid, onboardingActiveStep, onboardingDraft, onboardingProgressLoadedForUserId]);
+  useEffect(() => {
     if (selectedWorkOrderId && !workOrderQueueData.some((order) => order.id === selectedWorkOrderId)) {
       setSelectedWorkOrderId(null);
     }
@@ -1175,6 +1227,11 @@ export function App() {
         reason: 'server-onboarding-transaction-confirmed',
         hasPendingOrganization: true,
       });
+      try {
+        window.sessionStorage.removeItem(onboardingProgressStorageKey(submittingUserId));
+      } catch {
+        // Session storage is best-effort and does not control onboarding completion.
+      }
       setActiveScreen('home');
       return null;
     } catch (error) {
@@ -1462,6 +1519,39 @@ export function App() {
       setWorkOrderBusy(false);
     }
   };
+  const handleUpdateSelectedWorkOrderStatus = async (
+    status: 'planned' | 'in-progress' | 'completed',
+  ): Promise<void> => {
+    if (!selectedWorkOrder) {
+      return;
+    }
+    if (!orgConnected || !defaultOrganizationId) {
+      const message = 'Complete onboarding first before saving status updates.';
+      setWorkOrderError(message);
+      throw new Error(message);
+    }
+    if (selectedWorkOrderEditMode !== 'assigned-status') {
+      const message = 'Only the technician assigned to this maintenance record can update its status.';
+      setWorkOrderError(message);
+      throw new Error(message);
+    }
+
+    setWorkOrderError(null);
+    setWorkOrderBusy(true);
+    try {
+      await updateWorkOrderStatus({
+        organizationId: defaultOrganizationId,
+        workOrderId: selectedWorkOrder.id,
+        status,
+      });
+    } catch (error) {
+      const message = getErrorMessage(error, 'Could not save work-order status. Try again.');
+      setWorkOrderError(message);
+      throw new Error(message);
+    } finally {
+      setWorkOrderBusy(false);
+    }
+  };
   const handleAddSelectedWorkOrderPhotos = async (workOrderId: string, files: File[]): Promise<void> => {
     if (!orgConnected || !defaultOrganizationId) {
       throw new Error('Complete onboarding first before adding maintenance photos.');
@@ -1586,6 +1676,8 @@ export function App() {
                   onBack={() => setActiveScreen('welcome')}
                   draft={onboardingDraft}
                   ownerEmail={authSession.user?.email ?? 'Owner email not available'}
+                  activeStep={onboardingActiveStep}
+                  onStepChange={setOnboardingActiveStep}
                   onDraftChange={setOnboardingDraft}
                   onFinish={handleOwnerOnboardingFinish}
                 />
@@ -1745,9 +1837,10 @@ export function App() {
                     orgConnected={orgConnected}
                     organizationId={defaultOrganizationId}
                     onUpdateDetails={handleUpdateSelectedWorkOrderDetails}
+                    onUpdateStatus={handleUpdateSelectedWorkOrderStatus}
                     onAddPhotos={handleAddSelectedWorkOrderPhotos}
                     onSetMachineStatus={handleSetMachineStatus}
-                    canEditWorkOrder={canEditWorkOrders}
+                    editMode={selectedWorkOrderEditMode}
                     canChangeMachineStatus={canChangeMachineStatus}
                   />
                     )}
@@ -2230,16 +2323,19 @@ function OwnerOnboardingScreen({
   onBack,
   draft,
   ownerEmail,
+  activeStep,
+  onStepChange,
   onDraftChange,
   onFinish,
 }: {
   onBack: () => void;
   draft: OwnerOnboardingDraft;
   ownerEmail: string;
+  activeStep: number;
+  onStepChange: (step: number) => void;
   onDraftChange: (draft: OwnerOnboardingDraft) => void;
   onFinish: (draft: OwnerOnboardingDraft) => Promise<string | null>;
 }) {
-  const [activeStep, setActiveStep] = useState(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const currentStep = onboardingSteps[activeStep];
@@ -2331,7 +2427,7 @@ function OwnerOnboardingScreen({
     }
 
     setSubmitError(null);
-    setActiveStep((step) => step + 1);
+    onStepChange(activeStep + 1);
   };
   const goBack = () => {
     if (activeStep === 0) {
@@ -2339,7 +2435,7 @@ function OwnerOnboardingScreen({
       return;
     }
 
-    setActiveStep((step) => step - 1);
+    onStepChange(activeStep - 1);
   };
 
   return (
@@ -5090,9 +5186,10 @@ function WorkOrderDetailScreen({
   orgConnected,
   organizationId,
   onUpdateDetails,
+  onUpdateStatus,
   onAddPhotos,
   onSetMachineStatus,
-  canEditWorkOrder,
+  editMode,
   canChangeMachineStatus,
 }: {
   setActiveScreen: (screen: ScreenKey) => void;
@@ -5108,9 +5205,10 @@ function WorkOrderDetailScreen({
   orgConnected: boolean;
   organizationId: string | null;
   onUpdateDetails: (entry: WorkOrderDetailsEntry) => Promise<void>;
+  onUpdateStatus: (status: 'planned' | 'in-progress' | 'completed') => Promise<void>;
   onAddPhotos: (workOrderId: string, files: File[]) => Promise<void>;
   onSetMachineStatus: (machineId: string, status: MachineOperationalStatus) => Promise<void>;
-  canEditWorkOrder: boolean;
+  editMode: WorkOrderEditMode;
   canChangeMachineStatus: boolean;
 }) {
   const statusOptions: Array<'planned' | 'in-progress' | 'completed'> = ['planned', 'in-progress', 'completed'];
@@ -5141,6 +5239,7 @@ function WorkOrderDetailScreen({
   const [detailAssistantLoading, setDetailAssistantLoading] = useState(false);
   const detailAssistantRequestActiveRef = useRef(false);
   const [isDetailDirty, setIsDetailDirty] = useState(false);
+  const [isStatusDirty, setIsStatusDirty] = useState(false);
   const [loadedDetailOrderId, setLoadedDetailOrderId] = useState<string | null>(null);
   const [pendingSavedSignature, setPendingSavedSignature] = useState<string | null>(null);
   const machineOperationalStatus = machine ? toOperationalStatus(machine.status) : null;
@@ -5148,7 +5247,10 @@ function WorkOrderDetailScreen({
   const parsedLaborCost = parseUsdAmount(laborCostInput);
   const parsedOtherCost = parseUsdAmount(otherCostInput);
   const totalCost = (parsedPartsCost ?? 0) + (parsedLaborCost ?? 0) + (parsedOtherCost ?? 0);
+  const canEditWorkOrder = editMode === 'full';
+  const canUpdateStatusOnly = editMode === 'assigned-status';
   const detailInputsDisabled = busy || detailAssistantLoading || !orgConnected || pendingSavedSignature !== null || !canEditWorkOrder;
+  const statusControlDisabled = busy || detailAssistantLoading || !orgConnected || pendingSavedSignature !== null || editMode === 'read-only';
 
   useEffect(() => {
     if (!order) {
@@ -5170,6 +5272,7 @@ function WorkOrderDetailScreen({
       setDetailAssistantLoading(false);
       setPhotoError(null);
       setIsDetailDirty(false);
+      setIsStatusDirty(false);
       setLoadedDetailOrderId(null);
       setPendingSavedSignature(null);
       return;
@@ -5177,7 +5280,7 @@ function WorkOrderDetailScreen({
 
     const orderSignature = workOrderSummarySignature(order);
     const confirmedPendingSave = pendingSavedSignature === orderSignature;
-    if (loadedDetailOrderId === order.id && isDetailDirty && !confirmedPendingSave) {
+    if (loadedDetailOrderId === order.id && (isDetailDirty || isStatusDirty) && !confirmedPendingSave) {
       return;
     }
 
@@ -5204,11 +5307,13 @@ function WorkOrderDetailScreen({
     setPhotoError(null);
     setLoadedDetailOrderId(order.id);
     setIsDetailDirty(false);
+    setIsStatusDirty(false);
     if (confirmedPendingSave) {
       setPendingSavedSignature(null);
     }
   }, [
     isDetailDirty,
+    isStatusDirty,
     loadedDetailOrderId,
     order?.aiDiagnosis,
     order?.aiSource,
@@ -5275,6 +5380,18 @@ function WorkOrderDetailScreen({
       setPendingSavedSignature(editableWorkOrderSignature(savedEntry));
     } catch {
       // The parent handler displays the Firestore error in the shared record banner.
+    }
+  };
+  const submitStatusOnly = async (): Promise<void> => {
+    if (!isStatusDirty) {
+      return;
+    }
+    setDetailError(null);
+    try {
+      await onUpdateStatus(selectedStatus);
+      setIsStatusDirty(false);
+    } catch (statusError) {
+      setDetailError(getErrorMessage(statusError, 'Could not save work-order status.'));
     }
   };
 
@@ -5556,9 +5673,12 @@ function WorkOrderDetailScreen({
             value={selectedStatus}
             onChange={(event) => {
               setSelectedStatus(event.target.value as 'planned' | 'in-progress' | 'completed');
-              setIsDetailDirty(true);
+              setIsStatusDirty(true);
+              if (canEditWorkOrder) {
+                setIsDetailDirty(true);
+              }
             }}
-            disabled={detailInputsDisabled}
+            disabled={statusControlDisabled}
           >
             {statusOptions.map((statusValue) => (
               <option key={statusValue} value={statusValue}>
@@ -5567,6 +5687,9 @@ function WorkOrderDetailScreen({
             ))}
           </select>
         </label>
+          {canUpdateStatusOnly && (
+            <p className="search-hint">You can update the status of this assigned maintenance record.</p>
+          )}
       </section>
 
       <section className="content-section compact">
@@ -5756,14 +5879,26 @@ function WorkOrderDetailScreen({
         </div>
       )}
 
-      <button
-        className="primary-action sticky-action"
-        type="button"
-        disabled={detailInputsDisabled}
-        onClick={() => void submitUpdateDetails()}
-      >
-        <ClipboardCheck size={19} /> {busy ? 'Saving...' : 'Save Maintenance Record'}
-      </button>
+      {canEditWorkOrder && (
+        <button
+          className="primary-action sticky-action"
+          type="button"
+          disabled={detailInputsDisabled}
+          onClick={() => void submitUpdateDetails()}
+        >
+          <ClipboardCheck size={19} /> {busy ? 'Saving...' : 'Save Maintenance Record'}
+        </button>
+      )}
+      {canUpdateStatusOnly && (
+        <button
+          className="primary-action sticky-action"
+          type="button"
+          disabled={statusControlDisabled || !isStatusDirty}
+          onClick={() => void submitStatusOnly()}
+        >
+          <ClipboardCheck size={19} /> {busy ? 'Saving Status...' : 'Save Status'}
+        </button>
+      )}
     </div>
   );
 }

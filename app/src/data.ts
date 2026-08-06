@@ -60,6 +60,7 @@ export interface WorkOrderSummary {
   maintenanceDateEpoch?: number;
   number: string;
   machineId?: string | null;
+  assignedUserId?: string | null;
   machineNumber: string;
   machineModel: string;
   title: string;

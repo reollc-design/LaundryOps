@@ -1,6 +1,24 @@
 # LaundryOps staging bug register
 
-Last updated: 2026-08-05.
+Last updated: 2026-08-06.
+
+## Certification hold - 2026-08-06
+
+No new product defect was added during the remaining manual, OCR, AI, and
+Stripe validation pass. The following items remain unchanged and must not be
+treated as fixed:
+
+- `STG-014` is fixed in the reviewed staging working tree; hosted regression
+  evidence is still pending.
+- `STG-015` is fixed in the reviewed staging working tree; hosted regression
+  evidence is still pending.
+
+The current certification blocker is environmental/test-safety evidence rather
+than a new application bug: hosted PDF indexing calls Google Document AI,
+Repair Assist calls OpenAI, and Checkout creates Stripe Test-mode resources.
+Those live actions were not invoked without a bounded no-charge harness. Local
+regression and policy suites passed, but local passes do not close the hosted
+manual/OCR, AI, or Stripe evidence gaps.
 
 Severity: P0 = security/data-loss/billing/app-blocking; P1 = critical workflow failure; P2 = significant usability/reporting/security hardening; P3 = polish.
 
@@ -19,6 +37,7 @@ Severity: P0 = security/data-loss/billing/app-blocking; P1 = critical workflow f
 | STG-011 | P1 | Run Repair Assist with manual text containing instruction-like content or a photo with text. | Uploaded material remains source evidence, not control instructions; unsupported answers must refuse or qualify. | Previous prompt allowed general knowledge when the manual was insufficient and did not explicitly delimit untrusted manual instructions. | AI/security | FIXED IN WORKING TREE; deployment and live regression pending | Repair Assist policy test plus existing 10/10 Repair Assist suite |
 | STG-012 | P2 | Build the staging app and inspect bundle-size warnings. | Operator screens should remain responsive at expected scale. | Firebase vendor chunk is approximately 516 kB, above Vite's advisory threshold. | Performance | OPEN; non-blocking follow-up | 60+ machine/manual performance harness |
 | STG-013 | P0 | Configure a live Stripe secret in a staging Functions runtime and invoke billing. | Staging must reject live Stripe credentials before any customer, checkout, portal, or webhook operation. | Previous code accepted any non-empty Stripe secret; source now fails closed unless it matches `sk_test_...`. | Billing/security | FIXED IN WORKING TREE; runtime and live staging proof pending | Runtime-config test plus deployed Test-mode checkout evidence |
-| STG-014 | P2 | Open an assigned work order as a technician and compare UI controls with Firestore rules. | The supported technician status-only workflow should be visible and intentional. | Rules permit assigned technicians to update status-only fields, while the UI disables the entire editor. | Product/security | OPEN; needs explicit status-only UI acceptance | Live technician role matrix and status-only regression |
+| STG-014 | P2 | Open seeded assigned work order `WO-STG-ROLE-01` as technician `laundryops.staging.fixture.technician.20260806@example.com` at the new staging marker. | The supported technician status-only workflow should be visible and intentional. | The reviewed UI now exposes only Record Status and Save Status for the assigned technician; detail, photo, and AI controls remain disabled. | Product/security | FIXED IN WORKING TREE; hosted regression pending | `app/src/workOrderFlow.test.mjs`; rules emulator status-only case; hosted technician smoke test |
+| STG-015 | P2 | Sign in as a fresh synthetic account, complete step 1, continue to step 2/3, enter location data, then refresh. | Onboarding should resume the current step and preserve the unsaved draft, or clearly warn before losing it. | The reviewed UI stores progress under the authenticated staging UID in session storage, resets on user switch, and clears it after successful completion. | Product/frontend | FIXED IN WORKING TREE; hosted regression pending | `app/src/onboardingFlow.test.mjs`; hosted onboarding refresh test |
 
 No P0 has been confirmed. P1 items marked “fixed” are not release-closed until the exact staging commit is deployed and the live regression is observed.

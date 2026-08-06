@@ -281,6 +281,7 @@ export function useOrganizationWorkOrders(user: User | null, organizationId: str
             maintenanceDateEpoch: maintenanceDateEpoch ?? undefined,
             number: asString(data.number) ?? id.toUpperCase(),
             machineId,
+            assignedUserId: asString(data.assignedUserId),
             machineNumber,
             machineModel,
             title: asString(data.title) ?? 'Work order',
