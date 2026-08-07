@@ -4559,6 +4559,7 @@ function CreateWorkOrderScreen({
         machineModel: draftMachineModel,
         symptoms,
         errorCode,
+        manualId: initialAssistDraft?.aiSource?.manualId,
         machineId: selectedMachine?.id,
         machineNumber: selectedMachine?.machineNumber,
         images: await prepareRepairAssistImages(photoFiles),
@@ -5439,6 +5440,7 @@ function WorkOrderDetailScreen({
         machineModel: detailMachineModel,
         symptoms,
         errorCode,
+        manualId: aiSourceInput?.manualId,
         machineId: machine.id,
         machineNumber: machine.machineNumber,
         images: await prepareStoredRepairAssistImages(order.photoAttachments ?? []),
@@ -5941,6 +5943,7 @@ function RepairAssistScreen({
   manualModels: ManualLibraryRow[];
 }) {
   const [selectedMachineId, setSelectedMachineId] = useState('');
+  const [selectedManualId, setSelectedManualId] = useState('');
   const [symptoms, setSymptoms] = useState('');
   const [errorCode, setErrorCode] = useState('');
   const [manualGroundingEnabled, setManualGroundingEnabled] = useState(true);
@@ -5966,20 +5969,31 @@ function RepairAssistScreen({
   );
   const machineModel = useMemo(() => repairAssistMachineModel(selectedMachine), [selectedMachine]);
   const selectedMachineHasMakeModel = Boolean(selectedMachine?.make?.trim() && selectedMachine?.modelNumber?.trim());
-  const selectedModelHasIndexedManual = useMemo(() => {
-    const selectedKey = repairAssistModelKey(selectedMachine?.modelNumber ?? '');
-    if (!selectedKey) {
-      return false;
+  const matchingIndexedManuals = useMemo(() => {
+    const makeKey = repairAssistModelKey(selectedMachine?.make ?? '');
+    const modelNumberKey = repairAssistModelKey(selectedMachine?.modelNumber ?? '');
+    if (!makeKey || !modelNumberKey) {
+      return [];
     }
 
-    return manualModels.some((manual) => {
+    return manualModels.filter((manual) => {
       if (manual.status !== 'indexed') {
         return false;
       }
       const manualKey = repairAssistModelKey(`${manual.model} ${manual.title}`);
-      return Boolean(manualKey && manualKey.includes(selectedKey));
+      return manualKey.includes(makeKey) && manualKey.includes(modelNumberKey);
     });
-  }, [manualModels, selectedMachine?.modelNumber]);
+  }, [manualModels, selectedMachine?.make, selectedMachine?.modelNumber]);
+  const selectedModelHasIndexedManual = matchingIndexedManuals.length > 0;
+
+  useEffect(() => {
+    setSelectedManualId((current) => {
+      if (matchingIndexedManuals.some((manual) => manual.id === current)) {
+        return current;
+      }
+      return matchingIndexedManuals.length === 1 ? matchingIndexedManuals[0].id : '';
+    });
+  }, [matchingIndexedManuals]);
 
   const clearAssistResult = (invalidateRequest = true): void => {
     if (invalidateRequest) {
@@ -6049,6 +6063,13 @@ function RepairAssistScreen({
       return;
     }
 
+    const selectedManual = matchingIndexedManuals.find((manual) => manual.id === selectedManualId)
+      ?? (matchingIndexedManuals.length === 1 ? matchingIndexedManuals[0] : null);
+    if (!selectedManual) {
+      setAssistError('Select a manual before generating repair guidance.');
+      return;
+    }
+
     if (!symptoms.trim() && !errorCode.trim()) {
       setAssistError('Enter symptoms or an error code before using Repair Assist. Photos help confirm visible conditions.');
       return;
@@ -6062,6 +6083,7 @@ function RepairAssistScreen({
         machineModel,
         symptoms,
         errorCode,
+        manualId: selectedManual.id,
         machineId: selectedMachine.id,
         machineNumber: selectedMachine.machineNumber,
         images: await prepareRepairAssistImages(photoFiles),
@@ -6119,6 +6141,7 @@ function RepairAssistScreen({
           onClick={() => {
             onClearAssistPreset();
             setSelectedMachineId('');
+            setSelectedManualId('');
             setSymptoms('');
             setErrorCode('');
             setPhotoFiles([]);
@@ -6138,6 +6161,7 @@ function RepairAssistScreen({
             onChange={(event) => {
               const nextValue = event.target.value;
               setSelectedMachineId(nextValue);
+              setSelectedManualId('');
               setPhotoFiles([]);
               setPhotoError(null);
               clearAssistResult();
@@ -6156,6 +6180,36 @@ function RepairAssistScreen({
         </label>
         {selectedMachine && !selectedModelHasIndexedManual && selectedMachineHasMakeModel && (
           <p className="search-hint">No indexed machine manual is available for this machine yet.</p>
+        )}
+        {selectedMachine && selectedModelHasIndexedManual && (
+          <label>
+            <span>Manual source</span>
+            <select
+              value={selectedManualId}
+              onChange={(event) => {
+                setSelectedManualId(event.target.value);
+                clearAssistResult();
+              }}
+              disabled={assistBusy}
+              aria-describedby={matchingIndexedManuals.length > 1 ? 'repair-assist-manual-hint' : undefined}
+            >
+              {matchingIndexedManuals.length > 1 && (
+                <option value="" disabled>
+                  Select manual
+                </option>
+              )}
+              {matchingIndexedManuals.map((manual) => (
+                <option key={manual.id} value={manual.id}>
+                  {manual.title} ({manual.model})
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {selectedMachine && matchingIndexedManuals.length > 1 && !selectedManualId && (
+          <p id="repair-assist-manual-hint" className="search-hint" role="alert">
+            Select a manual before generating repair guidance.
+          </p>
         )}
         <label>
           <span>Symptoms (optional)</span>

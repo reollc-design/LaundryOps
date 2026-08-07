@@ -89,6 +89,7 @@ export interface ManualRepairAssistInput {
   errorCode?: string;
   machineId?: string;
   machineNumber?: string;
+  manualId?: string;
   images?: RepairAssistImageInput[];
 }
 
@@ -293,6 +294,7 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
   const machineModel = input.machineModel.trim();
   const symptoms = input.symptoms.trim();
   const errorCode = input.errorCode?.trim();
+  const manualId = input.manualId?.trim();
 
   if (!organizationId) {
     throw new Error('Missing organization ID.');
@@ -312,6 +314,7 @@ export async function generateManualRepairAssist(input: ManualRepairAssistInput)
     errorCode: errorCode || null,
     machineId: input.machineId?.trim() || null,
     machineNumber: input.machineNumber?.trim() || null,
+    manualId: manualId || null,
     images,
   });
 

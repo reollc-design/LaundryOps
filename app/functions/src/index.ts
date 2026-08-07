@@ -29,7 +29,12 @@ import {
 } from './manual-indexing.js';
 import { billingPlanFromRequest, type BillingPlanKey } from './billing-plan.js';
 import { completePendingManualOcrJobs } from './manual-ocr-worker.js';
-import { MULTIPLE_MANUALS_MATCH_ERROR, selectSingleManualMatch } from './manual-selection.js';
+import {
+  MANUAL_SELECTION_REQUIRED_ERROR,
+  ManualSelectionError,
+  selectSingleManualMatch,
+  validateExplicitManualSelection,
+} from './manual-selection.js';
 import { isApprovedManualUpload } from './manual-upload-policy.js';
 import {
   APPROVED_MANUAL_EXCERPT_END,
@@ -508,7 +513,37 @@ async function findIndexedManualForModel(params: {
   organizationId: string;
   machineModel: string;
   machine?: MachineContext | null;
+  manualId?: string;
 }) {
+  if (params.manualId) {
+    const manualRef = params.db.doc(`organizations/${params.organizationId}/manuals/${params.manualId}`);
+    const manualSnap = await manualRef.get();
+    const manualData = manualSnap.data() ?? {};
+    const manualIdentity = uniqueStrings([
+      optionalString(manualData.machineModel) ?? '',
+      optionalString(manualData.title) ?? '',
+      optionalString(manualData.machineModelKey) ?? '',
+      optionalString(manualData.machineModelCompactKey) ?? '',
+    ]).join(' ');
+
+    validateExplicitManualSelection({
+      selectedManualId: manualSnap.exists ? manualSnap.id : undefined,
+      selectedOrganizationId: manualSnap.exists ? params.organizationId : undefined,
+      requestedOrganizationId: params.organizationId,
+      indexed: manualSnap.exists && manualData.status === 'indexed',
+      matchesRequestedModel: Boolean(
+        params.machine
+        && manualModelMatchesMachine(manualIdentity, {
+          make: params.machine.make,
+          modelNumber: params.machine.modelNumber,
+          model: params.machine.model,
+        }),
+      ),
+    });
+
+    return manualSnap;
+  }
+
   const modelValues = uniqueStrings([
     params.machineModel,
     params.machine?.model ?? '',
@@ -553,7 +588,12 @@ async function findIndexedManualForModel(params: {
   const candidates = indexedDocs
     .map((docSnap) => {
       const data = docSnap.data();
-      const manualModel = optionalString(data.machineModel) ?? optionalString(data.title) ?? docSnap.id;
+      const manualModel = uniqueStrings([
+        optionalString(data.machineModel) ?? '',
+        optionalString(data.title) ?? '',
+        optionalString(data.machineModelKey) ?? '',
+        optionalString(data.machineModelCompactKey) ?? '',
+      ]).join(' ');
       const manualKey = compactKey([
         manualModel,
         optionalString(data.title) ?? '',
@@ -592,14 +632,7 @@ async function findIndexedManualForModel(params: {
     .sort((a, b) => b.score - a.score || a.docSnap.id.localeCompare(b.docSnap.id));
 
   candidates.forEach((candidate) => matchingManuals.set(candidate.docSnap.id, candidate.docSnap));
-  try {
-    return selectSingleManualMatch(matchingManuals.values());
-  } catch (error) {
-    if (error instanceof Error && error.message === MULTIPLE_MANUALS_MATCH_ERROR) {
-      throw error;
-    }
-    throw new Error(MULTIPLE_MANUALS_MATCH_ERROR);
-  }
+  return selectSingleManualMatch(matchingManuals.values());
 }
 
 function manualStatusFromValue(value: unknown): ManualStatus {
@@ -1295,6 +1328,10 @@ const CLIENT_SAFE_ERROR_MESSAGES = new Set([
   'Enter symptoms or an error code before using Repair Assist.',
   'Machine make and model number are required before Repair Assist can select the correct manufacturer manual.',
   'No indexed manual matches this machine model number. Upload and index the manufacturer repair manual using the exact model number first.',
+  MANUAL_SELECTION_REQUIRED_ERROR,
+  'The selected manual was not found in this organization.',
+  'The selected manual does not have a valid indexed version.',
+  'The selected manual does not match this machine manufacturer and model.',
   'Manual is indexed but has no readable stored chunks.',
   'The selected manual does not contain that error code. Confirm the manual is the correct manufacturer repair manual, then try again.',
   'The selected manual does not contain enough source text for this repair request.',
@@ -2637,6 +2674,7 @@ export const generateRepairAssist = onRequest(
       const symptoms = optionalStringWithMaxLength(request.body?.symptoms, 'symptoms', 2000) ?? '';
       const errorCode = optionalStringWithMaxLength(request.body?.errorCode, 'errorCode', 100) ?? null;
       const machineId = optionalPathSafeDocumentId(request.body?.machineId, 'machineId');
+      const manualId = optionalPathSafeDocumentId(request.body?.manualId, 'manualId');
       const machineNumber = optionalStringWithMaxLength(request.body?.machineNumber, 'machineNumber', 100);
       const images = parseRepairAssistImages(request.body?.images);
       const totalImageBytes = images.reduce((total, image) => total + image.byteLength, 0);
@@ -2673,6 +2711,7 @@ export const generateRepairAssist = onRequest(
         organizationId,
         machineModel,
         machine,
+        manualId,
       });
 
       if (!manualDoc) {
@@ -2681,7 +2720,7 @@ export const generateRepairAssist = onRequest(
       stage = 'manual_selected';
       logger.info('repair_assist_stage', { stage });
 
-      const manualData = manualDoc.data();
+      const manualData = (manualDoc.data() ?? {}) as Record<string, unknown>;
       const chunks = await readManualChunks({
         manualRef: manualDoc.ref,
         manualData,
@@ -2781,7 +2820,10 @@ export const generateRepairAssist = onRequest(
         ...safeExternalErrorDetails(error),
       });
       const message = clientSafeErrorMessage(error, 'Could not generate repair guidance.', false);
-      writeError(response, httpStatusForError(error, 400), 'repair_assist_failed', message);
+      const code = error instanceof ManualSelectionError
+        ? error.code
+        : 'repair_assist_failed';
+      writeError(response, httpStatusForError(error, 400), code, message);
     }
   }),
 );

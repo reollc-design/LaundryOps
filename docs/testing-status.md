@@ -1,15 +1,106 @@
 # LaundryOps staging testing status
 
-Last updated: 2026-08-05.
+Last updated: 2026-08-06.
+
+## IAM grant and one-upload retest - 2026-08-06 15:35:26 -04:00
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Exact staging IAM grant | PASS | `laundryops-staging` / `323299053901`; only `roles/firebaserules.firestoreServiceAgent` was added to `service-323299053901@firebase-rules.iam.gserviceaccount.com`. |
+| IAM propagation | PASS | After a 45-second wait, read-only policy verification found the exact unconditioned binding present. |
+| Existing synthetic owner | PASS | UID `Nyfpq9nTfoTDXO1TopYMOEqQGEp1` and organization `STG-PROVIDER-20260806-NYFPQ9NT` were reused. |
+| One manual upload retest | FAIL / BLOCKED | The exact path ending in `ngZNuEukLAorUkStBsEF/STG-TestCo-TEST-ROLE-01-text.pdf` returned `storage/unauthorized` in the hosted UI. |
+| OCR and Repair Assist | NOT RUN | Stopped immediately after the required upload failed; no Document AI or OpenAI request occurred. |
+
+The authorized IAM binding is present, but Storage authorization still fails
+for the authenticated synthetic owner. No retry, code change, rules change,
+deployment, or additional IAM change was made.
+
+## Storage authorization diagnosis - 2026-08-06 14:26:15 -04:00
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Project and bucket | PASS | Local env, hosted bundle, workflow, and deployed configuration resolve to `laundryops-staging` and `laundryops-staging.firebasestorage.app`. |
+| Auth context | PASS | UID `Nyfpq9nTfoTDXO1TopYMOEqQGEp1`; organization `STG-PROVIDER-20260806-NYFPQ9NT`; profile default organization, owner UID, and active owner membership match. |
+| Trial/onboarding gate | PASS | Organization is `trialing` with `trialEndsAt=2026-08-20T17:15:52.418Z`; account is authenticated and fully provisioned. |
+| Client/backend/rules path | PASS | Client uses the Function-returned path; Function and deployed rule use `orgs/{orgId}/manuals/{uid}/{manualId}/{fileName}`. |
+| Local/deployed Storage rules | PASS | Active `firebase.storage` release source matches local `app/storage.rules`; PDF, MIME, size, role, organization, and trial checks are intentionally restrictive and aligned. |
+| Bounded upload authorization | FAIL / BLOCKED | The two already-used attempts returned `storage/unauthorized`; no third attempt was made and no PDF object exists. |
+
+The exact blocker is the missing cross-service Firebase Rules binding in
+`laundryops-staging`: the read-only project IAM policy has no
+`roles/firebaserules.firestoreServiceAgent` grant for
+`service-323299053901@firebase-rules.iam.gserviceaccount.com`. The deployed
+Storage rules depend on `firestore.exists` and `firestore.get` to authorize
+the organization and membership, so the live request is denied even though
+the path, bucket, identity, role, and trial are correct. No IAM change was
+made under this task's scope. OCR and grounded Repair Assist remain NOT
+VERIFIED; provider request counts for this diagnosis are Document AI `0/2`
+and OpenAI `0/3`.
+
+Required next action: a staging administrator must grant only that exact role
+to that exact Firebase Rules service agent, verify propagation, and then run
+one bounded upload. Do not change Storage rules or retry before verification.
+
+## Current authoritative inventory and P2 retests — 2026-08-06 12:36:24 -04:00
+
+- Deployment remains accepted as successful; no redeploy occurred.
+- Project: `laundryops-staging`; hosted marker:
+  `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`.
+- Read-only `functions:list` evidence: 19 active Functions in `us-central1`;
+  12 approved Functions present; seven retained legacy Functions present;
+  zero missing and zero unexpected. `createStripeCheckoutSession` is active.
+- The false-negative inventory check was corrected locally in the staging-only
+  workflow by replacing `grep -q` with a full-stream fixed-string match. The
+  workflow was not redeployed.
+- STG-014: **PASS**. Fresh synthetic account UID
+  `jrmbzy7daFZwfF8CE2VAvXfjL2S2` loaded the isolated organization
+  `STG-014-TECH-20260806-JRMBZY7D` at the hosted staging URL. The assigned
+  `STG-014-WORKORDER` showed status-only controls with detail fields disabled;
+  changing `Planned` to `In Progress` saved successfully. Read-only Firestore
+  verification matched `status=in-progress`, `statusLabel=In Progress`, and
+  `updatedBy=jrmbzy7daFZwfF8CE2VAvXfjL2S2`.
+- STG-015: **PASS**. Live hosted onboarding remained on step `2/3` and
+  preserved both synthetic location fields after refresh.
+- No Function was changed or deleted. The synthetic account and provider-test
+  records created for this run were preserved. Stripe was used only in bounded
+  Test/Sandbox mode; no OpenAI or Document AI call occurred.
+- `agent.md` is absent; protected `AGENTS.md` was not modified.
+
+## Bounded live provider integrations - 2026-08-06 14:01:21 -04:00
+
+Environment: `laundryops-staging`; hosted marker
+`22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`; synthetic provider workspace
+`STG-PROVIDER-20260806-NYFPQ9NT`.
+
+| Area | Result | Evidence |
+| --- | --- | --- |
+| Text PDF upload/index | FAIL / BLOCKED | Two controlled attempts both returned Storage `storage/unauthorized`; two failed manual metadata records remain with `status=missing`; no file object or OCR request was created. |
+| Scanned one-page OCR | NOT VERIFIED | Stopped before OCR because the required Storage upload path is blocked. Document AI requests used: 0/2. |
+| Wrong-model rejection | NOT VERIFIED | Could not reach model validation after Storage rejection. |
+| Missing-manual Repair Assist | PASS | Hosted UI refused with the explicit no-indexed-manual message. No grounded answer was generated. |
+| Grounded Repair Assist/citations/photo | NOT VERIFIED | Requires a successfully indexed matching manual. OpenAI requests used: 0 evidenced. |
+| Stripe Test mode | PASS | One `cs_test_...` Checkout session; Checkout and Billing Portal showed Sandbox/Test mode. |
+| Stripe Firestore webhook | PASS | One synthetic customer and subscription persisted; `customer.subscription.created` was recorded. |
+| Stripe duplicate protection | PASS | Account page switched to Manage Billing; exactly one Firestore subscription record exists. |
+| Stripe cancellation | PASS | Same subscription showed “Cancels Aug 20”; `customer.subscription.updated` was recorded. |
+
+No uncontrolled retries were made. No production, IAM, deployment, source code,
+OpenAI, or live Stripe resource was touched.
 
 ## Release identity
 
 - Branch: `feature/stripe-checkout-dedup`.
 - Preflight baseline commit: `19671120e882909b1a3159ad64505a267fcce2e6`.
 - Certified staging release commit: `b8c9ad58584c1be3f580d69dda6c7ec517f2046c`.
+- Current STG-014/STG-015 commit: `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`.
+- Push: succeeded to `origin/feature/stripe-checkout-dedup`.
+- Hosted marker: `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`.
 - Firebase project: `laundryops-staging`.
 - Hosting URL: [laundryops-staging.web.app](https://laundryops-staging.web.app/).
-- Stripe mode: staging Test/Sandbox configuration; no live session, card, customer, or subscription was created in this run.
+- Stripe mode: staging Test/Sandbox configuration; one synthetic test customer,
+  one test subscription, and one `cs_test_...` Checkout session were used. No
+  live Stripe resource was created.
 - Existing working-tree changes and unrelated untracked repro artifacts were present before this run and were preserved.
 
 ## Verified in this run
@@ -33,7 +124,7 @@ Last updated: 2026-08-05.
 | Signed-out staging shell | PASS | Live public page loaded as LaundryOps with onboarding/sign-in controls |
 | Responsive shell | PASS | 390x844 and 430x844 observations; no browser console errors in captured checks |
 | Staging identity | PASS | Hosted authenticated snapshot visibly showed `Cloud mode / laundryops-staging`; synthetic account was already present and was not created or changed |
-| Staging Function/Hosting inventory | PASS | Staging workflow run 31056051294 succeeded; hosted page returned HTTP 200 with the exact release marker; Firebase inventory showed all 12 approved current Functions and seven retained legacy Functions |
+| Staging Function/Hosting inventory | PASS with workflow verification defect | Run 31109412248 deployed staging Functions/rules/Storage/Hosting; hosted page returned HTTP 200 with the exact marker; independent `functions:list` showed 19 active Functions, including all 12 current Functions and seven retained legacy Functions. The workflow's final grep falsely reported `createStripeCheckoutSession` missing. |
 
 ## Synthetic data record
 
@@ -45,7 +136,9 @@ Last updated: 2026-08-05.
 
 - The committed staging patch is proven live at the hosted marker; the two report edits in the working tree are documentation-only and are not part of the deployed commit.
 - Authenticated live flows for onboarding, role personas, manuals, OCR, Repair Assist, expired trial, and billing remain incomplete because the Chrome authenticated tab became intermittently unavailable; no credentials or MFA were requested.
-- Stripe Checkout has not been opened in this run. If tested later, the session must be `cs_test_...` and the page must visibly show Test/Sandbox.
+- One Stripe Checkout session was opened and completed in Test/Sandbox mode;
+  the session was `cs_test_...`, the page showed Sandbox, and the same test
+  subscription was later canceled at period end.
 - Document AI/OpenAI runtime latency, Secret Manager IAM permissions, App Check, throttled/offline behavior, 60+ machine rendering, and full browser route coverage remain open.
 - Production-reference scanning of the deployed asset bundle passed in the staging workflow.
 - Local build warning remains: the Firebase vendor chunk is approximately 516 kB, above Vite's 500 kB advisory threshold; this is tracked as a performance follow-up, not a release-security failure.
@@ -53,7 +146,11 @@ Last updated: 2026-08-05.
 
 ## Current result
 
-**READY FOR STAGING TEST.** The reviewed staging commit is deployed, the hosted marker matches, the exact live Function inventory is reconciled, and local quality gates pass. Authenticated synthetic smoke testing and the larger certification matrix are not complete, so this is not a production-release decision.
+**NO-GO FOR FULL PROVIDER CERTIFICATION.** The reviewed staging commit and
+independent Function inventory are complete. Stripe Test-mode and missing-manual
+Repair Assist checks passed, but Storage authorization blocked manual upload,
+OCR, wrong-model live rejection, grounded Repair Assist, citations, and photo
+validation. This is not a production-release decision.
 
 ## Focused live role smoke-test update — 2026-08-06
 
@@ -184,6 +281,46 @@ modified.
 
 STAGING TESTS BLOCKED - live Document AI/OCR, OpenAI Repair Assist, and Stripe Test-mode evidence require external provider/resource calls without a bounded no-charge staging harness.
 
+## Authoritative Storage root-cause correction - 2026-08-06 15:44:52 -04:00
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Hosted bucket and project | PASS | Firebase Storage Rules console for `laundryops-staging` selected `laundryops-staging.firebasestorage.app`; hosted marker is `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`. |
+| Exact attempted path | PASS | `orgs/STG-PROVIDER-20260806-NYFPQ9NT/manuals/Nyfpq9nTfoTDXO1TopYMOEqQGEp1/ngZNuEukLAorUkStBsEF/STG-TestCo-TEST-ROLE-01-text.pdf`. |
+| Authenticated identity | PASS / PARTIAL | Hosted UI and Authentication console showed the synthetic owner email and UID `Nyfpq9nTfoTDXO1TopYMOEqQGEp1`; email verification and custom claims were not exposed by the read-only UI and are not referenced by Storage rules. |
+| Profile, membership, trial | PASS | Prior read-only Firestore evidence shows matching owner/profile organization, active owner membership, and unexpired trial through `2026-08-20T17:15:52.418Z`. |
+| Deployed rules | PASS | Console displayed the deployed Storage rules and the active warning that cross-service database calls are not configured. |
+| Local rules/client path | PASS | Local rules, client Function-returned path, and bucket match; local emulator suite passed 26/26. |
+| Token freshness | NOT INDEPENDENTLY VERIFIED | No browser token or session store was inspected; the deterministic project warning explains the denial without requiring a stale-token hypothesis. |
+| Hosted authorization | FAIL / BLOCKED | The console warning means `firestore.exists`/`firestore.get` cannot authorize the Storage request, so the manual write condition evaluates to denial. |
+
+The earlier missing-IAM-binding conclusion is superseded. The exact root
+cause is **staging Firebase Storage-to-Firestore cross-service Rules
+integration not enabled**. The Firebase Console `Fix issue` flow remains
+untouched; no additional IAM role, rules change, deployment, or upload was
+made.
+
+## STG-014/STG-015 deployment follow-up - 2026-08-06
+
+- Commit: `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`.
+- Commit message: `fix: repair technician status and onboarding refresh persistence`.
+- Automated verification after commit: frontend lint PASS; onboarding and
+  work-order regression tests PASS (`11/11` and `4/4`); Functions suite PASS;
+  Firestore/Storage rules PASS (`26/26`) using the explicit
+  `laundryops-staging` emulator target and bundled supported Java runtime.
+- Deployment result: staging resources deployed in workflow run
+  [31109412248](https://github.com/reollc-design/LaundryOps/actions/runs/31109412248);
+  the final workflow inventory check returned red on a false-negative
+  `createStripeCheckoutSession` lookup.
+- Hosted marker: verified as
+  `22a92f3b963c6efd4f4e6f99b01adc9199d4a9db`.
+- STG-014 live retest: NOT VERIFIED; the current Chrome session is not the
+  seeded technician and no approved technician password is available.
+- STG-015 live retest: NOT VERIFIED; the current Chrome session is not the
+  fresh-onboarding fixture and no approved fresh-fixture password is available.
+- No Stripe, OpenAI, Document AI, production, IAM, fixture, or Chrome-profile
+  action occurred.
+
 ## STG-014/STG-015 remediation - 2026-08-06
 
 The focused staging patch is limited to the two requested P2 defects. No
@@ -195,5 +332,56 @@ temporary Chrome profile was touched.
 | STG-014 technician assigned-work-order status UI | PASS: assigned active technicians resolve to `assigned-status`; unassigned/inactive users remain read-only; `4/4` work-order regression tests, lint, and rules suite pass | Pending deployment and one live status update on seeded `WO-STG-ROLE-01` |
 | STG-015 onboarding refresh loses step/draft | PASS: UID-scoped session persistence, corrupt/stale-value rejection, user-switch reset, and completion cleanup; `11/11` onboarding regression tests and lint pass | Pending deployment and one live refresh during fresh synthetic onboarding |
 
-The staging workflow will provide the build gate and hosted release marker;
-the existing synthetic fixtures remain preserved for the live checks.
+Independent staging evidence: `functions:list` returned 19 ACTIVE Functions,
+including `createStripeCheckoutSession`, the four required remediation
+Functions, and all seven retained legacy Functions. The existing synthetic
+fixtures remain preserved for the live checks.
+
+## Repair Assist backend diagnosis - 2026-08-07
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Logging path | PASS | Google Cloud Logs Explorer was queried in `laundryops-staging` for both `cloud_function` and `cloud_run_revision` resources. The Cloud Run trace query returned the current invocation; the Cloud Functions resource query returned no rows. |
+| Active revision and runtime | PASS | Cloud Run service `generaterepairassist`, region `us-central1`, revision `generaterepairassist-00005-hij` receiving 100% traffic; runtime service account `323299053901-compute@developer.gserviceaccount.com`. |
+| Secret binding/access status | PASS / NOT EXERCISED | Revision configuration binds `projects/laundryops-staging/secrets/OPENAI_API_KEY:1`; Secret Manager shows version 1 enabled. The failed request never reached `openai_request`, so runtime secret retrieval was not exercised and no secret value was read. |
+| Model and endpoint | PASS | No `OPENAI_MANUAL_MODEL` runtime override is present, so source default `gpt-5.5` applies. The source constructs the OpenAI client without a custom base URL, so the SDK default endpoint applies. No provider request was made for this trace. |
+| Auth/org context | PASS | Existing synthetic owner UID `Nyfpq9nTfoTDXO1TopYMOEqQGEp1` and organization `STG-PROVIDER-20260806-NYFPQ9NT` were reused. Profile, owner membership, completed onboarding, and future trial were previously verified. |
+| Selected manual/index/citations | PASS | Manual `EdHy4QUsylAuPA8CoqXx` is `indexed`, model `TestCo TEST-ROLE-01`, one chunk, active chunk collection `chunks_vmsj5rdko_l466g4`, active error-code collection `errorCodes_vmsj5rdko_h82nlf`, and one linked machine. Its `e01` index maps aliases including `E01`, `E-01`, and `E 01` to `chunk-001`. A second indexed scanned manual `c1suyjJgksBvJAZkvxLI` has the same model, producing an ambiguous match. |
+| Failure stage | FAIL | The safe error payload contained `errorName=Error`, `stage=machine_resolved`, and `timeout=false`; the Cloud Run request returned HTTP 400 in 882 ms. No provider status/code was present because no provider call occurred. |
+
+Diagnosis: **application logic - ambiguous indexed manual selection**. The backend intentionally fails closed when more than one indexed manual matches a model. This is not a secret-access, provider/API, authorization, missing-chunk, or timeout failure. No OpenAI request was retried or made during this diagnosis.
+
+## STG-017 focused remediation checkpoint - 2026-08-07 14:12 -04:00
+
+| Test / evidence | Environment | Result |
+| --- | --- | --- |
+| Duplicate indexed manuals without selection | Local Functions regression suite | PASS - stable `manual_selection_required` code/message |
+| Explicit valid manual selection | Local Functions regression suite | PASS - selected manual is returned and validated |
+| Wrong-organization manual | Local Functions regression suite | PASS - selection is rejected as not found |
+| Manufacturer/model mismatch | Local Functions regression suite using production matcher | PASS - mismatch rejected |
+| Exactly one indexed match | Local Functions regression suite | PASS - single match may auto-select |
+| UI wiring | Local TypeScript lint and staging build | PASS - selector sends `manualId` |
+| Full Functions tests | Local staging code | PASS |
+| Firestore/Storage rules | Local emulators with project/bucket set to `laundryops-staging` | PASS - 26/26 |
+| Hosted marker after this patch | `laundryops-staging` | NOT RUN - commit and focused deployment are pending |
+| One bounded live Repair Assist request with `EdHy4QUsylAuPA8CoqXx` | `laundryops-staging` | NOT RUN - deployment is pending; no provider call made |
+
+Current release state: **STAGING DEPLOYMENT BLOCKED PENDING COMMIT**. The
+focused Hosting build can only carry a truthful reviewed marker after this
+working-tree patch is committed. No source, IAM, secret, production, or
+provider action was taken to bypass that control.
+
+## Bounded provider retest - 2026-08-06
+
+| Test | Environment / input | Result | Evidence |
+| --- | --- | --- | --- |
+| Storage cross-service authorization | `laundryops-staging`; hosted Storage Rules console | PASS | Warning, `Fix issue`, and `Attach permissions` were absent after the authorized staging action. Upload was then tested once per approved bounded flow. |
+| Text manual upload/index | Owner fixture; `STG-TestCo-TEST-ROLE-01-text.pdf`; model `TestCo TEST-ROLE-01` | PASS | Hosted UI: `Manual uploaded and indexed`, `Indexed`, one page, one machine using the model. |
+| Scanned one-page OCR | Owner fixture; `STG-TestCo-TEST-ROLE-01-scanned.pdf`; same model | PASS | Hosted UI: `Indexed`, one page, one machine using the model. This was the second and final bounded manual-index/OCR action; no further OCR request was made. |
+| Wrong-model rejection | Synthetic wrong-model PDF | NOT VERIFIED | No third Document AI/OCR request or uncontrolled upload was made. Local fixture preserved. |
+| Grounded Repair Assist | Owner fixture; `STG-PROVIDER-01`, `E01`, indexed manual selected | FAIL | Hosted UI returned `Repair Assist failed` / `Could not generate repair guidance`; no answer or citation was produced. One OpenAI-backed request only; no retry. |
+| Repair Assist backend evidence | Explicit `functions:log` for `generateRepairAssist`, staging project/config | NOT VERIFIED | Log retrieval timed out twice; exact backend/provider cause remains unknown. |
+
+No Stripe, production, IAM, source, rules, deployment, or fixture-cleanup
+action occurred during this pass. The remaining provider blocker is the failed
+grounded Repair Assist request and the unavailable backend log evidence.
