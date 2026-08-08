@@ -53,6 +53,7 @@ import {
   buildRepairAssistInputContent,
   buildManualFallbackAnswer,
   OPENAI_REPAIR_ASSIST_TIMEOUT_MS,
+  REPAIR_ASSIST_FUNCTION_OPTIONS,
   parseRepairAssistImages,
   resolveRepairAssistAnswer,
   safeExternalErrorDetails,
@@ -2655,7 +2656,7 @@ export const deleteOrganizationManual = onRequest(
 );
 
 export const generateRepairAssist = onRequest(
-  { secrets: [openAiApiKey], timeoutSeconds: 120 },
+  { secrets: [openAiApiKey], ...REPAIR_ASSIST_FUNCTION_OPTIONS },
   withAllowedCors(async (request: Request, response: Response) => {
     let stage = 'request_received';
     logger.info('repair_assist_stage', { stage });

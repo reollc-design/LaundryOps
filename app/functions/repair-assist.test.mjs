@@ -5,6 +5,7 @@ import {
   hasApprovedManualCitation,
   MAX_REPAIR_ASSIST_IMAGE_BYTES,
   OPENAI_REPAIR_ASSIST_TIMEOUT_MS,
+  REPAIR_ASSIST_FUNCTION_OPTIONS,
   parseRepairAssistImages,
   resolveRepairAssistAnswer,
   safeExternalErrorDetails,
@@ -225,7 +226,11 @@ test('safe error details preserve a safe HTTP status without exposing upstream t
 
 test('OpenAI timeout stays below the Function timeout budget', () => {
   assert.equal(OPENAI_REPAIR_ASSIST_TIMEOUT_MS, 45_000);
-  assert.equal(OPENAI_REPAIR_ASSIST_TIMEOUT_MS < 120_000, true);
+  assert.deepEqual(REPAIR_ASSIST_FUNCTION_OPTIONS, {
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  });
+  assert.equal(OPENAI_REPAIR_ASSIST_TIMEOUT_MS < (REPAIR_ASSIST_FUNCTION_OPTIONS.timeoutSeconds * 1000), true);
 });
 
 let failures = 0;

@@ -1,4 +1,8 @@
 export const OPENAI_REPAIR_ASSIST_TIMEOUT_MS = 45_000;
+export const REPAIR_ASSIST_FUNCTION_OPTIONS = {
+  timeoutSeconds: 120,
+  memory: '512MiB',
+} as const;
 export const MAX_REPAIR_ASSIST_IMAGES = 3;
 export const MAX_REPAIR_ASSIST_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_REPAIR_ASSIST_TOTAL_IMAGE_BYTES = 15 * 1024 * 1024;
